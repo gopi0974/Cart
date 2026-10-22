@@ -1,0 +1,32 @@
+# Node & Frontend dependencies
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+.vite/
+
+# Python & Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/smartcart.db*
+*.db
+*.sqlite3
+.pytest_cache/
+uploads/evidence/*
+!uploads/evidence/.gitkeep
+
+# Environment & Local Secrets
+.env
+.env.local
+.env.*.local
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
