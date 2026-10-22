@@ -1,14 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck, Battery,
-  Wifi, LogOut, ChevronRight, HelpCircle, ShoppingCart, RefreshCw
+  Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck,
+  LogOut, ChevronRight, ShoppingCart, RefreshCw, Tag
 } from 'lucide-react';
-import { CartSession, CartItem, ActiveWarning } from '../types';
+import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { CheckoutModal } from './CheckoutModal';
 import { api } from '../services/api';
 import { audioFeedback } from '../services/audioFeedback';
+import { useTranslation } from '../services/i18n';
 
 interface Props {
   session: CartSession;
@@ -22,6 +23,11 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   const [scannerMode, setScannerMode] = useState<'ADD' | 'REMOVE'>('ADD');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [couponCode, setCouponCode] = useState('');
+  const [couponLoading, setCouponLoading] = useState(false);
+  const [couponFeedback, setCouponFeedback] = useState<{ text: string; success: boolean } | null>(null);
+
+  const { t } = useTranslation();
 
   // Sync state & connect to Cart WebSocket
   useEffect(() => {
@@ -31,7 +37,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
-          const { event: evtType, data } = payload;
+          const { event: evtType } = payload;
 
           if (evtType === 'ITEM_VERIFIED') {
             audioFeedback.playItemVerified();
@@ -85,18 +91,41 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   };
 
+  const handleApplyCoupon = async () => {
+    if (!couponCode.trim()) return;
+    setCouponLoading(true);
+    setCouponFeedback(null);
+    try {
+      const res = await api.applyCoupon(session.id, couponCode.trim());
+      setCouponFeedback({
+        text: `Coupon applied: Rs.${res.discount_amount.toFixed(2)} off! (${res.description})`,
+        success: true
+      });
+      audioFeedback.playItemVerified();
+      await refreshSession();
+    } catch (err: any) {
+      setCouponFeedback({
+        text: err.message || 'Invalid coupon code. Try WELCOME10 or SUPER50.',
+        success: false
+      });
+      audioFeedback.playWarning();
+    } finally {
+      setCouponLoading(false);
+    }
+  };
+
   const openAddScanner = () => {
     setScannerMode('ADD');
     setScannerOpen(true);
   };
 
-  const openRemoveScanner = (targetBarcode?: string) => {
+  const openRemoveScanner = () => {
     setScannerMode('REMOVE');
     setScannerOpen(true);
   };
 
   return (
-    <div className="max-w-md mx-auto min-h-screen flex flex-col justify-between pb-32 animate-fade-in">
+    <div className="max-w-md mx-auto min-h-screen flex flex-col justify-between pb-36 animate-fade-in">
       {/* Top Cart Status Header */}
       <div className="sticky top-0 z-20 glass-panel border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between shadow-sm">
         <div className="flex items-center gap-2.5">
@@ -146,7 +175,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         {/* Section Heading */}
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-            Cart Items ({session.items.length})
+            {t.cartItems} ({session.items.length})
           </h2>
           <span className="text-xs text-slate-400 flex items-center gap-1">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
@@ -161,22 +190,22 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
               <ShoppingCart className="w-8 h-8" />
             </div>
             <h3 className="font-semibold text-slate-800 dark:text-slate-200 text-sm">
-              Your cart is empty
+              {t.emptyCartTitle}
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-xs mx-auto">
-              Tap "Scan Barcode" below to scan your first grocery item and place it into the cart.
+              {t.emptyCartDesc}
             </p>
             <button
               onClick={openAddScanner}
               className="mt-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-md shadow-emerald-600/20 inline-flex items-center gap-1.5"
             >
               <Camera className="w-4 h-4" />
-              Scan Item
+              {t.scanBarcode}
             </button>
           </div>
         ) : (
           <div className="space-y-3">
-            {session.items.map((item) => (
+            {session.items.map((item: CartItem) => (
               <div
                 key={item.id}
                 className={`bg-white dark:bg-[#131B2E] border rounded-2xl p-3.5 shadow-sm transition-all flex items-start gap-3 relative overflow-hidden ${
@@ -220,7 +249,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                     {item.status === 'VERIFIED' && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800/40">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                        VERIFIED BY AI
+                        {t.verifiedStatus}
                         {item.confidence_score && (
                           <span className="opacity-75 font-mono text-[10px]">
                             ({(item.confidence_score * 100).toFixed(0)}%)
@@ -232,27 +261,63 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                     {item.status === 'PENDING' && (
                       <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
                         <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                        PENDING • Place item in cart
+                        {t.pendingStatus}
                       </span>
                     )}
 
                     {item.status === 'WARNING_MISMATCH' && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
                         <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                        MISMATCH DETECTED
+                        {t.mismatchStatus}
                       </span>
                     )}
 
                     {item.status === 'WARNING_UNSCANNED' && (
                       <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
                         <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                        UNSCANNED ITEM
+                        {t.unscannedStatus}
                       </span>
                     )}
                   </div>
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Promo Code Application Box */}
+        {session.items.length > 0 && (
+          <div className="mt-4 p-3.5 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                <Tag className="w-3.5 h-3.5 text-emerald-500" />
+                {t.coupons}
+              </span>
+              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
+                Try: WELCOME10 or SUPER50
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={couponCode}
+                onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                placeholder="PROMO CODE"
+                className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs font-mono uppercase focus:ring-2 focus:ring-emerald-500 outline-none"
+              />
+              <button
+                onClick={handleApplyCoupon}
+                disabled={couponLoading || !couponCode.trim()}
+                className="bg-slate-900 dark:bg-slate-800 hover:bg-emerald-600 dark:hover:bg-emerald-600 text-white text-xs font-semibold px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
+              >
+                {couponLoading ? '...' : t.apply}
+              </button>
+            </div>
+            {couponFeedback && (
+              <div className={`text-[11px] font-medium ${couponFeedback.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
+                {couponFeedback.text}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -262,12 +327,18 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         {/* Live Running Total Summary */}
         <div className="flex items-center justify-between mb-3 px-1 text-xs">
           <div className="text-slate-500 dark:text-slate-400">
-            Subtotal: <span className="font-mono text-slate-800 dark:text-slate-200">₹{session.subtotal_amount.toFixed(2)}</span>
+            {t.subtotal}: <span className="font-mono text-slate-800 dark:text-slate-200">₹{session.subtotal_amount.toFixed(2)}</span>
             <span className="mx-1.5">•</span>
-            Tax: <span className="font-mono text-slate-800 dark:text-slate-200">₹{session.total_tax.toFixed(2)}</span>
+            {t.tax}: <span className="font-mono text-slate-800 dark:text-slate-200">₹{session.total_tax.toFixed(2)}</span>
+            {session.total_discount > 0 && (
+              <>
+                <span className="mx-1.5">•</span>
+                <span className="text-emerald-600 font-mono">-₹{session.total_discount.toFixed(2)}</span>
+              </>
+            )}
           </div>
           <div className="font-display font-bold text-base text-slate-900 dark:text-white">
-            Total: <span className="font-mono text-emerald-600 dark:text-emerald-400">₹{session.total_amount.toFixed(2)}</span>
+            {t.total}: <span className="font-mono text-emerald-600 dark:text-emerald-400">₹{session.total_amount.toFixed(2)}</span>
           </div>
         </div>
 
@@ -279,7 +350,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             className="flex-1 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white font-semibold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-all text-sm"
           >
             <Camera className="w-5 h-5 text-emerald-400" />
-            Scan Barcode
+            {t.scanBarcode}
           </button>
 
           {/* Pay Button with Verification Guard */}
@@ -297,7 +368,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                 : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed shadow-none'
             }`}
           >
-            <span>Pay ₹{session.total_amount.toFixed(2)}</span>
+            <span>{t.pay} ₹{session.total_amount.toFixed(2)}</span>
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>

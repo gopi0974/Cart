@@ -108,10 +108,32 @@ def run_all_tests():
     assert admin_ov["total_carts"] >= 12
     assert admin_ov["open_incidents"] >= 1
     print("[OK] Admin KPI overview and alert triage verified")
-    
+
+    # Test 10: Coupon engine
+    print("Test 10: Testing promotional coupon discount...")
+    pair3 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-05"})
+    sess_id_3 = pair3.json()["id"]
+    client.post(f"/api/v1/shopper/{sess_id_3}/scan-item", json={"barcode": "8901262010053"}) # Amul Butter ₹58
+    coup_res = client.post(f"/api/v1/shopper/{sess_id_3}/apply-coupon", json={"coupon_code": "SUPER50"})
+    assert coup_res.status_code == 200
+    sess3_data = coup_res.json()
+    assert sess3_data["discount_amount"] > 0
+    print(f"[OK] Coupon SUPER50 applied: discount = Rs.{sess3_data['discount_amount']}")
+
+    # Test 11: Store Turnstile Exit Gate verification
+    print("Test 11: Turnstile exit gate optical token verification...")
+    gate_res = client.post("/api/v1/shopper/verify-exit-gate", json={"exit_token": co_data["exit_gate_token"]})
+    assert gate_res.status_code == 200
+    gate_data = gate_res.json()
+    assert gate_data["gate_unlocked"] is True
+    assert gate_data["receipt_number"] == co_data["receipt_number"]
+    print(f"[OK] Turnstile gate unlocked successfully for receipt {gate_data['receipt_number']}")
+
     print("========================================")
-    print("ALL 9 TEST SUITES PASSED FLAWLESSLY!")
+    print("ALL 11 TEST SUITES PASSED FLAWLESSLY!")
     print("========================================")
 
 if __name__ == "__main__":
     run_all_tests()
+
+

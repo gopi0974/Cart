@@ -33,7 +33,8 @@ class SessionService:
 
         session.subtotal_amount = round(subtotal, 2)
         session.total_tax = round(total_tax, 2)
-        session.total_amount = round(subtotal + total_tax, 2)
+        discount = session.total_discount if session.total_discount else 0.0
+        session.total_amount = max(0.0, round(subtotal + total_tax - discount, 2))
         session.item_count = item_count
         db.flush()
 
@@ -168,6 +169,7 @@ class SessionService:
             scanned_at=datetime.utcnow()
         )
         db.add(item)
+        db.flush()
         SessionService.recalculate_session_totals(db, session)
         db.commit()
         db.refresh(item)

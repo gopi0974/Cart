@@ -44,6 +44,16 @@ export const api = {
     });
   },
 
+  async applyCoupon(sessionId: string, couponCode: string) {
+    return request<{ status: string; coupon_code: string; discount_amount: number; new_total: number; description: string }>(
+      `/shopper/${sessionId}/apply-coupon`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ coupon_code: couponCode }),
+      }
+    );
+  },
+
   async checkout(sessionId: string, paymentMethod: string = 'UPI', upiId?: string) {
     return request<{ status: string; receipt_number: string; exit_gate_token: string; amount_paid: number }>(
       `/shopper/${sessionId}/checkout`,
@@ -56,6 +66,21 @@ export const api = {
 
   async getReceipt(sessionId: string): Promise<ReceiptData> {
     return request<ReceiptData>(`/shopper/${sessionId}/receipt`);
+  },
+
+  async verifyExitGate(exitToken: string) {
+    return request<{
+      valid: boolean;
+      gate_unlocked: boolean;
+      receipt_number?: string;
+      cart_number?: string;
+      amount_paid?: number;
+      item_count?: number;
+      message: string;
+    }>('/shopper/verify-exit-gate', {
+      method: 'POST',
+      body: JSON.stringify({ exit_token: exitToken }),
+    });
   },
 
   // Products Master

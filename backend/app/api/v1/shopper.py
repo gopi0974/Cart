@@ -1,3 +1,5 @@
+from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -10,6 +12,12 @@ from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 
 router = APIRouter(prefix="/shopper", tags=["Shopper Mobile App"])
+
+class CouponRequest(BaseModel):
+    coupon_code: str
+
+class ExitGateRequest(BaseModel):
+    exit_token: str
 
 @router.post("/pair", response_model=SessionResponse)
 async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
@@ -47,6 +55,14 @@ async def rescan_remove(session_id: str, req: RescanRemoveRequest, db: Session =
         raise HTTPException(status_code=400, detail=f"No active item found with barcode {req.barcode} to remove.")
     return {"status": "SUCCESS", "message": "Item removed from cart and bill updated."}
 
+@router.post("/{session_id}/apply-coupon")
+def apply_coupon(session_id: str, req: CouponRequest, db: Session = Depends(get_db)):
+    """Apply promotional coupon/discount to cart."""
+    try:
+        return BillingService.apply_coupon(db, session_id, req.coupon_code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @router.post("/{session_id}/checkout")
 async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(get_db)):
     """Process checkout payment. Allowed ONLY if all items are VERIFIED and no warnings open."""
@@ -74,6 +90,11 @@ def get_receipt(session_id: str, db: Session = Depends(get_db)):
         return BillingService.get_receipt(db, session_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/verify-exit-gate")
+def verify_exit_gate(req: ExitGateRequest, db: Session = Depends(get_db)):
+    """Store turnstile gate scanner verifying customer receipt exit pass."""
+    return BillingService.verify_turnstile_exit(db, req.exit_token)
 
 def _format_item_response(itm) -> CartItemResponse:
     prod = itm.product

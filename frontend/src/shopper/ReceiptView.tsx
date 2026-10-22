@@ -124,7 +124,21 @@ export const ReceiptView: React.FC<Props> = ({ receipt, onNewSession }) => {
           <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 mt-2">
             Scan at Turnstile Gate to Exit Supermarket
           </div>
-          <p className="text-[11px] text-slate-400 mt-0.5">
+          <div className="mt-1 flex items-center justify-center gap-2">
+            <span className="text-[10px] font-mono text-slate-400 max-w-[220px] truncate">
+              {receipt.exit_gate_token}
+            </span>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(receipt.exit_gate_token);
+                alert('Exit token copied! Paste into Turnstile Gate tab to unlock.');
+              }}
+              className="text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-emerald-950 text-slate-600 dark:text-slate-300 hover:text-emerald-600 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 transition-colors"
+            >
+              Copy Token
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
             This QR code unlocks the automatic exit gate. Valid for 30 minutes.
           </p>
         </div>

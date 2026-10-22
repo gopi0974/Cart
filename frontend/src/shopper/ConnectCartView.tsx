@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { QrCode, ShoppingCart, ShieldCheck, Zap, ArrowRight, AlertCircle } from 'lucide-react';
 import { api } from '../services/api';
 import { CartSession } from '../types';
+import { useTranslation } from '../services/i18n';
 
 interface Props {
   onConnected: (session: CartSession) => void;
@@ -11,6 +12,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   const [cartInput, setCartInput] = useState('CART-01');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useTranslation();
 
   const handleConnect = async (tokenOrNumber: string) => {
     setLoading(true);
@@ -34,10 +36,10 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
             <ShoppingCart className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-bold font-display tracking-tight text-slate-900 dark:text-white">
-            SmartCart AI
+            {t.appName}
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            SuperMart Autonomous Retail • No Billing Queues
+            {t.tagline}
           </p>
         </div>
 
@@ -48,10 +50,10 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
             <div className="absolute inset-0 border-2 border-emerald-500 rounded-lg animate-ping opacity-25"></div>
           </div>
           <h2 className="font-semibold text-slate-800 dark:text-slate-200 text-base">
-            Point camera at Cart Handle QR
+            {t.connectTitle}
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-xs mx-auto">
-            Scan the QR code printed on your shopping cart to pair your phone instantly.
+            {t.connectDesc}
           </p>
 
           <button
@@ -60,7 +62,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
             className="mt-5 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-4 rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 active:scale-95 transition-all"
           >
             <Zap className="w-4 h-4 fill-current" />
-            {loading ? 'Pairing Cart...' : `Connect to ${cartInput}`}
+            {loading ? 'Pairing Cart...' : `${t.connectBtn} (${cartInput})`}
           </button>
         </div>
 
@@ -74,7 +76,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
         {/* Manual Cart Selection Fallback */}
         <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
           <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
-            Or Select Cart Number Manually
+            Select Cart Number
           </label>
           <div className="flex gap-2">
             <select
@@ -106,8 +108,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
       <div className="mt-8 mb-4 p-4 bg-slate-100 dark:bg-slate-900/60 rounded-2xl flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-800">
         <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400 flex-shrink-0" />
         <div>
-          <span className="font-semibold text-slate-700 dark:text-slate-300">Privacy Guaranteed: </span>
-          The overhead camera strictly monitors cart interior items. No facial recording or biometric identification.
+          {t.privacyNote}
         </div>
       </div>
     </div>
