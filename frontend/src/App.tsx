@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { ShoppingCart, Cpu, LayoutDashboard, Sun, Moon } from 'lucide-react';
 import { ShopperApp } from './shopper/ShopperApp';
+import { AdminPortal } from './admin/AdminPortal';
 import { CartSimulatorView } from './simulator/CartSimulatorView';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'SHOPPER' | 'SIMULATOR'>('SHOPPER');
+  const [activeTab, setActiveTab] = useState<'SHOPPER' | 'ADMIN' | 'SIMULATOR'>('SHOPPER');
   const [darkMode, setDarkMode] = useState(false);
 
   useEffect(() => {
@@ -28,7 +29,7 @@ export const App: React.FC = () => {
           </span>
         </div>
 
-        {/* View Mode Pills */}
+        {/* View Mode Switcher Pills */}
         <div className="flex bg-slate-100 dark:bg-slate-900/80 p-1 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold">
           <button
             onClick={() => setActiveTab('SHOPPER')}
@@ -40,6 +41,18 @@ export const App: React.FC = () => {
           >
             <ShoppingCart className="w-3.5 h-3.5" />
             Shopper App
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ADMIN')}
+            className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all ${
+              activeTab === 'ADMIN'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <LayoutDashboard className="w-3.5 h-3.5" />
+            Admin Portal
           </button>
 
           <button
@@ -65,9 +78,11 @@ export const App: React.FC = () => {
         </button>
       </header>
 
-      {/* Body View */}
+      {/* Main Container */}
       <main className="w-full">
-        {activeTab === 'SHOPPER' ? <ShopperApp /> : <CartSimulatorView />}
+        {activeTab === 'SHOPPER' && <ShopperApp />}
+        {activeTab === 'ADMIN' && <AdminPortal />}
+        {activeTab === 'SIMULATOR' && <CartSimulatorView />}
       </main>
     </div>
   );
