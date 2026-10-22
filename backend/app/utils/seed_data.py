@@ -12,6 +12,12 @@ def seed_database(db: Session):
     if db.query(User).count() == 0:
         users = [
             User(
+                email="admin@smartcart.ai",
+                password_hash=hash_password("Admin@123"),
+                full_name="Sarah Jenkins (Store Admin)",
+                role="ADMIN"
+            ),
+            User(
                 email="admin@supermart.com",
                 password_hash=hash_password("admin123"),
                 full_name="Sarah Jenkins (Store Admin)",

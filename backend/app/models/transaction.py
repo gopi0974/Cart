@@ -16,7 +16,6 @@ class Transaction(Base):
     status = Column(String(20), nullable=False, default="SUCCESS")  # PENDING, SUCCESS, FAILED
     receipt_number = Column(String(50), unique=True, index=True, nullable=False)
     receipt_pdf_url = Column(Text, nullable=True)
-    exit_gate_token = Column(String(100), unique=True, index=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("CartSession", back_populates="transaction")

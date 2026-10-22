@@ -75,7 +75,6 @@ export interface ReceiptData {
   discount_amount: number;
   total_paid: number;
   items: ReceiptItem[];
-  exit_gate_token: string;
   timestamp: string;
   store_name: string;
   store_tax_id: string;

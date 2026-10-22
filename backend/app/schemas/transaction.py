@@ -26,7 +26,6 @@ class ReceiptResponse(BaseModel):
     discount_amount: float
     total_paid: float
     items: List[ReceiptItemSummary]
-    exit_gate_token: str
     timestamp: datetime
     store_name: str = "SuperMart Hypermarket - Downtown"
     store_tax_id: str = "GSTIN29AAACB1234F1Z5"

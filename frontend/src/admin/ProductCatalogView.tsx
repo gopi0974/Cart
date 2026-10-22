@@ -47,6 +47,21 @@ export const ProductCatalogView: React.FC<Props> = ({ onStart360Scan }) => {
     }
   };
 
+  const handleCreateAndScan = async () => {
+    if (!newProd.name || !newProd.barcode) {
+      alert('Please fill in product name and barcode first.');
+      return;
+    }
+    try {
+      const created = await api.createProduct(newProd);
+      setIsAddOpen(false);
+      loadProducts();
+      onStart360Scan(created);
+    } catch (err: any) {
+      alert(err.message || 'Failed to create product');
+    }
+  };
+
   const handleCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -265,19 +280,27 @@ export const ProductCatalogView: React.FC<Props> = ({ onStart360Scan }) => {
                 </div>
               </div>
 
-              <div className="flex gap-2 pt-3">
+              <div className="flex flex-col sm:flex-row gap-2 pt-3">
                 <button
                   type="button"
                   onClick={() => setIsAddOpen(false)}
-                  className="flex-1 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 py-2.5 rounded-xl font-semibold"
+                  className="px-4 py-2.5 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-semibold hover:bg-slate-200"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl font-semibold shadow-md shadow-emerald-600/30"
+                  className="flex-1 py-2.5 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-white rounded-xl font-semibold transition-colors"
                 >
                   Save & Register
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateAndScan}
+                  className="flex-1 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-semibold shadow-md shadow-purple-600/30 flex items-center justify-center gap-1.5 transition-all"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  Save & Start 360 Scan
                 </button>
               </div>
             </form>

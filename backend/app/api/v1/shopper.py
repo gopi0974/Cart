@@ -16,9 +16,6 @@ router = APIRouter(prefix="/shopper", tags=["Shopper Mobile App"])
 class CouponRequest(BaseModel):
     coupon_code: str
 
-class ExitGateRequest(BaseModel):
-    exit_token: str
-
 @router.post("/pair", response_model=SessionResponse)
 async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
     """Pair shopper mobile phone with cart by scanning its QR code token."""
@@ -77,7 +74,6 @@ async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(
         return {
             "status": "SUCCESS",
             "receipt_number": tx.receipt_number,
-            "exit_gate_token": tx.exit_gate_token,
             "amount_paid": tx.amount
         }
     except ValueError as e:
@@ -85,16 +81,12 @@ async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(
 
 @router.get("/{session_id}/receipt", response_model=ReceiptResponse)
 def get_receipt(session_id: str, db: Session = Depends(get_db)):
-    """Fetch digital receipt and exit turnstile QR token for completed session."""
+    """Fetch digital receipt for completed session."""
     try:
         return BillingService.get_receipt(db, session_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@router.post("/verify-exit-gate")
-def verify_exit_gate(req: ExitGateRequest, db: Session = Depends(get_db)):
-    """Store turnstile gate scanner verifying customer receipt exit pass."""
-    return BillingService.verify_turnstile_exit(db, req.exit_token)
 
 def _format_item_response(itm) -> CartItemResponse:
     prod = itm.product

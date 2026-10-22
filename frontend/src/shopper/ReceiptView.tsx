@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { CheckCircle2, Download, Printer, Share2, ShoppingBag, ArrowRight, ShieldCheck, QrCode } from 'lucide-react';
+import { CheckCircle2, Download, Printer, Share2, ShoppingBag, ArrowRight, ShieldCheck } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ReceiptData } from '../types';
 
@@ -108,39 +108,6 @@ export const ReceiptView: React.FC<Props> = ({ receipt, onNewSession }) => {
               ₹{receipt.total_paid.toFixed(2)}
             </span>
           </div>
-        </div>
-
-        {/* Store Exit Gate QR Pass */}
-        <div className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-700 text-center">
-          <div className="inline-block p-4 bg-white rounded-2xl border-2 border-emerald-500 shadow-md">
-            {/* High Contrast Exit QR Code Representation */}
-            <div className="w-36 h-36 bg-slate-900 rounded-xl flex flex-col items-center justify-center p-3 text-white">
-              <QrCode className="w-24 h-24 text-white" />
-              <div className="text-[10px] font-mono tracking-widest text-emerald-400 mt-1 uppercase">
-                {receipt.exit_gate_token.slice(-8)}
-              </div>
-            </div>
-          </div>
-          <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 mt-2">
-            Scan at Turnstile Gate to Exit Supermarket
-          </div>
-          <div className="mt-1 flex items-center justify-center gap-2">
-            <span className="text-[10px] font-mono text-slate-400 max-w-[220px] truncate">
-              {receipt.exit_gate_token}
-            </span>
-            <button
-              onClick={() => {
-                navigator.clipboard.writeText(receipt.exit_gate_token);
-                alert('Exit token copied! Paste into Turnstile Gate tab to unlock.');
-              }}
-              className="text-[10px] bg-slate-100 dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-emerald-950 text-slate-600 dark:text-slate-300 hover:text-emerald-600 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 transition-colors"
-            >
-              Copy Token
-            </button>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            This QR code unlocks the automatic exit gate. Valid for 30 minutes.
-          </p>
         </div>
       </div>
 

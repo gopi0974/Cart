@@ -4,8 +4,10 @@ const API_BASE = 'http://localhost:8000/api/v1';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
+  const token = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     ...(options.headers as Record<string, string> || {}),
   };
 
@@ -18,6 +20,29 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
+  // Staff Auth & Access Control
+  async login(email: string, password: string): Promise<{ access_token: string; role: string; full_name: string; email: string }> {
+    return request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+  },
+
+  async getStaff(): Promise<any[]> {
+    return request('/auth/staff');
+  },
+
+  async createStaff(data: any): Promise<any> {
+    return request('/auth/staff', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getReports(): Promise<any> {
+    return request('/admin/reports');
+  },
+
   // Shopper Mobile Endpoints
   async pairCart(qrToken: string, phone?: string): Promise<CartSession> {
     return request<CartSession>('/shopper/pair', {
@@ -55,7 +80,7 @@ export const api = {
   },
 
   async checkout(sessionId: string, paymentMethod: string = 'UPI', upiId?: string) {
-    return request<{ status: string; receipt_number: string; exit_gate_token: string; amount_paid: number }>(
+    return request<{ status: string; receipt_number: string; amount_paid: number }>(
       `/shopper/${sessionId}/checkout`,
       {
         method: 'POST',
@@ -66,21 +91,6 @@ export const api = {
 
   async getReceipt(sessionId: string): Promise<ReceiptData> {
     return request<ReceiptData>(`/shopper/${sessionId}/receipt`);
-  },
-
-  async verifyExitGate(exitToken: string) {
-    return request<{
-      valid: boolean;
-      gate_unlocked: boolean;
-      receipt_number?: string;
-      cart_number?: string;
-      amount_paid?: number;
-      item_count?: number;
-      message: string;
-    }>('/shopper/verify-exit-gate', {
-      method: 'POST',
-      body: JSON.stringify({ exit_token: exitToken }),
-    });
   },
 
   // Products Master

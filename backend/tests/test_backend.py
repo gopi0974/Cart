@@ -96,7 +96,6 @@ def test_full_shopper_lifecycle_and_checkout_rules():
     pay_data = checkout_success.json()
     assert pay_data["status"] == "SUCCESS"
     assert "REC-" in pay_data["receipt_number"]
-    assert "EXIT-" in pay_data["exit_gate_token"]
 
     # 7. Fetch digital receipt
     receipt_resp = client.get(f"/api/v1/shopper/{session_id}/receipt")

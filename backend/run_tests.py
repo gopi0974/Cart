@@ -79,11 +79,10 @@ def run_all_tests():
     assert co_ok.status_code == 200
     co_data = co_ok.json()
     assert "REC-" in co_data["receipt_number"]
-    assert "EXIT-" in co_data["exit_gate_token"]
     
     rec_resp = client.get(f"/api/v1/shopper/{sess_id}/receipt")
     assert rec_resp.status_code == 200
-    print(f"[OK] Checkout PASSED: Generated receipt {co_data['receipt_number']} with exit QR")
+    print(f"[OK] Checkout PASSED: Generated receipt {co_data['receipt_number']}")
     
     # Test 8: Fraud detection - unscanned item
     print("Test 8: Detecting unscanned item and raising alert...")
@@ -120,20 +119,12 @@ def run_all_tests():
     assert sess3_data["discount_amount"] > 0
     print(f"[OK] Coupon SUPER50 applied: discount = Rs.{sess3_data['discount_amount']}")
 
-    # Test 11: Store Turnstile Exit Gate verification
-    print("Test 11: Turnstile exit gate optical token verification...")
-    gate_res = client.post("/api/v1/shopper/verify-exit-gate", json={"exit_token": co_data["exit_gate_token"]})
-    assert gate_res.status_code == 200
-    gate_data = gate_res.json()
-    assert gate_data["gate_unlocked"] is True
-    assert gate_data["receipt_number"] == co_data["receipt_number"]
-    print(f"[OK] Turnstile gate unlocked successfully for receipt {gate_data['receipt_number']}")
-
     print("========================================")
-    print("ALL 11 TEST SUITES PASSED FLAWLESSLY!")
+    print("ALL 10 TEST SUITES PASSED FLAWLESSLY!")
     print("========================================")
 
 if __name__ == "__main__":
     run_all_tests()
+
 
 

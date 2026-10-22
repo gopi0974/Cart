@@ -8,7 +8,3 @@ def generate_receipt_number() -> str:
     random_suffix = "".join(random.choices(string.digits, k=4))
     return f"REC-{date_str}-{random_suffix}"
 
-def generate_exit_token(receipt_number: str) -> str:
-    """Generate secure exit turnstile QR verification token."""
-    random_salt = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    return f"EXIT-{receipt_number}-{random_salt}"

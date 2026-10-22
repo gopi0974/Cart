@@ -7,7 +7,7 @@ from app.models.product import Product
 from app.models.cart import Cart
 from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
-from app.utils.receipt import generate_receipt_number, generate_exit_token
+from app.utils.receipt import generate_receipt_number
 from app.websocket.manager import ws_manager
 
 VALID_COUPONS = {
@@ -82,9 +82,8 @@ class BillingService:
                         severity="LOW"
                     )
 
-        # Generate official digital receipt & store exit pass
+        # Generate official digital receipt
         receipt_num = generate_receipt_number()
-        exit_token = generate_exit_token(receipt_num)
 
         tx = Transaction(
             session_id=session.id,
@@ -92,8 +91,7 @@ class BillingService:
             payment_gateway_ref=f"SIM_PAY_{payment_method}_{datetime.utcnow().timestamp():.0f}",
             amount=session.total_amount,
             status="SUCCESS",
-            receipt_number=receipt_num,
-            exit_gate_token=exit_token
+            receipt_number=receipt_num
         )
         db.add(tx)
 
@@ -108,7 +106,6 @@ class BillingService:
         # Notify mobile app and admin feeds
         await ws_manager.broadcast_to_cart(cart.id, "CHECKOUT_COMPLETED", {
             "receipt_number": receipt_num,
-            "exit_gate_token": exit_token,
             "total_paid": tx.amount,
             "payment_method": tx.payment_method
         })
@@ -123,36 +120,8 @@ class BillingService:
         return tx
 
     @staticmethod
-    def verify_turnstile_exit(db: Session, exit_token: str) -> Dict[str, Any]:
-        """Verify exit turnstile QR pass at supermarket exit gate."""
-        tx = db.query(Transaction).filter(Transaction.exit_gate_token == exit_token.strip()).first()
-        if not tx:
-            return {
-                "valid": False,
-                "gate_unlocked": False,
-                "message": "Invalid or expired exit pass. Please present your receipt to store staff."
-            }
-
-        session = tx.session
-        items = db.query(CartItem).filter(
-            CartItem.session_id == session.id,
-            CartItem.status == "VERIFIED"
-        ).all()
-
-        return {
-            "valid": True,
-            "gate_unlocked": True,
-            "receipt_number": tx.receipt_number,
-            "cart_number": session.cart.cart_number,
-            "amount_paid": tx.amount,
-            "item_count": len(items),
-            "timestamp": tx.created_at.isoformat(),
-            "message": "Payment verified! Turnstile gate unlocked. Have a great day!"
-        }
-
-    @staticmethod
     def get_receipt(db: Session, session_id: str) -> Dict[str, Any]:
-        """Fetch receipt breakdown including tax items and exit token."""
+        """Fetch receipt breakdown including tax items and payment details."""
         tx = db.query(Transaction).filter(Transaction.session_id == session_id).first()
         if not tx:
             raise ValueError("No finalized transaction found for this session.")
@@ -185,8 +154,8 @@ class BillingService:
             "discount_amount": session.total_discount,
             "total_paid": tx.amount,
             "items": item_summaries,
-            "exit_gate_token": tx.exit_gate_token,
             "timestamp": tx.created_at,
             "store_name": "SuperMart Hypermarket - Downtown",
             "store_tax_id": "GSTIN29AAACB1234F1Z5"
         }
+

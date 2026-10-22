@@ -35,8 +35,7 @@ An end-to-end, production-grade autonomous supermarket shopping cart system that
   - `MISMATCH`: Friendly alert when a different product than scanned is placed.
   - `UNSCANNED ITEM`: Immediate non-accusatory warning if an item enters the basket without being scanned.
   - `REMOVAL`: Confirms item taken out and prompts customer to rescan barcode to drop it from the bill.
-- **Strict Checkout Gate**: Blocked until every item is `VERIFIED` and all warnings are cleared.
-- **Digital Tax Invoice & Exit Pass**: Split GST breakdown, sandbox UPI & Card checkout, printable/PDF tax invoice, and high-contrast **Store Exit Gate Turnstile QR Pass**.
+- **Digital Tax Invoice**: Split GST breakdown, sandbox UPI & Card checkout, and printable/PDF tax invoice.
 
 ### 2. Mart Staff Admin Portal
 - **Fleet Live Monitoring Grid**: Visual status cards for all carts (`Active`, `Alert`, `Idle`) with battery levels, camera health, current item counts, and live camera feed inspection modal.
