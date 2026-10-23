@@ -288,12 +288,26 @@ export const api = {
   },
 
   async previewTest(imageDataUrl: string, targetBarcode?: string) {
-    return request<{ matched: boolean; confidence: number; product_name?: string; message: string }>(
-      '/vision/products/preview-test',
-      {
-        method: 'POST',
-        body: JSON.stringify({ image_data_url: imageDataUrl, target_barcode: targetBarcode }),
-      }
-    );
+    return request<{
+      matched: boolean;
+      confidence: number;
+      product_name?: string;
+      barcode?: string;
+      target_barcode?: string;
+      target_confidence?: number;
+      threshold_high?: number;
+      top_matches?: Array<{
+        product_id: string;
+        product_name: string;
+        barcode: string;
+        similarity: number;
+        matched_angle: string;
+        image_path?: string;
+      }>;
+      message: string;
+    }>('/vision/products/preview-test', {
+      method: 'POST',
+      body: JSON.stringify({ image_data_url: imageDataUrl, target_barcode: targetBarcode }),
+    });
   },
 };

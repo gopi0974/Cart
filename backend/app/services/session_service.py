@@ -146,19 +146,19 @@ class SessionService:
                     "action_required": "SCAN_BARCODE"
                 })
 
-        # Check for open removal warnings in alerts
-        removal_alerts = db.query(Alert).filter(
+        # Check for open removal or unscanned warnings in alerts
+        unresolved_alerts = db.query(Alert).filter(
             Alert.session_id == session.id,
-            Alert.alert_type == "REMOVAL_WITHOUT_RESCAN",
+            Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "UNSCANNED_ITEM"]),
             Alert.status == "OPEN"
         ).all()
 
-        for r_alert in removal_alerts:
+        for r_alert in unresolved_alerts:
             active_warnings.append({
-                "type": "REMOVAL_WITHOUT_RESCAN",
+                "type": r_alert.alert_type,
                 "message": r_alert.message,
                 "target_barcode": None,
-                "action_required": "RESCAN_TO_REMOVE"
+                "action_required": "SCAN_BARCODE" if r_alert.alert_type == "UNSCANNED_ITEM" else "RESCAN_TO_REMOVE"
             })
 
         can_checkout = (
