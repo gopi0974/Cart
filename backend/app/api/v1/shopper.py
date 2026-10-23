@@ -63,6 +63,12 @@ async def connect_cart_via_qr(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/available-carts")
+def get_available_carts(db: Session = Depends(get_db)):
+    """Public list of active/enabled smart carts for device pairing."""
+    carts = db.query(Cart).filter(Cart.is_enabled == True).order_by(Cart.cart_number.asc()).all()
+    return [{"id": c.id, "cart_number": c.cart_number, "status": c.status, "camera_status": c.camera_status} for c in carts]
+
 @router.get("/{session_id}", response_model=SessionResponse)
 def get_session(session_id: str, db: Session = Depends(get_db)):
     """Retrieve full live session state, items, warnings, and running bill."""

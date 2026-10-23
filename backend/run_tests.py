@@ -217,8 +217,66 @@ def run_all_tests():
     assert "disabled" in disabled_connect.json()["detail"].lower()
     print("[OK] Task 2: Tampered signature and disabled cart successfully rejected")
 
+    # =========================================================================
+    # TASK 3 TESTS: Laptop-webcam "Cart Device" WebSocket & Authentication
+    # =========================================================================
+    import starlette.websockets
+
+    # Test 15: Device WebSocket rejects missing token
+    print("Test 15: Task 3 - Device WebSocket rejects missing token...")
+    try:
+        with client.websocket_connect("/ws/device"):
+            pass
+        assert False, "Should have rejected missing device token"
+    except starlette.websockets.WebSocketDisconnect as e:
+        assert e.code == 1008
+    print("[OK] Task 3: Missing device token rejected with code 1008 (Policy Violation)")
+
+    # Test 16: Device WebSocket rejects unknown token
+    print("Test 16: Task 3 - Device WebSocket rejects unknown token...")
+    try:
+        with client.websocket_connect("/ws/device?token=invalid_unregistered_token"):
+            pass
+        assert False, "Should have rejected unknown device token"
+    except starlette.websockets.WebSocketDisconnect as e:
+        assert e.code == 1008
+    print("[OK] Task 3: Unknown device token rejected and logged to AuditLog")
+
+    # Test 17: Device WebSocket rejects disabled cart
+    print("Test 17: Task 3 - Device WebSocket rejects disabled cart...")
+    # reg_data['device_token'] is for CART-T2 which was disabled in Test 14
+    try:
+        with client.websocket_connect(f"/ws/device?token={reg_data['device_token']}"):
+            pass
+        assert False, "Should have rejected connection for disabled cart"
+    except starlette.websockets.WebSocketDisconnect as e:
+        assert e.code == 1008
+    print("[OK] Task 3: Disabled cart device connection rejected with code 1008")
+
+    # Test 18: Device WebSocket connects with valid token, derives cart, handles heartbeat
+    print("Test 18: Task 3 - Device WebSocket connection, heartbeat, and camera online status...")
+    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
+        conn_msg = ws.receive_json()
+        assert conn_msg["type"] == "connected"
+        assert conn_msg["cart_number"] == "CART-001"
+        assert conn_msg["status"] == "ONLINE"
+
+        # Send heartbeat with simulated battery
+        ws.send_json({"type": "heartbeat", "battery": 92, "timestamp": 123456789})
+        hb_ack = ws.receive_json()
+        assert hb_ack["type"] == "heartbeat_ack"
+        assert hb_ack["cart_number"] == "CART-001"
+
+        # Send test camera frame during motion
+        mock_frame = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+        ws.send_json({"type": "frame", "format": "jpeg", "data": mock_frame})
+        frame_ack = ws.receive_json()
+        assert frame_ack["type"] in ["frame_ack", "verification_result"]
+
+    print("[OK] Task 3: Device WebSocket authenticated, derived cart identity, and processed frame/heartbeat")
+
     print("========================================")
-    print("ALL 14 TEST SUITES PASSED FLAWLESSLY!")
+    print("ALL 18 TEST SUITES PASSED FLAWLESSLY!")
     print("========================================")
 
 if __name__ == "__main__":

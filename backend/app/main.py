@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +9,7 @@ from app.config import settings
 from app.database import init_db, SessionLocal
 from app.utils.seed_data import seed_database
 from app.websocket.manager import ws_manager
+from app.websocket.device_handler import handle_device_websocket
 
 # API Routers
 from app.api.v1.auth import router as auth_router
@@ -91,6 +93,15 @@ async def websocket_admin_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error on admin channel: {e}")
         ws_manager.disconnect_admin(websocket)
+
+@app.websocket("/ws/device")
+async def websocket_device_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    """
+    Dedicated authenticated hardware / webcam streaming channel.
+    Authenticates via device token, derives cart context server-side,
+    and supports ESP32-CAM and Laptop Webcam frame streams.
+    """
+    await handle_device_websocket(websocket, token=token)
 
 @app.get("/")
 def root():

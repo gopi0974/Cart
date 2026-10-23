@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ShopperApp } from './shopper/ShopperApp';
 import { AdminPortal } from './admin/AdminPortal';
+import { CartDeviceView } from './device/CartDeviceView';
 import { LanguageProvider } from './services/i18n';
 
 export const App: React.FC = () => {
@@ -9,6 +10,7 @@ export const App: React.FC = () => {
     <LanguageProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/cart-device" element={<CartDeviceView />} />
           <Route path="/user" element={<ShopperApp />} />
           <Route path="/user/connect" element={<ShopperApp />} />
           <Route path="/admin" element={<AdminPortal />} />
