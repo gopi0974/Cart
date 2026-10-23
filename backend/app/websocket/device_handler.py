@@ -149,6 +149,10 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
         cart.last_heartbeat = datetime.utcnow()
         db.commit()
 
+        # Record activity timestamp in watchdog
+        from app.services.device_watchdog import record_device_activity, clear_device_activity
+        record_device_activity(cart_id)
+
         logger.info(f"Cart camera device connected and verified: {cart_number} (ID: {cart_id})")
 
         # Broadcast online status to store admin portal
@@ -158,6 +162,13 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
             "camera_status": "ONLINE",
             "status": cart.status,
             "last_heartbeat": cart.last_heartbeat.isoformat()
+        })
+
+        # Broadcast online status to cart channel for mobile shopper app
+        await ws_manager.broadcast_to_cart(cart_id, "CART_CAMERA_STATUS", {
+            "cart_id": cart_id,
+            "camera_status": "ONLINE",
+            "message": "Cart camera connected."
         })
 
         # Send welcome ACK to device
@@ -182,6 +193,9 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
 
             if msg.get("type") == "websocket.disconnect":
                 break
+
+            # Any incoming message counts as activity for watchdog
+            record_device_activity(cart_id)
 
             # Binary JPEG payload (ESP32-CAM direct buffer stream)
             if "bytes" in msg and msg["bytes"]:
@@ -241,6 +255,8 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
     finally:
         if cart:
             try:
+                from app.services.device_watchdog import clear_device_activity
+                clear_device_activity(cart.id)
                 db_cart = db.query(Cart).filter(Cart.id == cart.id).first()
                 if db_cart:
                     db_cart.camera_status = "OFFLINE"
@@ -250,6 +266,11 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
                         "cart_number": cart.cart_number,
                         "camera_status": "OFFLINE",
                         "status": db_cart.status
+                    })
+                    await ws_manager.broadcast_to_cart(cart.id, "CART_CAMERA_STATUS", {
+                        "cart_id": cart.id,
+                        "camera_status": "OFFLINE",
+                        "message": "Cart camera disconnected."
                     })
             except Exception as ex:
                 logger.error(f"Error updating cart offline status: {ex}")

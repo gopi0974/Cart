@@ -201,6 +201,7 @@ def _format_session_response(details) -> SessionResponse:
         id=sess.id,
         cart_id=cart.id,
         cart_number=cart.cart_number,
+        camera_status=details.get("camera_status", getattr(cart, "camera_status", "OFFLINE")),
         status=sess.status,
         started_at=sess.started_at,
         subtotal_amount=sess.subtotal_amount,

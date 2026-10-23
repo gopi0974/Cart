@@ -28,6 +28,7 @@ export interface CartSession {
   id: string;
   cart_id: string;
   cart_number: string;
+  camera_status?: 'ONLINE' | 'OFFLINE';
   status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
   started_at: string;
   subtotal_amount: number;

@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { CartFleetItem, CartRegistrationResult } from '../types';
-import { api } from '../services/api';
+import { api, getWsBaseUrl } from '../services/api';
 
 export const CartFleetView: React.FC = () => {
   const [carts, setCarts] = useState<CartFleetItem[]>([]);
@@ -65,6 +65,44 @@ export const CartFleetView: React.FC = () => {
 
   useEffect(() => {
     fetchCarts();
+
+    // 1. Periodic poll every 3.5s to ensure UI is never stale
+    const pollTimer = setInterval(() => {
+      fetchCarts();
+    }, 3500);
+
+    // 2. Real-time fleet WebSocket connection
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(`${getWsBaseUrl()}/ws/admin`);
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.event === 'CART_STATUS_CHANGE' && msg.data) {
+            const data = msg.data;
+            setCarts((prev) =>
+              prev.map((c) =>
+                c.id === data.cart_id || c.cart_number === data.cart_number
+                  ? {
+                      ...c,
+                      camera_status: data.camera_status || c.camera_status,
+                      status: data.status || c.status,
+                      last_heartbeat: data.last_heartbeat || c.last_heartbeat
+                    }
+                  : c
+              )
+            );
+          }
+        } catch {}
+      };
+    } catch (e) {
+      console.warn('Failed to connect to admin fleet WebSocket:', e);
+    }
+
+    return () => {
+      clearInterval(pollTimer);
+      if (ws) ws.close();
+    };
   }, []);
 
   const handleRegister = async (e: React.FormEvent) => {

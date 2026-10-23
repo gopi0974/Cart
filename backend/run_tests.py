@@ -23,6 +23,7 @@ def run_all_tests():
     for c in test_carts:
         c.status = "IDLE"
         c.is_enabled = True
+        c.camera_status = "ONLINE"
     db.commit()
     db.close()
     
@@ -290,8 +291,53 @@ def run_all_tests():
 
     print("[OK] Task 3: Device WebSocket authenticated, derived cart identity, and processed frame/heartbeat")
 
+    # Test 19: Task 4 - Camera OFFLINE Shopper UI Gating & Checkout Lock
+    print("Test 19: Task 4 - Camera OFFLINE gating and Shopper Checkout lock...")
+    # CART-001 camera is now OFFLINE because ws closed in Test 18
+    db = SessionLocal()
+    c1 = db.query(Cart).filter(Cart.cart_number == "CART-001").first()
+    assert c1.camera_status == "OFFLINE"
+    
+    # Active shopper on CART-001
+    s_pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
+    assert s_pair.status_code == 200
+    s_id = s_pair.json()["id"]
+    
+    # Add an item to cart
+    client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode})
+    # Simulate verification
+    client.post("/api/v1/vision/simulate-action", json={
+        "cart_id": "CART-001",
+        "action_type": "PLACE_CORRECT",
+        "barcode": test_barcode
+    })
+    
+    # Check session state: item is verified, but camera is OFFLINE -> can_checkout must be FALSE
+    s_check = client.get(f"/api/v1/shopper/{s_id}").json()
+    assert s_check["camera_status"] == "OFFLINE"
+    assert s_check["can_checkout"] is False
+    
+    # Attempting checkout while camera is OFFLINE must be rejected with 400
+    chk_fail = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"})
+    assert chk_fail.status_code == 400
+    assert "camera is not connected" in chk_fail.json()["detail"].lower()
+    
+    # Now bring camera ONLINE via Device WebSocket connection
+    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
+        c_online = client.get(f"/api/v1/shopper/{s_id}").json()
+        assert c_online["camera_status"] == "ONLINE"
+        assert c_online["can_checkout"] is True
+        
+        # Checkout succeeds while camera is ONLINE
+        chk_success = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"})
+        assert chk_success.status_code == 200
+        assert chk_success.json()["status"] == "SUCCESS"
+    
+    db.close()
+    print("[OK] Task 4: Camera OFFLINE successfully locks checkout, and camera ONLINE restores checkout")
+
     print("========================================")
-    print("ALL 18 TEST SUITES PASSED FLAWLESSLY!")
+    print("ALL 19 TEST SUITES PASSED FLAWLESSLY!")
     print("========================================")
 
 if __name__ == "__main__":

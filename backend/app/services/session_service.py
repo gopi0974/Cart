@@ -161,16 +161,19 @@ class SessionService:
                 "action_required": "SCAN_BARCODE" if r_alert.alert_type == "UNSCANNED_ITEM" else "RESCAN_TO_REMOVE"
             })
 
+        is_camera_online = (cart.camera_status == "ONLINE") if cart else False
         can_checkout = (
             len(items) > 0 and
             not has_unverified and
             len(active_warnings) == 0 and
-            session.status == "ACTIVE"
+            session.status == "ACTIVE" and
+            is_camera_online
         )
 
         return {
             "session": session,
             "cart": cart,
+            "camera_status": cart.camera_status if cart else "OFFLINE",
             "items": items,
             "active_warnings": active_warnings,
             "can_checkout": can_checkout

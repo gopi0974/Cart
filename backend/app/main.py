@@ -25,6 +25,7 @@ logger = logging.getLogger("smartcart")
 async def lifespan(app: FastAPI):
     # Startup: Initialize database tables and populate catalog if empty
     logger.info("Initializing database connection...")
+    watchdog_task = None
     try:
         init_db()
         db = SessionLocal()
@@ -35,9 +36,16 @@ async def lifespan(app: FastAPI):
             logger.info("Database initialized, catalog verified, and persistent vector index synced.")
         finally:
             db.close()
+
+        # Start background camera watchdog task (monitors hardware heartbeats & 10s offline timeout)
+        import asyncio
+        from app.services.device_watchdog import run_camera_watchdog
+        watchdog_task = asyncio.create_task(run_camera_watchdog())
     except Exception as e:
-        logger.error(f"Startup Database Warning: {e}. App will continue serving requests.")
+        logger.error(f"Startup Database/Watchdog Warning: {e}. App will continue serving requests.")
     yield
+    if watchdog_task:
+        watchdog_task.cancel()
     logger.info("Shutting down SmartCart AI backend...")
 
 app = FastAPI(

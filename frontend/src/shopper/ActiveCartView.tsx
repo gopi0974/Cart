@@ -47,6 +47,13 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             refreshSession();
           } else if (evtType === 'WARNING_CLEARED' || evtType === 'ITEM_SCANNED_PENDING') {
             refreshSession();
+          } else if (evtType === 'CART_CAMERA_STATUS') {
+            setSession((prev) => ({
+              ...prev,
+              camera_status: payload.camera_status,
+              can_checkout: payload.camera_status === 'ONLINE' ? prev.can_checkout : false
+            }));
+            refreshSession();
           }
         } catch (e) {
           console.error('Error parsing WS message:', e);
@@ -177,6 +184,19 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
 
       {/* Main Cart Body */}
       <div className="p-4 flex-1">
+        {/* Camera Offline Warning Banner */}
+        {session.camera_status === 'OFFLINE' && (
+          <div className="mb-4 p-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/30 text-amber-800 dark:text-amber-200 flex items-start gap-3 shadow-sm animate-pulse">
+            <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <div className="text-xs">
+              <div className="font-bold text-sm">Cart Camera Disconnected</div>
+              <p className="mt-0.5 leading-relaxed font-medium text-amber-700 dark:text-amber-300">
+                This cart's camera is not connected. Verification is paused. Please ask staff for assistance.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Dynamic Warning Banners */}
         <WarningBanner
           warnings={session.active_warnings}
@@ -368,14 +388,16 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           {/* Pay Button with Verification Guard */}
           <button
             onClick={() => setCheckoutOpen(true)}
-            disabled={!session.can_checkout}
+            disabled={!session.can_checkout || session.camera_status === 'OFFLINE'}
             title={
-              !session.can_checkout
+              session.camera_status === 'OFFLINE'
+                ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
+                : !session.can_checkout
                 ? 'All items must be verified by camera and warnings cleared before paying'
                 : 'Proceed to Payment'
             }
             className={`flex-1 font-semibold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-1.5 transition-all text-sm ${
-              session.can_checkout
+              session.can_checkout && session.camera_status !== 'OFFLINE'
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30 active:scale-95'
                 : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed shadow-none'
             }`}
@@ -385,9 +407,11 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           </button>
         </div>
 
-        {!session.can_checkout && session.items.length > 0 && (
+        {(!session.can_checkout || session.camera_status === 'OFFLINE') && session.items.length > 0 && (
           <p className="text-[11px] text-center text-amber-600 dark:text-amber-400 mt-2 font-medium">
-            Checkout opens once all items are placed and verified in cart.
+            {session.camera_status === 'OFFLINE'
+              ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
+              : "Checkout opens once all items are placed and verified in cart."}
           </p>
         )}
       </div>

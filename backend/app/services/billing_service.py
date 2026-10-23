@@ -61,6 +61,8 @@ class BillingService:
         cart: Cart = session_details["cart"]
 
         if not session_details["can_checkout"]:
+            if cart and cart.camera_status != "ONLINE":
+                raise ValueError("Checkout blocked: This cart's camera is not connected. Verification is paused. Please ask staff for assistance.")
             if len(session_details["active_warnings"]) > 0:
                 raise ValueError("Checkout blocked: You have unresolved alerts or warnings in your cart.")
             for itm in session_details["items"]:
