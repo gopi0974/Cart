@@ -26,6 +26,9 @@ backend/.env
 frontend/.env
 .env.local
 .env.*.local
+!.env.example
+!*.env.example
+!backend/.env.example
 
 
 # IDE & OS
