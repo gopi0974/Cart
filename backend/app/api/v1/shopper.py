@@ -1,9 +1,12 @@
 from typing import Optional
+from datetime import datetime
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.cart import Cart
+from app.models.session import CartSession
+from app.websocket.manager import ws_manager
 from app.schemas.session import (
     PairSessionRequest, SessionResponse, CartItemResponse,
     ScanItemRequest, RescanRemoveRequest
@@ -130,6 +133,46 @@ def get_receipt(session_id: str, db: Session = Depends(get_db)):
         return BillingService.get_receipt(db, session_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@router.post("/{session_id}/exit")
+async def exit_session(session_id: str, db: Session = Depends(get_db)):
+    """
+    Shopper clicks 'Exit' to leave or cancel session.
+    Frees the cart immediately (sets cart to IDLE) so other shoppers can occupy it.
+    """
+    session = db.query(CartSession).filter(CartSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    cart = session.cart
+    if session.status == "ACTIVE":
+        session.status = "ABANDONED"
+        session.ended_at = datetime.utcnow()
+
+    if cart:
+        cart.status = "IDLE"
+        cart.last_heartbeat = datetime.utcnow()
+
+    db.commit()
+
+    if cart:
+        # Broadcast to admin & devices that cart is now IDLE and free
+        await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+            "cart_id": cart.id,
+            "cart_number": cart.cart_number,
+            "status": "IDLE",
+            "session_id": None
+        })
+        await ws_manager.broadcast_to_cart(cart.id, "SESSION_ABANDONED", {
+            "cart_id": cart.id,
+            "cart_number": cart.cart_number,
+            "message": "Shopper exited the session. Cart is now available."
+        })
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Session closed. Cart '{cart.cart_number if cart else ''}' is now free for new shoppers."
+    }
 
 
 def _format_item_response(itm) -> CartItemResponse:

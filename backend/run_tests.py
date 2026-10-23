@@ -128,13 +128,11 @@ def run_all_tests():
     assert admin_ov["open_incidents"] >= 1
     print("[OK] Admin KPI overview and alert triage verified")
 
-    # Complete session 2 to release CART-002
-    db2 = SessionLocal()
-    s2 = db2.query(CartSession).filter(CartSession.id == sess_id_2).first()
-    if s2:
-        s2.status = "COMPLETED"
-    db2.commit()
-    db2.close()
+    # Exit session 2 to test shopper exit and release CART-002
+    exit_resp = client.post(f"/api/v1/shopper/{sess_id_2}/exit")
+    assert exit_resp.status_code == 200
+    assert exit_resp.json()["status"] == "SUCCESS"
+    print("[OK] Shopper exit endpoint terminates session and frees cart to IDLE")
 
     # Test 10: Promotional discount
     print("Test 10: Testing promotional coupon discount...")

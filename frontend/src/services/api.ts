@@ -127,6 +127,12 @@ export const api = {
     return request<ReceiptData>(`/shopper/${sessionId}/receipt`);
   },
 
+  async exitSession(sessionId: string): Promise<{ status: string; message: string }> {
+    return request<{ status: string; message: string }>(`/shopper/${sessionId}/exit`, {
+      method: 'POST',
+    });
+  },
+
   // Products Master
   async getProducts(search?: string, category?: string): Promise<Product[]> {
     const params = new URLSearchParams();

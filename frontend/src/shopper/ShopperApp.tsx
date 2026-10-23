@@ -47,7 +47,14 @@ export const ShopperApp: React.FC = () => {
     localStorage.setItem('smartcart_session_id', session.id);
   };
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    if (activeSession) {
+      try {
+        await api.exitSession(activeSession.id);
+      } catch (err) {
+        console.error('Failed to notify backend of session exit:', err);
+      }
+    }
     setActiveSession(null);
     setReceipt(null);
     localStorage.removeItem('smartcart_session_id');

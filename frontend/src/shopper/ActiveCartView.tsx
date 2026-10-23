@@ -73,6 +73,17 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   };
 
+  const handleExitClick = () => {
+    const hasItems = session.items && session.items.length > 0;
+    const confirmMessage = hasItems
+      ? `You have ${session.items.length} item(s) in your basket (₹${session.total_amount.toFixed(2)}). Exiting will end this session and free the cart for other shoppers. Are you sure you want to exit?`
+      : 'Exit shopping session and release this cart?';
+
+    if (window.confirm(confirmMessage)) {
+      onDisconnect();
+    }
+  };
+
   const handleBarcodeDetected = async (barcode: string) => {
     if (scannerMode === 'REMOVE') {
       try {
@@ -154,8 +165,9 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             <RefreshCw className="w-4 h-4" />
           </button>
           <button
-            onClick={onDisconnect}
+            onClick={handleExitClick}
             className="text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 px-2.5 py-1.5 rounded-xl border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all"
+            title="Exit session and release cart"
           >
             <LogOut className="w-3.5 h-3.5" />
             Exit
