@@ -201,6 +201,23 @@ def run_all_tests():
     assert "occupied" in second_connect.json()["detail"].lower()
     print("[OK] Task 2: Second active shopper correctly REJECTED on occupied cart")
 
+    # Test Admin Force Release & Edit Cart
+    reset_resp = client.post(f"/api/v1/admin/carts/{reg_data['id']}/reset-session", headers=auth_header)
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["cart_status"] == "IDLE"
+
+    # Shopper can now reconnect after admin release
+    reconnect_resp = client.get(f"/api/v1/shopper/connect?cart={c_param}&token={t_param}&sig={s_param}&phone=9999999999")
+    assert reconnect_resp.status_code == 200
+    print("[OK] Task 2: Admin force session release frees occupied cart for new shoppers")
+
+    # Test Admin PATCH cart status
+    patch_resp = client.patch(f"/api/v1/admin/carts/{reg_data['id']}", json={"status": "MAINTENANCE"}, headers=auth_header)
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["status"] == "MAINTENANCE"
+    # Revert to IDLE
+    client.patch(f"/api/v1/admin/carts/{reg_data['id']}", json={"status": "IDLE"}, headers=auth_header)
+
     # Test 14: TASK 2 - Rejection of tampered signature & disabled cart
     print("Test 14: Task 2 - Tampered signature and disabled cart rejection...")
     bad_sig_resp = client.get(f"/api/v1/shopper/connect?cart={c_param}&token={t_param}&sig=invalid_sig_1234")

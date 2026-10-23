@@ -13,7 +13,7 @@ import secrets
 import hashlib
 import hmac
 from app.config import settings
-from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse
+from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse, CartStatusUpdate
 from app.schemas.alert import AlertResponse, AlertResolutionRequest, ReviewCaseResponse, ReviewDecisionRequest
 from app.services.alert_service import AlertService
 from app.services.session_service import SessionService
@@ -226,6 +226,125 @@ def toggle_cart_status(cart_id: str, db: Session = Depends(get_db)):
         battery_level=cart.battery_level,
         camera_status=cart.camera_status,
         last_heartbeat=cart.last_heartbeat
+    )
+
+@router.post("/carts/{cart_id}/reset-session")
+async def reset_cart_session(cart_id: str, db: Session = Depends(get_db)):
+    """
+    Force-terminate and release any active session on the cart.
+    Resets cart status to IDLE and frees it immediately for new shoppers.
+    """
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    # 1. Terminate any active sessions on this cart
+    active_sessions = db.query(CartSession).filter(
+        CartSession.cart_id == cart.id,
+        CartSession.status == "ACTIVE"
+    ).all()
+
+    for s in active_sessions:
+        s.status = "ABANDONED"
+        s.ended_at = datetime.utcnow()
+
+    # 2. Reset cart state
+    cart.status = "IDLE"
+    cart.last_heartbeat = datetime.utcnow()
+    db.commit()
+    db.refresh(cart)
+
+    # 3. Notify connected WebSockets
+    await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "status": "IDLE",
+        "session_id": None
+    })
+    await ws_manager.broadcast_to_cart(cart.id, "SESSION_RESET_BY_ADMIN", {
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "message": "Cart session has been reset by store administration. Cart is now available."
+    })
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Active session on cart '{cart.cart_number}' successfully released. The cart is now available.",
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "cart_status": cart.status
+    }
+
+@router.patch("/carts/{cart_id}", response_model=CartResponse)
+async def update_cart_details(cart_id: str, update_in: CartStatusUpdate, db: Session = Depends(get_db)):
+    """
+    Edit cart attributes (cart_number, status, is_enabled, battery_level, camera_status).
+    If status is set to IDLE, any lingering active session is automatically cleared.
+    """
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    if update_in.cart_number is not None and update_in.cart_number.strip():
+        new_num = update_in.cart_number.upper().strip()
+        if new_num != cart.cart_number:
+            existing = db.query(Cart).filter(Cart.cart_number == new_num).first()
+            if existing:
+                raise HTTPException(status_code=400, detail=f"Cart number '{new_num}' is already in use.")
+            cart.cart_number = new_num
+            # Regenerate signed url for new cart number
+            cart.signed_connect_url = build_signed_connect_url(cart.cart_number, cart.qr_code_token)
+
+    if update_in.status is not None:
+        valid_statuses = ["IDLE", "ACTIVE", "ALERT", "MAINTENANCE"]
+        if update_in.status.upper() in valid_statuses:
+            cart.status = update_in.status.upper()
+            if cart.status == "IDLE":
+                active_sessions = db.query(CartSession).filter(
+                    CartSession.cart_id == cart.id,
+                    CartSession.status == "ACTIVE"
+                ).all()
+                for s in active_sessions:
+                    s.status = "ABANDONED"
+                    s.ended_at = datetime.utcnow()
+
+    if update_in.is_enabled is not None:
+        cart.is_enabled = update_in.is_enabled
+
+    if update_in.battery_level is not None:
+        cart.battery_level = update_in.battery_level
+
+    if update_in.camera_status is not None:
+        cart.camera_status = update_in.camera_status
+
+    db.commit()
+    db.refresh(cart)
+
+    active_sess = db.query(CartSession).filter(
+        CartSession.cart_id == cart.id,
+        CartSession.status == "ACTIVE"
+    ).first()
+
+    await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "status": cart.status,
+        "session_id": active_sess.id if active_sess else None
+    })
+
+    return CartResponse(
+        id=cart.id,
+        cart_number=cart.cart_number,
+        qr_code_token=cart.qr_code_token,
+        is_enabled=cart.is_enabled,
+        signed_connect_url=cart.signed_connect_url or build_signed_connect_url(cart.cart_number, cart.qr_code_token),
+        status=cart.status,
+        battery_level=cart.battery_level,
+        camera_status=cart.camera_status,
+        last_heartbeat=cart.last_heartbeat,
+        active_session_id=active_sess.id if active_sess else None,
+        item_count=active_sess.item_count if active_sess else 0,
+        total_amount=active_sess.total_amount if active_sess else 0.0
     )
 
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Camera, Battery, Wifi, ShieldAlert, ShoppingCart, Eye, RefreshCw, X } from 'lucide-react';
+import { Camera, Battery, Wifi, ShieldAlert, ShoppingCart, Eye, RefreshCw, X, RotateCcw } from 'lucide-react';
 import { CartFleetItem } from '../types';
 import { api } from '../services/api';
 
@@ -8,6 +8,7 @@ export const LiveCartMonitor: React.FC = () => {
   const [filter, setFilter] = useState<'ALL' | 'ACTIVE' | 'ALERT' | 'IDLE'>('ALL');
   const [selectedCart, setSelectedCart] = useState<CartFleetItem | null>(null);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   const fetchCarts = async () => {
     try {
@@ -17,6 +18,22 @@ export const LiveCartMonitor: React.FC = () => {
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResetCart = async (cart: CartFleetItem) => {
+    if (!window.confirm(`Force release session and reset ${cart.cart_number} to Idle?`)) {
+      return;
+    }
+    setActionLoading(cart.id);
+    try {
+      const res = await api.resetCartSession(cart.id);
+      alert(res.message);
+      await fetchCarts();
+    } catch (err: any) {
+      alert(err.message || 'Failed to reset cart');
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -128,14 +145,26 @@ export const LiveCartMonitor: React.FC = () => {
                 </div>
               </div>
 
-              {/* Action: Open Live Camera Modal */}
-              <button
-                onClick={() => setSelectedCart(cart)}
-                className="w-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold py-2.5 rounded-2xl flex items-center justify-center gap-1.5 active:scale-95 transition-all"
-              >
-                <Eye className="w-3.5 h-3.5 text-emerald-500" />
-                Live Camera Feed
-              </button>
+              {/* Action: Open Live Camera Modal & Quick Reset */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setSelectedCart(cart)}
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold py-2.5 rounded-2xl flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                >
+                  <Eye className="w-3.5 h-3.5 text-emerald-500" />
+                  Live Camera Feed
+                </button>
+                {(cart.status === 'ACTIVE' || cart.status === 'ALERT' || cart.item_count > 0 || Boolean(cart.active_session_id)) && (
+                  <button
+                    onClick={() => handleResetCart(cart)}
+                    disabled={actionLoading === cart.id}
+                    title="Force Release Session and Reset Cart to Idle"
+                    className="p-2.5 rounded-2xl bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 text-xs font-bold transition-all active:scale-95 border border-amber-200 dark:border-amber-800/40"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${actionLoading === cart.id ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Plus, Printer, QrCode, Download, RefreshCw, Key, ShieldCheck, 
-  Copy, Check, AlertTriangle, Power, ShoppingCart, ExternalLink, Battery, Camera
+  Copy, Check, AlertTriangle, Power, ShoppingCart, ExternalLink, Battery, Camera,
+  Edit3, RotateCcw, X, Unlock, Save
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { CartFleetItem, CartRegistrationResult } from '../types';
@@ -21,6 +22,13 @@ export const CartFleetView: React.FC = () => {
 
   // Single Cart Print Modal
   const [printCart, setPrintCart] = useState<CartFleetItem | null>(null);
+
+  // Edit Cart Modal State
+  const [editingCart, setEditingCart] = useState<CartFleetItem | null>(null);
+  const [editCartNumber, setEditCartNumber] = useState('');
+  const [editStatus, setEditStatus] = useState<'IDLE' | 'ACTIVE' | 'ALERT' | 'MAINTENANCE'>('IDLE');
+  const [editIsEnabled, setEditIsEnabled] = useState(true);
+  const [saveLoading, setSaveLoading] = useState(false);
 
   const fetchCarts = async () => {
     try {
@@ -110,6 +118,51 @@ export const CartFleetView: React.FC = () => {
       await fetchCarts();
     } catch (err: any) {
       alert(err.message || 'Failed to toggle cart status');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleOpenEditModal = (c: CartFleetItem) => {
+    setEditingCart(c);
+    setEditCartNumber(c.cart_number);
+    setEditStatus(c.status);
+    setEditIsEnabled(c.is_enabled);
+  };
+
+  const handleSaveCartEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCart) return;
+    setSaveLoading(true);
+    try {
+      await api.updateCart(editingCart.id, {
+        cart_number: editCartNumber.trim().toUpperCase(),
+        status: editStatus,
+        is_enabled: editIsEnabled
+      });
+      setEditingCart(null);
+      await fetchCarts();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update cart');
+    } finally {
+      setSaveLoading(false);
+    }
+  };
+
+  const handleResetSession = async (c: CartFleetItem) => {
+    if (!window.confirm(`Force release active session on cart ${c.cart_number}? This will end any stuck shopper session and reset the cart to Idle immediately.`)) {
+      return;
+    }
+    setActionLoading(`reset-${c.id}`);
+    try {
+      const res = await api.resetCartSession(c.id);
+      alert(res.message);
+      if (editingCart && editingCart.id === c.id) {
+        setEditingCart(null);
+      }
+      await fetchCarts();
+    } catch (err: any) {
+      alert(err.message || 'Failed to reset cart session');
     } finally {
       setActionLoading(null);
     }
@@ -245,24 +298,44 @@ export const CartFleetView: React.FC = () => {
                       }`}>
                         {c.is_enabled ? 'ENABLED' : 'DISABLED'}
                       </span>
+                      {c.status !== 'IDLE' && (
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                          c.status === 'ACTIVE' 
+                            ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-400'
+                            : c.status === 'ALERT'
+                            ? 'bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-400'
+                            : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400'
+                        }`}>
+                          {c.status}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] font-mono text-slate-400 mt-0.5">
                       {c.qr_code_token}
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => handleToggleStatus(c.id)}
-                    disabled={actionLoading === `toggle-${c.id}`}
-                    title={c.is_enabled ? 'Disable Cart' : 'Enable Cart'}
-                    className={`p-2 rounded-xl transition-all ${
-                      c.is_enabled 
-                        ? 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/50' 
-                        : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
-                    }`}
-                  >
-                    <Power className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleOpenEditModal(c)}
+                      title="Edit Cart & Reset Session"
+                      className="p-2 rounded-xl text-slate-400 hover:text-emerald-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all active:scale-95"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleToggleStatus(c.id)}
+                      disabled={actionLoading === `toggle-${c.id}`}
+                      title={c.is_enabled ? 'Disable Cart' : 'Enable Cart'}
+                      className={`p-2 rounded-xl transition-all ${
+                        c.is_enabled 
+                          ? 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/50' 
+                          : 'text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <Power className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Scannable Real QR Graphic */}
@@ -296,12 +369,25 @@ export const CartFleetView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Active Session Indicator */}
+                {/* Active Session Indicator & Quick Release */}
                 <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 text-[11px] flex items-center justify-between">
-                  <span className="text-slate-500">Shopper Status:</span>
-                  <span className={`font-semibold ${hasActiveSession ? 'text-emerald-500' : 'text-slate-400'}`}>
-                    {hasActiveSession ? '🟢 In Use (1 Active)' : '⚪ Idle (Ready)'}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-slate-500">Shopper Status:</span>
+                    <span className={`font-semibold ${hasActiveSession || c.status === 'ACTIVE' ? 'text-emerald-500' : 'text-slate-400'}`}>
+                      {hasActiveSession || c.status === 'ACTIVE' ? '🟢 In Use (1 Active)' : '⚪ Idle (Ready)'}
+                    </span>
+                  </div>
+                  {(hasActiveSession || c.status === 'ACTIVE' || c.status === 'ALERT') && (
+                    <button
+                      onClick={() => handleResetSession(c)}
+                      disabled={actionLoading === `reset-${c.id}`}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 font-bold text-[10px] flex items-center gap-1 active:scale-95 transition-all border border-amber-500/20"
+                      title="Force release active session and reset cart to Idle"
+                    >
+                      <RotateCcw className={`w-3 h-3 ${actionLoading === `reset-${c.id}` ? 'animate-spin' : ''}`} />
+                      <span>Release Cart</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Action Buttons Toolbar */}
@@ -426,6 +512,128 @@ export const CartFleetView: React.FC = () => {
                 I Have Saved My Device Token Safely
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Cart Modal */}
+      {editingCart && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 max-w-md w-full rounded-3xl p-6 shadow-2xl space-y-5 animate-scale-up text-slate-900 dark:text-white">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                  <Edit3 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-display font-bold text-lg">
+                    Edit Cart: {editingCart.cart_number}
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Update fleet settings, status, or clear active session
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingCart(null)}
+                className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCartEdit} className="space-y-4">
+              {/* Cart Number */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  Cart Number
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editCartNumber}
+                  onChange={(e) => setEditCartNumber(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono font-bold text-sm rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white"
+                />
+              </div>
+
+              {/* Status */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  Operational Status
+                </label>
+                <select
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value as any)}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-semibold text-sm rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 text-slate-900 dark:text-white"
+                >
+                  <option value="IDLE">IDLE (Ready for Shoppers)</option>
+                  <option value="ACTIVE">ACTIVE (Shopper Session in Progress)</option>
+                  <option value="ALERT">ALERT (Security Mismatch Investigation)</option>
+                  <option value="MAINTENANCE">MAINTENANCE (Offline for Servicing)</option>
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Selecting IDLE automatically clears any stuck active sessions.
+                </p>
+              </div>
+
+              {/* Enabled Switch */}
+              <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
+                <div>
+                  <div className="text-xs font-bold">Enabled for Shoppers</div>
+                  <div className="text-[11px] text-slate-400">Disabled carts reject QR pairings immediately</div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={editIsEnabled}
+                  onChange={(e) => setEditIsEnabled(e.target.checked)}
+                  className="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500 cursor-pointer"
+                />
+              </div>
+
+              {/* Active Session Release Panel */}
+              {(editingCart.active_session_id || editingCart.status === 'ACTIVE' || editingCart.status === 'ALERT') && (
+                <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-500 flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4" />
+                      Active Session Detected
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleResetSession(editingCart)}
+                      disabled={actionLoading === `reset-${editingCart.id}`}
+                      className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-sm active:scale-95 transition-all flex items-center gap-1"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${actionLoading === `reset-${editingCart.id}` ? 'animate-spin' : ''}`} />
+                      <span>Release Cart Now</span>
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-amber-600 dark:text-amber-300/80">
+                    If this cart shows "occupied by an active shopper" on the shopper screen, click Release Cart Now to clear it.
+                  </p>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-200 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingCart(null)}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saveLoading}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-600/30 active:scale-95 transition-all"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{saveLoading ? 'Saving...' : 'Save Changes'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

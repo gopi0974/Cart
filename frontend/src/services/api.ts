@@ -187,6 +187,19 @@ export const api = {
     });
   },
 
+  async resetCartSession(cartId: string): Promise<{ status: string; message: string }> {
+    return request<{ status: string; message: string }>(`/admin/carts/${cartId}/reset-session`, {
+      method: 'POST',
+    });
+  },
+
+  async updateCart(cartId: string, updates: Partial<{ cart_number: string; status: string; is_enabled: boolean; battery_level: number; camera_status: string }>): Promise<CartFleetItem> {
+    return request<CartFleetItem>(`/admin/carts/${cartId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    });
+  },
+
   async getAdminAlerts(status?: string): Promise<AdminAlert[]> {
     const q = status ? `?status=${status}` : '';
     return request<AdminAlert[]>(`/admin/alerts${q}`);

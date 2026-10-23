@@ -6,6 +6,7 @@ class CartCreate(BaseModel):
     cart_number: str
 
 class CartStatusUpdate(BaseModel):
+    cart_number: Optional[str] = None
     status: Optional[str] = None
     battery_level: Optional[int] = None
     camera_status: Optional[str] = None
