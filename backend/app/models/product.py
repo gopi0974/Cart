@@ -58,7 +58,10 @@ class ProductEmbedding(Base):
     angle_tag = Column(String(50), nullable=False)
     embedding_json = Column(Text, nullable=False)  # JSON-serialized list of floats (cross-db compatible)
     embedding_vector = Column(Vector(512), nullable=True) if (HAS_PGVECTOR and Vector is not None) else Column(Text, nullable=True)
-    model_version = Column(String(50), nullable=False, default="v1.0.0-dinov2")
+    image_path = Column(Text, nullable=True)
+    model_name = Column(String(100), nullable=False, default="openai/clip-vit-base-patch32")
+    model_version = Column(String(50), nullable=False, default="v1.0.0-clip")
+    vector_dim = Column(Integer, nullable=False, default=512)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     product = relationship("Product", back_populates="embeddings")

@@ -233,6 +233,31 @@ export const api = {
     return request<any[]>('/admin/models');
   },
 
+  async getModelHealth(): Promise<{
+    status: string;
+    model_name: string;
+    model_version: string;
+    vector_dimension: number;
+    enrolled_products_count: number;
+    total_vectors_count: number;
+    last_enrollment_time: string | null;
+    offline_cached: boolean;
+    confidence_high: number;
+    confidence_low: number;
+  }> {
+    return request('/admin/model-health');
+  },
+
+  async updateModelThresholds(confidenceHigh: number, confidenceLow: number) {
+    return request('/admin/model-thresholds', {
+      method: 'POST',
+      body: JSON.stringify({
+        confidence_high: confidenceHigh,
+        confidence_low: confidenceLow,
+      }),
+    });
+  },
+
   async activateModel(modelId: string) {
     return request(`/admin/models/${modelId}/activate`, { method: 'POST' });
   },

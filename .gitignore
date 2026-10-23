@@ -17,6 +17,9 @@ backend/smartcart.db*
 .pytest_cache/
 uploads/evidence/*
 !uploads/evidence/.gitkeep
+backend/models_storage/*
+!backend/models_storage/.gitkeep
+!backend/models_storage/vector_cache.json
 
 # Environment & Local Secrets
 .env

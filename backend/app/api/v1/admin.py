@@ -1,6 +1,7 @@
 from datetime import datetime, date
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.database import get_db
@@ -477,6 +478,52 @@ async def submit_review_decision(case_id: str, req: ReviewDecisionRequest, db: S
 
     db.commit()
     return {"status": "SUCCESS", "message": f"Review case {case.status.lower()}."}
+
+class ModelThresholdsUpdate(BaseModel):
+    confidence_high: float
+    confidence_low: float
+
+@router.get("/model-health")
+def get_model_health(db: Session = Depends(get_db)):
+    """Health endpoint returning real embedding model name, vector dim, products enrolled, vectors count, and last enrollment time."""
+    import os
+    from app.ai.feature_extractor import MODEL_NAME, MODEL_VERSION, VECTOR_DIM, LOCAL_MODEL_DIR, FALLBACK_MODEL_DIR
+    from app.models.product import ProductEmbedding
+    from sqlalchemy import func
+
+    total_vectors = db.query(ProductEmbedding).count()
+    enrolled_products = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
+    latest_emb = db.query(ProductEmbedding).order_by(ProductEmbedding.created_at.desc()).first()
+    last_enrollment_time = latest_emb.created_at.isoformat() if (latest_emb and latest_emb.created_at) else None
+
+    offline_cached = (os.path.exists(LOCAL_MODEL_DIR) and len(os.listdir(LOCAL_MODEL_DIR)) > 0) or \
+                     (os.path.exists(FALLBACK_MODEL_DIR) and len(os.listdir(FALLBACK_MODEL_DIR)) > 0)
+
+    return {
+        "status": "HEALTHY",
+        "model_name": MODEL_NAME,
+        "model_version": MODEL_VERSION,
+        "vector_dimension": VECTOR_DIM,
+        "enrolled_products_count": enrolled_products,
+        "total_vectors_count": total_vectors,
+        "last_enrollment_time": last_enrollment_time,
+        "offline_cached": offline_cached,
+        "confidence_high": settings.CONFIDENCE_HIGH,
+        "confidence_low": settings.CONFIDENCE_LOW,
+    }
+
+@router.post("/model-thresholds")
+def update_model_thresholds(req: ModelThresholdsUpdate):
+    """Dynamically configure high and low verification thresholds."""
+    if not (0.0 <= req.confidence_low < req.confidence_high <= 1.0):
+        raise HTTPException(status_code=400, detail="Thresholds must satisfy 0.0 <= low < high <= 1.0")
+    settings.CONFIDENCE_HIGH = round(req.confidence_high, 4)
+    settings.CONFIDENCE_LOW = round(req.confidence_low, 4)
+    return {
+        "status": "SUCCESS",
+        "confidence_high": settings.CONFIDENCE_HIGH,
+        "confidence_low": settings.CONFIDENCE_LOW
+    }
 
 @router.get("/models")
 def list_models(db: Session = Depends(get_db)):
