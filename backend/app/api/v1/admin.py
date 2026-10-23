@@ -9,7 +9,11 @@ from app.models.session import CartSession, CartItem
 from app.models.alert import Alert, ReviewCase
 from app.models.transaction import Transaction, ModelVersion, AuditLog
 from app.models.product import Product
-from app.schemas.cart import CartResponse, CartCreate
+import secrets
+import hashlib
+import hmac
+from app.config import settings
+from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse
 from app.schemas.alert import AlertResponse, AlertResolutionRequest, ReviewCaseResponse, ReviewDecisionRequest
 from app.services.alert_service import AlertService
 from app.services.session_service import SessionService
@@ -59,9 +63,19 @@ def get_overview(db: Session = Depends(get_db)):
         ]
     }
 
+def generate_cart_hmac(cart_number: str, qr_token: str) -> str:
+    """Generate cryptographic HMAC signature for cart QR pairing link."""
+    msg = f"{cart_number}:{qr_token}".encode("utf-8")
+    return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
+
+def build_signed_connect_url(cart_number: str, qr_token: str) -> str:
+    """Build full live public URL for shopper QR pairing with HMAC verification signature."""
+    sig = generate_cart_hmac(cart_number, qr_token)
+    return f"{settings.BASE_URL}/user/connect?cart={cart_number}&token={qr_token}&sig={sig}"
+
 @router.get("/carts", response_model=List[CartResponse])
 def list_carts(db: Session = Depends(get_db)):
-    """Retrieve all physical carts with health, battery, camera, and active session details."""
+    """Retrieve all physical carts with health, battery, camera, and signed connect URLs."""
     carts = db.query(Cart).order_by(Cart.cart_number.asc()).all()
     results = []
     for c in carts:
@@ -70,10 +84,18 @@ def list_carts(db: Session = Depends(get_db)):
             CartSession.status == "ACTIVE"
         ).first()
         
+        # Ensure signed connect url is populated
+        signed_url = c.signed_connect_url or build_signed_connect_url(c.cart_number, c.qr_code_token)
+        if not c.signed_connect_url:
+            c.signed_connect_url = signed_url
+            db.commit()
+
         results.append(CartResponse(
             id=c.id,
             cart_number=c.cart_number,
             qr_code_token=c.qr_code_token,
+            is_enabled=c.is_enabled,
+            signed_connect_url=signed_url,
             status=c.status,
             battery_level=c.battery_level,
             camera_status=c.camera_status,
@@ -84,17 +106,32 @@ def list_carts(db: Session = Depends(get_db)):
         ))
     return results
 
-@router.post("/carts", response_model=CartResponse)
+@router.post("/carts", response_model=CartRegistrationResponse)
 def register_cart(cart_in: CartCreate, db: Session = Depends(get_db)):
-    """Register new smart cart in the supermarket fleet."""
+    """
+    Register new smart cart in the fleet.
+    Generates a secure random device token, stores ONLY its SHA-256 hash,
+    and returns the raw device token once for configuration.
+    """
     cart_num = cart_in.cart_number.upper().strip()
     existing = db.query(Cart).filter(Cart.cart_number == cart_num).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"Cart '{cart_num}' is already registered.")
 
+    # 1. Generate secure random device token (shown ONCE, stored only as hash)
+    raw_device_token = secrets.token_hex(16)
+    token_hash = hashlib.sha256(raw_device_token.encode("utf-8")).hexdigest()
+
+    # 2. Generate signed connect URL with HMAC
+    qr_token = f"QR-{cart_num}"
+    signed_url = build_signed_connect_url(cart_num, qr_token)
+
     new_cart = Cart(
         cart_number=cart_num,
-        qr_code_token=f"QR-{cart_num}",
+        qr_code_token=qr_token,
+        device_token_hash=token_hash,
+        is_enabled=True,
+        signed_connect_url=signed_url,
         status="IDLE",
         battery_level=100,
         camera_status="ONLINE"
@@ -102,15 +139,95 @@ def register_cart(cart_in: CartCreate, db: Session = Depends(get_db)):
     db.add(new_cart)
     db.commit()
     db.refresh(new_cart)
-    return CartResponse(
+
+    return CartRegistrationResponse(
         id=new_cart.id,
         cart_number=new_cart.cart_number,
         qr_code_token=new_cart.qr_code_token,
+        is_enabled=new_cart.is_enabled,
+        signed_connect_url=new_cart.signed_connect_url,
         status=new_cart.status,
         battery_level=new_cart.battery_level,
         camera_status=new_cart.camera_status,
-        last_heartbeat=new_cart.last_heartbeat
+        last_heartbeat=new_cart.last_heartbeat,
+        device_token=raw_device_token
     )
+
+@router.post("/carts/{cart_id}/regenerate-qr", response_model=CartResponse)
+def regenerate_cart_qr(cart_id: str, db: Session = Depends(get_db)):
+    """Regenerate cart QR token and HMAC signature, invalidating the previous QR code."""
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    new_token = f"QR-{cart.cart_number}-{secrets.token_hex(3).upper()}"
+    signed_url = build_signed_connect_url(cart.cart_number, new_token)
+
+    cart.qr_code_token = new_token
+    cart.signed_connect_url = signed_url
+    db.commit()
+    db.refresh(cart)
+
+    return CartResponse(
+        id=cart.id,
+        cart_number=cart.cart_number,
+        qr_code_token=cart.qr_code_token,
+        is_enabled=cart.is_enabled,
+        signed_connect_url=cart.signed_connect_url,
+        status=cart.status,
+        battery_level=cart.battery_level,
+        camera_status=cart.camera_status,
+        last_heartbeat=cart.last_heartbeat
+    )
+
+@router.post("/carts/{cart_id}/regenerate-token", response_model=CartRegistrationResponse)
+def regenerate_device_token(cart_id: str, db: Session = Depends(get_db)):
+    """Regenerate cart device token (stores new SHA-256 hash, returns raw token once)."""
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    raw_token = secrets.token_hex(16)
+    cart.device_token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    db.commit()
+    db.refresh(cart)
+
+    return CartRegistrationResponse(
+        id=cart.id,
+        cart_number=cart.cart_number,
+        qr_code_token=cart.qr_code_token,
+        is_enabled=cart.is_enabled,
+        signed_connect_url=cart.signed_connect_url or build_signed_connect_url(cart.cart_number, cart.qr_code_token),
+        status=cart.status,
+        battery_level=cart.battery_level,
+        camera_status=cart.camera_status,
+        last_heartbeat=cart.last_heartbeat,
+        device_token=raw_token
+    )
+
+@router.post("/carts/{cart_id}/toggle-status", response_model=CartResponse)
+def toggle_cart_status(cart_id: str, db: Session = Depends(get_db)):
+    """Toggle cart enabled/disabled status. Disabled carts cannot be paired by shoppers."""
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    cart.is_enabled = not cart.is_enabled
+    db.commit()
+    db.refresh(cart)
+
+    return CartResponse(
+        id=cart.id,
+        cart_number=cart.cart_number,
+        qr_code_token=cart.qr_code_token,
+        is_enabled=cart.is_enabled,
+        signed_connect_url=cart.signed_connect_url,
+        status=cart.status,
+        battery_level=cart.battery_level,
+        camera_status=cart.camera_status,
+        last_heartbeat=cart.last_heartbeat
+    )
+
 
 @router.get("/alerts", response_model=List[AlertResponse])
 def list_alerts(

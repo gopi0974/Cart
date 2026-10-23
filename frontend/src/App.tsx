@@ -10,6 +10,7 @@ export const App: React.FC = () => {
       <BrowserRouter>
         <Routes>
           <Route path="/user" element={<ShopperApp />} />
+          <Route path="/user/connect" element={<ShopperApp />} />
           <Route path="/admin" element={<AdminPortal />} />
           <Route path="/admin/*" element={<AdminPortal />} />
           <Route path="/" element={<Navigate to="/user" replace />} />

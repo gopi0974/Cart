@@ -45,20 +45,21 @@ async def simulate_cart_camera_action(req: SimulateActionRequest, db: Session = 
 
     default_evidence = req.evidence_url or "https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&auto=format&fit=crop&q=80"
 
-    if req.action_type == "PLACE_CORRECT":
+    if req.action_type in ["PLACE_CORRECT", "CONFIRM_BARCODE"]:
         if not active_session:
             raise HTTPException(status_code=400, detail="No active shopping session on this cart to verify placement.")
         
+        target_barcode = req.barcode or req.detected_barcode
         # Verify the pending item
         item = await SessionService.verify_item_placement(
             db=db,
             session_id=active_session.id,
-            barcode=req.barcode,
+            barcode=target_barcode,
             confidence=req.confidence or 0.95,
             evidence_url=default_evidence
         )
         if not item:
-            raise HTTPException(status_code=400, detail=f"No pending item with barcode '{req.barcode}' awaiting placement.")
+            raise HTTPException(status_code=400, detail=f"No pending item with barcode '{target_barcode}' awaiting placement.")
         return {"status": "SUCCESS", "event": "ITEM_VERIFIED", "item_name": item.product.name}
 
     elif req.action_type == "PLACE_WRONG":

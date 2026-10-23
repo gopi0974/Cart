@@ -84,6 +84,8 @@ export interface CartFleetItem {
   id: string;
   cart_number: string;
   qr_code_token: string;
+  is_enabled: boolean;
+  signed_connect_url?: string;
   status: 'IDLE' | 'ACTIVE' | 'ALERT' | 'MAINTENANCE';
   battery_level: number;
   camera_status: 'ONLINE' | 'DEGRADED' | 'OFFLINE';
@@ -92,6 +94,12 @@ export interface CartFleetItem {
   item_count: number;
   total_amount: number;
 }
+
+export interface CartRegistrationResult extends CartFleetItem {
+  device_token: string;
+  security_notice: string;
+}
+
 
 export interface AdminAlert {
   id: string;

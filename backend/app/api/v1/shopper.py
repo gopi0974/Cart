@@ -20,11 +20,48 @@ class CouponRequest(BaseModel):
 async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
     """Pair shopper mobile phone with cart by scanning its QR code token."""
     try:
-        session = await SessionService.pair_cart(db, req.qr_token, req.customer_phone)
+        session = await SessionService.pair_cart(
+            db=db,
+            qr_token=req.qr_token,
+            customer_phone=req.customer_phone,
+            signature=req.signature,
+            cart_number=req.cart_number
+        )
         details = SessionService.get_session_details(db, session.id)
         return _format_session_response(details)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/connect", response_model=SessionResponse)
+async def connect_cart_via_qr(
+    cart: str,
+    token: str,
+    sig: Optional[str] = None,
+    phone: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Connect shopper to cart via signed QR link.
+    Validates HMAC signature and enforces single active session policy.
+    """
+    if not sig:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Security verification failed: Missing HMAC signature. Please scan the official cart QR code."
+        )
+    try:
+        session = await SessionService.pair_cart(
+            db=db,
+            qr_token=token,
+            customer_phone=phone,
+            signature=sig,
+            cart_number=cart
+        )
+        details = SessionService.get_session_details(db, session.id)
+        return _format_session_response(details)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.get("/{session_id}", response_model=SessionResponse)
 def get_session(session_id: str, db: Session = Depends(get_db)):

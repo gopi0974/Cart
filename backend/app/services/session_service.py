@@ -1,6 +1,9 @@
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+import hmac
+import hashlib
 from sqlalchemy.orm import Session
+from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
 from app.models.product import Product
@@ -39,25 +42,50 @@ class SessionService:
         db.flush()
 
     @staticmethod
-    async def pair_cart(db: Session, qr_token: str, customer_phone: Optional[str] = None) -> CartSession:
-        """Pair mobile phone with a physical cart via QR token."""
+    async def pair_cart(
+        db: Session,
+        qr_token: str,
+        customer_phone: Optional[str] = None,
+        signature: Optional[str] = None,
+        cart_number: Optional[str] = None
+    ) -> CartSession:
+        """Pair mobile phone with a physical cart, verifying HMAC signature and single active session policy."""
+        # 1. Lookup cart
         cart = db.query(Cart).filter(Cart.qr_code_token == qr_token).first()
         if not cart:
-            # Check by cart number fallback (e.g. CART-12)
-            cart = db.query(Cart).filter(Cart.cart_number == qr_token.upper()).first()
+            c_num = (cart_number or qr_token).upper().strip()
+            cart = db.query(Cart).filter(Cart.cart_number == c_num).first()
             if not cart:
                 raise ValueError("Invalid QR code or Cart Number.")
 
-        # Check for existing active session on this cart
+        # 2. Reject disabled carts
+        if not cart.is_enabled:
+            raise ValueError(f"Cart '{cart.cart_number}' is currently disabled by store management.")
+
+        # 3. Cryptographic HMAC signature check (if signature provided)
+        if signature:
+            expected_sig = hmac.new(
+                settings.QR_SIGNING_SECRET.encode("utf-8"),
+                f"{cart.cart_number}:{cart.qr_code_token}".encode("utf-8"),
+                hashlib.sha256
+            ).hexdigest()[:16]
+            if not hmac.compare_digest(signature, expected_sig):
+                raise ValueError("Security verification failed: Invalid or tampered cart QR signature.")
+
+        # 4. Enforce ONE active session per cart rule
         existing_session = db.query(CartSession).filter(
             CartSession.cart_id == cart.id,
             CartSession.status == "ACTIVE"
         ).first()
 
         if existing_session:
-            return existing_session
+            # If same customer is reconnecting, allow resume
+            if customer_phone and existing_session.customer_phone == customer_phone:
+                return existing_session
+            # Block second shopper from pairing while first shopper is active
+            raise ValueError(f"Cart '{cart.cart_number}' is currently occupied by an active shopper. Only one active session is allowed per cart.")
 
-        # Create new shopping session
+        # 5. Create new shopping session
         session = CartSession(
             cart_id=cart.id,
             customer_phone=customer_phone,

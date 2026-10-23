@@ -6,6 +6,9 @@ from app.schemas.product import ProductResponse
 class PairSessionRequest(BaseModel):
     qr_token: str
     customer_phone: Optional[str] = None
+    signature: Optional[str] = None
+    cart_number: Optional[str] = None
+
 
 class CartItemResponse(BaseModel):
     id: str

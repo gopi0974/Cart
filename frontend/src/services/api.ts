@@ -1,6 +1,8 @@
-import { CartSession, Product, ReceiptData, CartFleetItem, AdminAlert, ReviewCase } from '../types';
+import { CartSession, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
 
-const API_BASE = 'http://localhost:8000/api/v1';
+const API_BASE = (import.meta as any).env?.VITE_API_URL 
+  ? `${(import.meta as any).env.VITE_API_URL}/api/v1` 
+  : 'http://localhost:8000/api/v1';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${endpoint}`;
@@ -44,11 +46,23 @@ export const api = {
   },
 
   // Shopper Mobile Endpoints
-  async pairCart(qrToken: string, phone?: string): Promise<CartSession> {
+  async pairCart(qrToken: string, phone?: string, signature?: string, cartNumber?: string): Promise<CartSession> {
     return request<CartSession>('/shopper/pair', {
       method: 'POST',
-      body: JSON.stringify({ qr_token: qrToken, customer_phone: phone }),
+      body: JSON.stringify({ 
+        qr_token: qrToken, 
+        customer_phone: phone,
+        signature: signature,
+        cart_number: cartNumber
+      }),
     });
+  },
+
+  async connectViaQR(cartNumber: string, qrToken: string, sig?: string, phone?: string): Promise<CartSession> {
+    const params = new URLSearchParams({ cart: cartNumber, token: qrToken });
+    if (sig) params.append('sig', sig);
+    if (phone) params.append('phone', phone);
+    return request<CartSession>(`/shopper/connect?${params.toString()}`);
   },
 
   async getSession(sessionId: string): Promise<CartSession> {
@@ -128,10 +142,28 @@ export const api = {
     return request<CartFleetItem[]>('/admin/carts');
   },
 
-  async registerCart(cartNumber: string): Promise<CartFleetItem> {
-    return request<CartFleetItem>('/admin/carts', {
+  async registerCart(cartNumber: string): Promise<CartRegistrationResult> {
+    return request<CartRegistrationResult>('/admin/carts', {
       method: 'POST',
       body: JSON.stringify({ cart_number: cartNumber }),
+    });
+  },
+
+  async regenerateCartQR(cartId: string): Promise<CartFleetItem> {
+    return request<CartFleetItem>(`/admin/carts/${cartId}/regenerate-qr`, {
+      method: 'POST',
+    });
+  },
+
+  async regenerateDeviceToken(cartId: string): Promise<CartRegistrationResult> {
+    return request<CartRegistrationResult>(`/admin/carts/${cartId}/regenerate-token`, {
+      method: 'POST',
+    });
+  },
+
+  async toggleCartStatus(cartId: string): Promise<CartFleetItem> {
+    return request<CartFleetItem>(`/admin/carts/${cartId}/toggle-status`, {
+      method: 'POST',
     });
   },
 
