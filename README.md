@@ -112,15 +112,5 @@ docker-compose up --build
 ## 🔒 Privacy & Compliance
 Overhead wide-angle cameras strictly capture the interior basin of the cart basket. No shopper facial recognition, biometric analysis, or customer tracking is conducted.
 
----
 
-## 👨‍💻 Project Author & Lead Contributor
-
-- **Gopi** ([@gopi0974](https://github.com/gopi0974)) — *Project Creator, Full-Stack Architect & AI Vision Lead*
-  - **GitHub Profile**: [@gopi0974](https://github.com/gopi0974)
-  - **Repository**: [gopi0974/Cart](https://github.com/gopi0974/Cart)
-  - **Email**: `bandarugopi133@gmail.com`
-
-[![GitHub Profile](https://img.shields.io/badge/GitHub-gopi0974-181717?style=for-the-badge&logo=github)](https://github.com/gopi0974)
-[![Repository](https://img.shields.io/badge/Repo-gopi0974%2FCart-blue?style=for-the-badge&logo=github)](https://github.com/gopi0974/Cart)
 
