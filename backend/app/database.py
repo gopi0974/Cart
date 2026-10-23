@@ -23,10 +23,17 @@ if not is_sqlite:
         "pool_pre_ping": True,
     })
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    **engine_kwargs
-)
+try:
+    engine = create_engine(
+        settings.DATABASE_URL,
+        **engine_kwargs
+    )
+except Exception as e:
+    logger.error(f"Failed to create database engine with configured URL: {e}. Falling back to SQLite.")
+    engine = create_engine(
+        f"sqlite:///{settings.BASE_DIR}/smartcart.db",
+        connect_args={"check_same_thread": False}
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from pathlib import Path
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -9,15 +10,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR.parent / ".env")
 
-def _normalize_db_url(url: str) -> str:
+def _normalize_db_url(url: Optional[str]) -> str:
     """Normalize SQLAlchemy database URL for PostgreSQL/Supabase/Neon/Render."""
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql://", 1)
-    return url
+    if not url or not str(url).strip():
+        return f"sqlite:///{BASE_DIR}/smartcart.db"
+    clean_url = str(url).strip().strip("'\"")
+    if clean_url.startswith("postgres://"):
+        clean_url = clean_url.replace("postgres://", "postgresql://", 1)
+    return clean_url
 
-raw_db_url = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR}/smartcart.db")
+raw_db_url = os.getenv("DATABASE_URL")
 
 class Settings(BaseModel):
+    BASE_DIR: Path = BASE_DIR
     PROJECT_NAME: str = os.getenv("PROJECT_NAME", "SmartCart AI - Autonomous Retail Backend")
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"

@@ -23,15 +23,18 @@ logger = logging.getLogger("smartcart")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize SQLite database and populate realistic seed data
-    logger.info("Initializing database and seeding catalog...")
-    init_db()
-    db = SessionLocal()
+    # Startup: Initialize database tables and populate catalog if empty
+    logger.info("Initializing database connection...")
     try:
-        seed_database(db)
-        logger.info("Database initialized and catalog seeded successfully.")
-    finally:
-        db.close()
+        init_db()
+        db = SessionLocal()
+        try:
+            seed_database(db)
+            logger.info("Database initialized and catalog verified successfully.")
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Startup Database Warning: {e}. App will continue serving requests.")
     yield
     logger.info("Shutting down SmartCart AI backend...")
 
