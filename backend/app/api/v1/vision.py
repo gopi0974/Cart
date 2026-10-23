@@ -136,6 +136,7 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
             barcode=product.barcode,
             angle_tag=cap.angle_tag,
             embedding_json=json.dumps(base_vec),
+            embedding_vector=base_vec,
             model_version="v1.0.0-dinov2"
         ))
 
@@ -149,6 +150,7 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
                 barcode=product.barcode,
                 angle_tag=f"{cap.angle_tag}_{aug_tag}",
                 embedding_json=json.dumps(aug_vec),
+                embedding_vector=aug_vec,
                 model_version="v1.0.0-dinov2"
             ))
 

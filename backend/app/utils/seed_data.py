@@ -1,16 +1,24 @@
+import json
+import hashlib
+import hmac
 from sqlalchemy.orm import Session
+from app.config import settings
 from app.models.user import User
 from app.models.cart import Cart
 from app.models.product import Product, ProductImage, ProductEmbedding
 from app.models.transaction import ModelVersion
 from app.utils.security import hash_password
-import json
+
+def generate_cart_signature(cart_number: str, qr_token: str) -> str:
+    """Generate deterministic HMAC signature for cart connect link."""
+    msg = f"{cart_number}:{qr_token}".encode("utf-8")
+    return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
 def seed_database(db: Session):
-    """Seed initial supermarket staff, carts, product inventory, and AI model registry."""
-    # 1. Seed Staff Users
+    """Seed production database: one admin account, 3 test carts, sample products, and AI model registry."""
+    # 1. Seed Admin Accounts
     if db.query(User).count() == 0:
-        users = [
+        admin_users = [
             User(
                 email="admin@smartcart.ai",
                 password_hash=hash_password("Admin@123"),
@@ -20,36 +28,36 @@ def seed_database(db: Session):
             User(
                 email="admin@supermart.com",
                 password_hash=hash_password("admin123"),
-                full_name="Sarah Jenkins (Store Admin)",
+                full_name="Store SuperAdmin",
                 role="ADMIN"
             ),
-            User(
-                email="manager@supermart.com",
-                password_hash=hash_password("manager123"),
-                full_name="Rajesh Sharma (Floor Manager)",
-                role="MANAGER"
-            ),
-            User(
-                email="staff@supermart.com",
-                password_hash=hash_password("staff123"),
-                full_name="Anita Roy (Store Associate)",
-                role="STAFF"
-            ),
         ]
-        db.add_all(users)
+        db.add_all(admin_users)
         db.commit()
 
-    # 2. Seed Carts
+    # 2. Seed 3 Test Carts (CART-001, CART-002, CART-003)
     if db.query(Cart).count() == 0:
+        test_carts = [
+            ("CART-001", "CART001_SECRET_TOKEN_2026"),
+            ("CART-002", "CART002_SECRET_TOKEN_2026"),
+            ("CART-003", "CART003_SECRET_TOKEN_2026"),
+        ]
         carts = []
-        for i in range(1, 13):
-            cart_num = f"CART-{i:02d}"
+        for cart_num, dev_token in test_carts:
+            qr_token = f"QR-{cart_num}"
+            sig = generate_cart_signature(cart_num, qr_token)
+            token_hash = hashlib.sha256(dev_token.encode("utf-8")).hexdigest()
+            signed_url = f"{settings.BASE_URL}/user?cart={cart_num}&token={qr_token}&sig={sig}"
+
             carts.append(
                 Cart(
                     cart_number=cart_num,
-                    qr_code_token=f"QR-{cart_num}",
+                    qr_code_token=qr_token,
+                    device_token_hash=token_hash,
+                    is_enabled=True,
+                    signed_connect_url=signed_url,
                     status="IDLE",
-                    battery_level=90 + (i % 10),
+                    battery_level=100,
                     camera_status="ONLINE"
                 )
             )
@@ -58,6 +66,7 @@ def seed_database(db: Session):
 
     # 3. Seed Products
     if db.query(Product).count() == 0:
+
         sample_products = [
             {
                 "barcode": "8901262010053",
@@ -205,6 +214,7 @@ def seed_database(db: Session):
                     barcode=prod.barcode,
                     angle_tag=ang,
                     embedding_json=json.dumps(emb_vector),
+                    embedding_vector=emb_vector,
                     model_version="v1.0.0-dinov2"
                 )
                 db.add(emb)

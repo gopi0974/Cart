@@ -44,7 +44,7 @@ def run_all_tests():
     
     # Test 4: Shopper flow & state machine
     print("Test 4: Shopper pairing, scan item (PENDING state)...")
-    pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-03"})
+    pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
     assert pair.status_code == 200
     sess_id = pair.json()["id"]
     
@@ -62,7 +62,7 @@ def run_all_tests():
     # Test 6: AI verification
     print("Test 6: Simulating AI camera verification...")
     ai = client.post("/api/v1/vision/simulate-action", json={
-        "cart_id": "CART-03",
+        "cart_id": "CART-001",
         "action_type": "PLACE_CORRECT",
         "barcode": "8901262010053"
     })
@@ -86,11 +86,11 @@ def run_all_tests():
     
     # Test 8: Fraud detection - unscanned item
     print("Test 8: Detecting unscanned item and raising alert...")
-    pair2 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-04"})
+    pair2 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-002"})
     sess_id_2 = pair2.json()["id"]
     
     unscanned = client.post("/api/v1/vision/simulate-action", json={
-        "cart_id": "CART-04",
+        "cart_id": "CART-002",
         "action_type": "PLACE_UNSCANNED",
         "detected_barcode": "7622201745424"
     })
@@ -104,13 +104,13 @@ def run_all_tests():
     # Test 9: Admin overview & alert triage
     print("Test 9: Admin overview KPI and alert triage...")
     admin_ov = client.get("/api/v1/admin/overview").json()
-    assert admin_ov["total_carts"] >= 12
+    assert admin_ov["total_carts"] >= 3
     assert admin_ov["open_incidents"] >= 1
     print("[OK] Admin KPI overview and alert triage verified")
 
-    # Test 10: Coupon engine
+    # Test 10: Promotional discount
     print("Test 10: Testing promotional coupon discount...")
-    pair3 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-05"})
+    pair3 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-003"})
     sess_id_3 = pair3.json()["id"]
     client.post(f"/api/v1/shopper/{sess_id_3}/scan-item", json={"barcode": "8901262010053"}) # Amul Butter ₹58
     coup_res = client.post(f"/api/v1/shopper/{sess_id_3}/apply-coupon", json={"coupon_code": "SUPER50"})

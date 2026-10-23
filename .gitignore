@@ -20,8 +20,13 @@ uploads/evidence/*
 
 # Environment & Local Secrets
 .env
+.env.*
+*.env
+backend/.env
+frontend/.env
 .env.local
 .env.*.local
+
 
 # IDE & OS
 .vscode/
