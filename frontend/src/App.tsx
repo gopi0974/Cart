@@ -13,6 +13,9 @@ export const App: React.FC = () => {
           <Route path="/cart-device" element={<CartDeviceView />} />
           <Route path="/user" element={<ShopperApp />} />
           <Route path="/user/connect" element={<ShopperApp />} />
+          <Route path="/shopper" element={<ShopperApp />} />
+          <Route path="/shopper/connect" element={<ShopperApp />} />
+          <Route path="/connect" element={<ShopperApp />} />
           <Route path="/admin" element={<AdminPortal />} />
           <Route path="/admin/*" element={<AdminPortal />} />
           <Route path="/" element={<Navigate to="/user" replace />} />

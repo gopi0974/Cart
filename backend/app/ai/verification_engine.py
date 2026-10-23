@@ -119,7 +119,7 @@ class AIVerificationEngine:
 
         # Decision Tier 1: Auto Approve (Top match equals claimed product & similarity >= HIGH threshold)
         if (top_matches_claimed or is_match) and similarity >= high_thresh:
-            item_name = top_match["name"] if top_match else "Scanned Product"
+            item_name = (top_match.get("product_name") or top_match.get("name")) if top_match else "Scanned Product"
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
                 box=det_box,
@@ -138,7 +138,7 @@ class AIVerificationEngine:
 
         # Decision Tier 2: Uncertain / Reposition Prompt (Similarity between LOW and HIGH threshold)
         elif (top_matches_claimed or is_match) and similarity >= low_thresh:
-            item_name = top_match["name"] if top_match else "Scanned Product"
+            item_name = (top_match.get("product_name") or top_match.get("name")) if top_match else "Scanned Product"
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
                 box=det_box,
@@ -157,7 +157,7 @@ class AIVerificationEngine:
 
         # Decision Tier 3: Wrong Item (Top match is clearly a DIFFERENT product from catalog)
         elif top_match and top_match["barcode"] != claimed_barcode and top_match["similarity"] >= low_thresh:
-            detected_name = top_match["name"]
+            detected_name = top_match.get("product_name") or top_match.get("name", "Wrong Item")
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
                 box=det_box,

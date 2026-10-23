@@ -174,6 +174,7 @@ class VectorStoreMatcher:
                         results.append({
                             "product_id": pid,
                             "product_name": prod_name,
+                            "name": prod_name,
                             "barcode": bcode,
                             "similarity": round(float(sim), 4),
                             "matched_angle": angle,
@@ -209,6 +210,7 @@ class VectorStoreMatcher:
                 results.append({
                     "product_id": prod.id,
                     "product_name": prod.name,
+                    "name": prod.name,
                     "barcode": prod.barcode,
                     "similarity": round(float(sim), 4),
                     "matched_angle": emb.angle_tag,
