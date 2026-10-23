@@ -97,14 +97,14 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         await api.rescanRemove(session.id, barcode);
         await refreshSession();
       } catch (err: any) {
-        alert(err.message || 'Failed to remove item.');
+        throw new Error(err.message || `Item removal failed for barcode ${barcode}`);
       }
     } else {
       try {
         await api.scanItem(session.id, barcode);
         await refreshSession();
       } catch (err: any) {
-        alert(err.message || 'Failed to scan item.');
+        throw new Error(err.message || `Product not found (barcode ${barcode})`);
       }
     }
   };
