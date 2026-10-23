@@ -166,8 +166,21 @@ export class CartCameraManager {
             this.config.onLog(`Server assigned Cart Number: ${data.cart_number}`, 'success');
           } else if (data.type === 'heartbeat_ack') {
             // Heartbeat acknowledged
+          } else if (data.type === 'vision_status') {
+            this.config.onLog(`[Vision] ${data.message}`, 'info');
           } else if (data.type === 'verification_result') {
-            this.config.onLog(`AI Verified Item: ${data.product_name} (${data.barcode})`, 'success');
+            if (data.action === 'ITEM_VERIFIED') {
+              const confStr = data.confidence ? ` [${(data.confidence * 100).toFixed(1)}%]` : '';
+              this.config.onLog(`AI Verified Item: ${data.product_name} (${data.barcode})${confStr}`, 'success');
+            } else if (data.action === 'ITEM_MISMATCH') {
+              this.config.onLog(`AI Alert - Wrong Item: Detected '${data.detected_as}' instead of scanned barcode`, 'error');
+            } else if (data.action === 'UNCERTAIN_RESCAN') {
+              this.config.onLog(`AI Uncertain Match: ${(data.confidence * 100).toFixed(1)}% - Please reposition item`, 'warn');
+            } else if (data.action === 'UNSCANNED_ITEM_DETECTED') {
+              this.config.onLog(`AI Alert - Unscanned Item: Detected '${data.detected_as}' placed without scanning!`, 'error');
+            } else if (data.action === 'ESCALATE_ADMIN_REVIEW') {
+              this.config.onLog(`AI Review - Low Confidence: ${(data.confidence * 100).toFixed(1)}% forwarded to Admin queue`, 'warn');
+            }
             if (this.config.onVerificationResult) {
               this.config.onVerificationResult(data);
             }

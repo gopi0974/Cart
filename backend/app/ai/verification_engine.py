@@ -1,60 +1,196 @@
-from typing import Dict, Any, Optional
+import base64
+import logging
+import cv2
+import numpy as np
+from PIL import Image
+from typing import Dict, Any, Optional, Tuple, Union
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.ai.feature_extractor import feature_extractor
 from app.ai.vector_store import VectorStoreMatcher
+from app.ai.object_detector import object_detector
+
+logger = logging.getLogger("smartcart.verification")
 
 class AIVerificationEngine:
     """
-    Multi-modal verification engine coordinating motion detection, visual embedding extraction,
-    and multi-tier confidence classification.
+    Multi-modal verification engine coordinating YOLOv8n object/hand localization,
+    OpenAI CLIP ViT-B/32 visual embeddings, and pgvector cosine similarity matching.
     """
+
     @staticmethod
+    def _decode_to_cv2(image_data: Any) -> Tuple[np.ndarray, Image.Image]:
+        """Convert diverse image payload types (base64 string, bytes, PIL, numpy) to (bgr_ndarray, pil_image)."""
+        if isinstance(image_data, str):
+            if "," in image_data:
+                image_data = image_data.split(",", 1)[1]
+            raw_bytes = base64.b64decode(image_data)
+            nparr = np.frombuffer(raw_bytes, np.uint8)
+            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif isinstance(image_data, bytes):
+            nparr = np.frombuffer(image_data, np.uint8)
+            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        elif isinstance(image_data, Image.Image):
+            img_rgb = np.array(image_data)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        elif isinstance(image_data, np.ndarray):
+            img_bgr = image_data
+        else:
+            raise ValueError(f"Unsupported image_data type: {type(image_data)}")
+
+        if img_bgr is None or img_bgr.size == 0:
+            # Create a 640x480 neutral placeholder if corrupted
+            img_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        return img_bgr, pil_img
+
     def evaluate_item_placement(
+        self,
         db: Session,
         claimed_barcode: Optional[str],
-        image_data: Any
+        image_data: Any,
+        ref_background: Optional[np.ndarray] = None,
+        crop_box: Optional[Tuple[int, int, int, int]] = None
     ) -> Dict[str, Any]:
         """
-        Evaluate physical item placement in cart against claimed barcode.
-        Returns tiered decision: AUTO_APPROVE | RESCAN_PROMPT | ESCALATE_ADMIN_REVIEW
+        Evaluate physical item placement in cart against claimed barcode using real YOLOv8n + CLIP pipeline.
+        Returns tiered decision:
+          - AUTO_APPROVE: High confidence match for claimed barcode (>= CONFIDENCE_HIGH)
+          - RESCAN_PROMPT: Uncertain confidence (between CONFIDENCE_MEDIUM and CONFIDENCE_HIGH)
+          - WRONG_ITEM: Recognizes a different enrolled product
+          - ESCALATE_ADMIN_REVIEW: Low similarity across all products (< CONFIDENCE_MEDIUM)
+          - UNSCANNED_DETECTED: Physical item placed with no pending barcode scan
         """
-        query_vector = feature_extractor.extract_embedding(image_data)
-        top_candidates = VectorStoreMatcher.find_nearest_product(db, query_vector, top_k=3)
+        img_bgr, pil_full = self._decode_to_cv2(image_data)
 
+        # 1. Locate object bounding box via YOLOv8n or background differencing
+        det_box = crop_box
+        if det_box is None:
+            detection = object_detector.detect(img_bgr)
+            if detection["object_boxes"]:
+                # Pick highest confidence object
+                best_obj = max(detection["object_boxes"], key=lambda b: b["conf"])
+                det_box = tuple(best_obj["box"])
+            elif ref_background is not None:
+                motion_box = object_detector.compute_motion_box(ref_background, img_bgr)
+                if motion_box:
+                    det_box = motion_box
+
+        # 2. Crop detected region or use full frame
+        if det_box:
+            crop_pil = object_detector.crop_object(img_bgr, det_box)
+        else:
+            crop_pil = pil_full
+
+        # 3. Generate real CLIP 512-dim visual embedding
+        query_vector = feature_extractor.get_embedding(crop_pil)
+
+        # 4. Search vector store for top candidates
+        top_candidates = VectorStoreMatcher.find_nearest_product(db, query_vector, top_k=3)
+        top_match = top_candidates[0] if top_candidates else None
+
+        # Read configurable thresholds
+        high_thresh = getattr(settings, "CONFIDENCE_HIGH", 0.75)
+        low_thresh = getattr(settings, "CONFIDENCE_MEDIUM", 0.55)
+
+        # Handle Unscanned Item (No pending barcode)
         if not claimed_barcode:
-            # Unscanned addition
-            best_match = top_candidates[0] if top_candidates else None
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=det_box,
+                label=f"UNSCANNED: {top_match['name'] if top_match else 'Unknown'}",
+                status="DANGER"
+            )
+            sim_score = top_match["similarity"] if top_match else 0.88
             return {
                 "decision": "UNSCANNED_DETECTED",
-                "confidence": best_match["similarity"] if best_match else 0.90,
-                "detected_product": best_match,
+                "status": "WARNING_UNSCANNED",
+                "confidence": sim_score,
+                "detected_product": top_match,
+                "evidence_url": evidence_url,
                 "message": "Physical item entered cart without prior barcode scan."
             }
 
-        # Check match with claimed barcode
+        # Calculate exact similarity with claimed product barcode
         is_match, similarity = VectorStoreMatcher.verify_claimed_barcode(db, claimed_barcode, query_vector)
+        top_matches_claimed = top_match and (top_match["barcode"] == claimed_barcode)
 
-        if similarity >= settings.CONFIDENCE_HIGH:
+        # Decision Tier 1: Auto Approve (Top match equals claimed product & similarity >= HIGH threshold)
+        if (top_matches_claimed or is_match) and similarity >= high_thresh:
+            item_name = top_match["name"] if top_match else "Scanned Product"
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=det_box,
+                label=f"VERIFIED: {item_name} ({similarity*100:.1f}%)",
+                status="SUCCESS"
+            )
             return {
                 "decision": "AUTO_APPROVE",
-                "confidence": similarity,
                 "status": "VERIFIED",
-                "message": "AI confirmed physical item matches scanned barcode."
+                "confidence": similarity,
+                "top_match": top_match,
+                "top_candidates": top_candidates,
+                "evidence_url": evidence_url,
+                "message": f"AI verified '{item_name}' with {similarity*100:.1f}% confidence."
             }
-        elif similarity >= settings.CONFIDENCE_MEDIUM:
+
+        # Decision Tier 2: Uncertain / Reposition Prompt (Similarity between LOW and HIGH threshold)
+        elif (top_matches_claimed or is_match) and similarity >= low_thresh:
+            item_name = top_match["name"] if top_match else "Scanned Product"
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=det_box,
+                label=f"UNCERTAIN: {item_name} ({similarity*100:.1f}%)",
+                status="UNCERTAIN"
+            )
             return {
                 "decision": "RESCAN_PROMPT",
-                "confidence": similarity,
                 "status": "WARNING_MISMATCH",
-                "message": "Item appearance has low confidence. Please rescan barcode clearly."
+                "confidence": similarity,
+                "top_match": top_match,
+                "top_candidates": top_candidates,
+                "evidence_url": evidence_url,
+                "message": f"Item appearance has uncertain confidence ({similarity*100:.1f}%). Please reposition item clearly or rescan barcode."
             }
+
+        # Decision Tier 3: Wrong Item (Top match is clearly a DIFFERENT product from catalog)
+        elif top_match and top_match["barcode"] != claimed_barcode and top_match["similarity"] >= low_thresh:
+            detected_name = top_match["name"]
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=det_box,
+                label=f"WRONG ITEM: {detected_name} ({top_match['similarity']*100:.1f}%)",
+                status="DANGER"
+            )
+            return {
+                "decision": "WRONG_ITEM",
+                "status": "WARNING_MISMATCH",
+                "confidence": top_match["similarity"],
+                "detected_product": top_match,
+                "detected_product_name": detected_name,
+                "top_candidates": top_candidates,
+                "evidence_url": evidence_url,
+                "message": f"Wrong item placed: Camera observed '{detected_name}', but barcode was scanned for a different product."
+            }
+
+        # Decision Tier 4: Escalate to Admin Review (Low similarity across all products)
         else:
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=det_box,
+                label=f"STAFF REVIEW: Conf {similarity*100:.1f}%",
+                status="DANGER"
+            )
             return {
                 "decision": "ESCALATE_ADMIN_REVIEW",
-                "confidence": similarity,
                 "status": "WARNING_MISMATCH",
-                "message": "Discrepancy detected. Forwarded to store staff review queue."
+                "confidence": similarity,
+                "top_match": top_match,
+                "top_candidates": top_candidates,
+                "evidence_url": evidence_url,
+                "message": f"Visual match is low ({similarity*100:.1f}%). Forwarded to store staff review queue."
             }
 
 verification_engine = AIVerificationEngine()

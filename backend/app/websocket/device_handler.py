@@ -2,7 +2,8 @@ import json
 import hashlib
 import logging
 from datetime import datetime
-from typing import Optional, Any
+import numpy as np
+from typing import Optional, Any, Dict
 from fastapi import WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
@@ -12,9 +13,28 @@ from app.models.product import Product
 from app.models.transaction import AuditLog
 from app.websocket.manager import ws_manager
 from app.services.session_service import SessionService
+import time
 from app.ai.verification_engine import verification_engine
+from app.ai.object_detector import object_detector
+from app.services.alert_service import AlertService
 
 logger = logging.getLogger("smartcart.device")
+
+class CartVisionTracker:
+    def __init__(self, cart_id: str):
+        self.cart_id = cart_id
+        self.hand_in_frame: bool = False
+        self.hand_left_time: float = 0.0
+        self.stable_frame_count: int = 0
+        self.ref_background: Optional[np.ndarray] = None
+        self.last_evaluated_time: float = 0.0
+
+cart_trackers: Dict[str, CartVisionTracker] = {}
+
+def get_tracker(cart_id: str) -> CartVisionTracker:
+    if cart_id not in cart_trackers:
+        cart_trackers[cart_id] = CartVisionTracker(cart_id)
+    return cart_trackers[cart_id]
 
 async def process_camera_frame(
     db: Session,
@@ -26,15 +46,50 @@ async def process_camera_frame(
     """
     Process incoming camera frame from cart device (Laptop webcam or ESP32-CAM).
     Derives cart context solely from authenticated token.
-    Checks for pending items in active shopping session and executes AI verification.
+    Uses YOLOv8n to locate hands and objects, waits for hand withdrawal and frame stabilization (~1s),
+    and executes tiered CLIP cosine verification against claimed or unscanned items.
     """
     try:
+        img_bgr, _ = verification_engine._decode_to_cv2(image_data)
+        tracker = get_tracker(cart_id)
+        now = time.time()
+
+        # 1. Detect hands and persons via YOLOv8n (COCO class 0)
+        detection = object_detector.detect(img_bgr)
+
+        if detection["hand_detected"]:
+            tracker.hand_in_frame = True
+            tracker.stable_frame_count = 0
+            await websocket.send_json({
+                "type": "vision_status",
+                "status": "HAND_IN_FRAME",
+                "message": "Hand in frame: item placement in progress..."
+            })
+            return
+
+        # 2. Hand is not currently in frame - check stabilization
+        if tracker.hand_in_frame:
+            # Hand just exited
+            tracker.hand_in_frame = False
+            tracker.hand_left_time = now
+            tracker.stable_frame_count = 1
+            await websocket.send_json({
+                "type": "vision_status",
+                "status": "STABILIZING",
+                "message": "Hand withdrawn. Stabilizing basket image..."
+            })
+            return
+
+        tracker.stable_frame_count += 1
+
+        # 3. Check active session on this cart
         active_session = db.query(CartSession).filter(
             CartSession.cart_id == cart_id,
             CartSession.status == "ACTIVE"
         ).first()
 
         if not active_session:
+            tracker.ref_background = img_bgr.copy()
             await websocket.send_json({
                 "type": "frame_ack",
                 "status": "IDLE",
@@ -42,45 +97,134 @@ async def process_camera_frame(
             })
             return
 
-        # Look for the most recent item scanned on mobile waiting for camera confirmation
+        # 4. Check for pending item scanned on mobile waiting for camera confirmation
         pending_item = db.query(CartItem).join(Product).filter(
             CartItem.session_id == active_session.id,
             CartItem.status == "PENDING"
         ).order_by(CartItem.scanned_at.desc()).first()
 
         if pending_item:
-            # AI evaluation comparing camera embedding to scanned product
             claimed_barcode = pending_item.product.barcode
             eval_result = verification_engine.evaluate_item_placement(
                 db=db,
                 claimed_barcode=claimed_barcode,
-                image_data=image_data
+                image_data=img_bgr,
+                ref_background=tracker.ref_background
             )
+            tracker.ref_background = img_bgr.copy()
+            tracker.last_evaluated_time = now
 
-            # Confirm verified placement
-            verified_item = await SessionService.verify_item_placement(
-                db=db,
-                session_id=active_session.id,
-                barcode=claimed_barcode,
-                confidence=float(eval_result.get("confidence", 0.95)),
-                evidence_url=None
-            )
+            decision = eval_result.get("decision")
+            confidence = float(eval_result.get("confidence", 0.95))
+            evidence_url = eval_result.get("evidence_url")
 
-            if verified_item:
+            if decision == "AUTO_APPROVE":
+                verified_item = await SessionService.verify_item_placement(
+                    db=db,
+                    session_id=active_session.id,
+                    barcode=claimed_barcode,
+                    confidence=confidence,
+                    evidence_url=evidence_url
+                )
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "ITEM_VERIFIED",
-                    "product_name": verified_item.product.name,
+                    "product_name": pending_item.product.name,
                     "barcode": claimed_barcode,
-                    "confidence": eval_result.get("confidence", 0.95)
+                    "confidence": confidence,
+                    "evidence_url": evidence_url
                 })
-                logger.info(f"[{cart_number}] Item '{verified_item.product.name}' verified via camera frame.")
+                logger.info(f"[{cart_number}] Item '{pending_item.product.name}' VERIFIED (Confidence: {confidence*100:.1f}%).")
+
+            elif decision == "RESCAN_PROMPT":
+                # Uncertain confidence: ask shopper to reposition/rescan
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_UNCERTAIN", {
+                    "message": eval_result.get("message"),
+                    "barcode": claimed_barcode,
+                    "confidence": confidence
+                })
+                await websocket.send_json({
+                    "type": "verification_result",
+                    "action": "UNCERTAIN_RESCAN",
+                    "product_name": pending_item.product.name,
+                    "confidence": confidence,
+                    "message": eval_result.get("message")
+                })
+
+            elif decision == "WRONG_ITEM":
+                detected_name = eval_result.get("detected_product_name", "Different Item")
+                await SessionService.flag_mismatch(
+                    db=db,
+                    session_id=active_session.id,
+                    scanned_barcode=claimed_barcode,
+                    detected_product_name=detected_name,
+                    evidence_url=evidence_url,
+                    confidence=confidence
+                )
+                await websocket.send_json({
+                    "type": "verification_result",
+                    "action": "ITEM_MISMATCH",
+                    "scanned_barcode": claimed_barcode,
+                    "detected_as": detected_name,
+                    "confidence": confidence
+                })
+
+            elif decision == "ESCALATE_ADMIN_REVIEW":
+                # Low similarity: forward to Admin review queue
+                await AlertService.create_alert(
+                    db=db,
+                    cart_id=cart_id,
+                    session_id=active_session.id,
+                    alert_type="LOW_CONFIDENCE_VERIFICATION",
+                    severity="MEDIUM",
+                    message=f"Visual confidence below threshold ({confidence*100:.1f}%) for '{pending_item.product.name}'.",
+                    evidence_url=evidence_url,
+                    create_review_case=True,
+                    scanned_barcode=claimed_barcode,
+                    confidence=confidence
+                )
+                await websocket.send_json({
+                    "type": "verification_result",
+                    "action": "ESCALATE_ADMIN_REVIEW",
+                    "product_name": pending_item.product.name,
+                    "confidence": confidence
+                })
+
         else:
-            await websocket.send_json({
-                "type": "frame_ack",
-                "status": "VERIFIED_ALL",
-                "message": "Frame received. All scanned items currently verified."
-            })
+            # 5. No pending item: Check for Unscanned Item Placement
+            motion_box = object_detector.compute_motion_box(tracker.ref_background, img_bgr)
+            detection_has_objects = bool(detection["object_boxes"])
+
+            if motion_box or detection_has_objects:
+                eval_result = verification_engine.evaluate_item_placement(
+                    db=db,
+                    claimed_barcode=None,
+                    image_data=img_bgr,
+                    ref_background=tracker.ref_background
+                )
+                tracker.ref_background = img_bgr.copy()
+                detected_prod = eval_result.get("detected_product")
+
+                await SessionService.flag_unscanned_item(
+                    db=db,
+                    cart_id=cart_id,
+                    detected_product_id=detected_prod["id"] if detected_prod else None,
+                    evidence_url=eval_result.get("evidence_url")
+                )
+                await websocket.send_json({
+                    "type": "verification_result",
+                    "action": "UNSCANNED_ITEM_DETECTED",
+                    "detected_as": detected_prod["name"] if detected_prod else "Unidentified Item",
+                    "confidence": eval_result.get("confidence", 0.88)
+                })
+            else:
+                tracker.ref_background = img_bgr.copy()
+                await websocket.send_json({
+                    "type": "frame_ack",
+                    "status": "VERIFIED_ALL",
+                    "message": "Frame received. Basket is steady."
+                })
+
     except Exception as e:
         logger.error(f"Error processing camera frame on cart {cart_number}: {e}")
         try:

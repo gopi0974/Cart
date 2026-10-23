@@ -130,6 +130,8 @@ class VisualFeatureExtractor:
     def extract_embedding(self, image_input: Any) -> List[float]:
         return get_embedding(image_input)
 
+    get_embedding = extract_embedding
+
     @staticmethod
     def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
         """Compute cosine similarity between two normalized vectors."""

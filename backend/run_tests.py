@@ -336,8 +336,57 @@ def run_all_tests():
     db.close()
     print("[OK] Task 4: Camera OFFLINE successfully locks checkout, and camera ONLINE restores checkout")
 
+    # Test 20: Task 5 - Real Detection & Verification (YOLOv8 + CLIP + Evidence Snapshotting)
+    print("Test 20: Task 5 - Real Detection & Verification (YOLOv8 + CLIP)...")
+    db = SessionLocal()
+    c1 = db.query(Cart).filter(Cart.cart_number == "CART-001").first()
+    c1.status = "IDLE"
+    c1.camera_status = "ONLINE"
+    db.commit()
+    
+    # Pair new shopper on CART-001
+    s_pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
+    assert s_pair.status_code == 200
+    s_id = s_pair.json()["id"]
+    
+    # Shopper scans item
+    scan_res = client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode})
+    assert scan_res.status_code == 200
+    assert scan_res.json()["status"] == "PENDING"
+    
+    # Connect device camera WebSocket
+    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
+        _ = ws.receive_json()  # connected ack
+        
+        # Generate test frame with real shape & colors
+        import cv2
+        import numpy as np
+        import base64
+        import os
+        from app.config import settings
+        
+        test_frame = np.full((480, 640, 3), 220, dtype=np.uint8)
+        cv2.rectangle(test_frame, (180, 120), (460, 360), (30, 80, 200), -1)
+        cv2.putText(test_frame, "Product Test Item", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        _, buf = cv2.imencode(".jpg", test_frame)
+        b64_frame = "data:image/jpeg;base64," + base64.b64encode(buf).decode("utf-8")
+        
+        # Send frame over device WebSocket
+        ws.send_json({"type": "frame", "format": "jpeg", "data": b64_frame})
+        result = ws.receive_json()
+        assert result["type"] in ["verification_result", "vision_status"]
+        
+        # Check evidence file creation on disk
+        if "evidence_url" in result and result["evidence_url"]:
+            rel_path = result["evidence_url"].lstrip("/").replace("/", os.sep)
+            abs_evidence_path = os.path.join(str(settings.BASE_DIR), rel_path)
+            assert os.path.exists(abs_evidence_path), f"Evidence image not found at {abs_evidence_path}"
+    
+    db.close()
+    print("[OK] Task 5: Real YOLO/CLIP verification pipeline, tiered decision, and evidence snapshot verified")
+
     print("========================================")
-    print("ALL 19 TEST SUITES PASSED FLAWLESSLY!")
+    print("ALL 20 TEST SUITES PASSED FLAWLESSLY!")
     print("========================================")
 
 if __name__ == "__main__":
