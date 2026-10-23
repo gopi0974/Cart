@@ -1,11 +1,31 @@
 import { CartSession, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
 
-const API_BASE = (import.meta as any).env?.VITE_API_URL 
-  ? `${(import.meta as any).env.VITE_API_URL}/api/v1` 
-  : 'http://localhost:8000/api/v1';
+export function getApiBaseUrl(): string {
+  if ((import.meta as any).env?.VITE_API_URL) {
+    const raw = (import.meta as any).env.VITE_API_URL.replace(/\/+$/, '');
+    return raw.endsWith('/api/v1') ? raw : `${raw}/api/v1`;
+  }
+  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const proto = isHttps ? 'https' : 'http';
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  return `${proto}://${host}:8000/api/v1`;
+}
+
+export function getWsBaseUrl(): string {
+  const envApi = (import.meta as any).env?.VITE_API_URL;
+  if (envApi) {
+    const wsProto = envApi.startsWith('https') ? 'wss' : 'ws';
+    const cleanHost = envApi.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    return `${wsProto}://${cleanHost}`;
+  }
+  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  const proto = isHttps ? 'wss' : 'ws';
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  return `${proto}://${host}:8000`;
+}
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const url = `${API_BASE}${endpoint}`;
+  const url = `${getApiBaseUrl()}${endpoint}`;
   const token = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',

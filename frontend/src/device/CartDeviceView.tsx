@@ -19,6 +19,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
+import { getApiBaseUrl } from '../services/api';
 
 interface LogEntry {
   id: string;
@@ -71,11 +72,7 @@ export const CartDeviceView: React.FC = () => {
 
   // Load available carts from API
   useEffect(() => {
-    const apiUrl = (import.meta as any).env?.VITE_API_URL 
-      ? `${(import.meta as any).env.VITE_API_URL}/api/v1` 
-      : 'http://localhost:8000/api/v1';
-
-    fetch(`${apiUrl}/shopper/available-carts`)
+    fetch(`${getApiBaseUrl()}/shopper/available-carts`)
       .then((res) => res.json())
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {

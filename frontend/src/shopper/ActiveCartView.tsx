@@ -7,7 +7,7 @@ import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { CheckoutModal } from './CheckoutModal';
-import { api } from '../services/api';
+import { api, getWsBaseUrl } from '../services/api';
 import { audioFeedback } from '../services/audioFeedback';
 import { useTranslation } from '../services/i18n';
 
@@ -33,7 +33,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   useEffect(() => {
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(`ws://localhost:8000/ws/cart/${session.cart_id}`);
+      ws = new WebSocket(`${getWsBaseUrl()}/ws/cart/${session.cart_id}`);
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
