@@ -10,7 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
-import cv2
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 
 from app.database import get_db
 from app.config import settings

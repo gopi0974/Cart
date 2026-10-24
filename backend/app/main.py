@@ -30,10 +30,13 @@ async def lifespan(app: FastAPI):
         init_db()
         db = SessionLocal()
         try:
-            seed_database(db)
-            from app.ai.vector_store import VectorStoreMatcher
-            VectorStoreMatcher.sync_to_disk(db)
-            logger.info("Database initialized, catalog verified, and persistent vector index synced.")
+            try:
+                from app.ai.vector_store import VectorStoreMatcher
+                VectorStoreMatcher.sync_to_disk(db)
+                logger.info("Database initialized, catalog verified, and persistent vector index synced.")
+            except Exception as ve:
+                logger.warning(f"Vector index sync skipped: {ve}")
+
         finally:
             db.close()
 

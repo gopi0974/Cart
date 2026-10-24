@@ -1,6 +1,6 @@
 import base64
 import logging
-import cv2
+import io
 import numpy as np
 from PIL import Image
 from typing import Dict, Any, Optional, Tuple, Union
@@ -12,10 +12,17 @@ from app.ai.object_detector import object_detector
 
 logger = logging.getLogger("smartcart.verification")
 
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    cv2 = None
+    HAS_CV2 = False
+
 class AIVerificationEngine:
     """
-    Multi-modal verification engine coordinating YOLOv8n object/hand localization,
-    OpenAI CLIP ViT-B/32 visual embeddings, and pgvector cosine similarity matching.
+    Multi-modal verification engine coordinating object/hand localization,
+    visual embeddings, and cosine similarity matching.
     """
 
     @staticmethod
@@ -25,26 +32,43 @@ class AIVerificationEngine:
             if "," in image_data:
                 image_data = image_data.split(",", 1)[1]
             raw_bytes = base64.b64decode(image_data)
-            nparr = np.frombuffer(raw_bytes, np.uint8)
-            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if HAS_CV2:
+                nparr = np.frombuffer(raw_bytes, np.uint8)
+                img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            else:
+                pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                img_rgb = np.array(pil_img)
+                return img_rgb, pil_img
         elif isinstance(image_data, bytes):
-            nparr = np.frombuffer(image_data, np.uint8)
-            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if HAS_CV2:
+                nparr = np.frombuffer(image_data, np.uint8)
+                img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            else:
+                pil_img = Image.open(io.BytesIO(image_data)).convert("RGB")
+                img_rgb = np.array(pil_img)
+                return img_rgb, pil_img
         elif isinstance(image_data, Image.Image):
-            img_rgb = np.array(image_data)
-            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            pil_img = image_data.convert("RGB")
+            img_rgb = np.array(pil_img)
+            if HAS_CV2:
+                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                return img_bgr, pil_img
+            return img_rgb, pil_img
         elif isinstance(image_data, np.ndarray):
             img_bgr = image_data
         else:
             raise ValueError(f"Unsupported image_data type: {type(image_data)}")
 
         if img_bgr is None or img_bgr.size == 0:
-            # Create a 640x480 neutral placeholder if corrupted
             img_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
 
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
+        if HAS_CV2:
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+        else:
+            pil_img = Image.fromarray(img_bgr)
         return img_bgr, pil_img
+
 
     def evaluate_item_placement(
         self,
