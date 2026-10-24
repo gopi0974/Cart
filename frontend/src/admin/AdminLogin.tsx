@@ -18,7 +18,7 @@ export const AdminLogin: React.FC<Props> = ({ onLoginSuccess }) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.login(email, password);
+      const res = await api.login(email.trim(), password.trim());
       localStorage.setItem('smartcart_admin_token', res.access_token);
       localStorage.setItem('smartcart_admin_user', JSON.stringify({
         email: res.email,
@@ -36,6 +36,7 @@ export const AdminLogin: React.FC<Props> = ({ onLoginSuccess }) => {
   const fillQuickCreds = (e: string, p: string) => {
     setEmail(e);
     setPassword(p);
+    setError(null);
   };
 
   return (

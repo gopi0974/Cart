@@ -7,7 +7,7 @@ from app.models.user import User
 from app.models.cart import Cart
 from app.models.product import Product, ProductImage, ProductEmbedding
 from app.models.transaction import ModelVersion
-from app.utils.security import hash_password
+from app.utils.security import hash_password, verify_password
 
 def generate_cart_signature(cart_number: str, qr_token: str) -> str:
     """Generate deterministic HMAC signature for cart connect link."""
@@ -15,25 +15,33 @@ def generate_cart_signature(cart_number: str, qr_token: str) -> str:
     return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
 def seed_database(db: Session):
-    """Seed production database: one admin account, 3 test carts, sample products, and AI model registry."""
-    # 1. Seed Admin Accounts
-    if db.query(User).count() == 0:
-        admin_users = [
-            User(
-                email="admin@smartcart.ai",
-                password_hash=hash_password("Admin@123"),
-                full_name="Sarah Jenkins (Store Admin)",
-                role="ADMIN"
-            ),
-            User(
-                email="admin@supermart.com",
-                password_hash=hash_password("admin123"),
-                full_name="Store SuperAdmin",
-                role="ADMIN"
-            ),
-        ]
-        db.add_all(admin_users)
-        db.commit()
+    """Seed production database: default admin accounts, 3 test carts, sample products, and AI model registry."""
+    # 1. Seed & Ensure Admin Accounts
+    default_admins = [
+        ("admin@smartcart.ai", "Admin@123", "Sarah Jenkins (Store Admin)"),
+        ("admin@supermart.com", "admin123", "Store SuperAdmin"),
+    ]
+    for email, pwd, full_name in default_admins:
+        user = db.query(User).filter(User.email.ilike(email)).first()
+        if not user:
+            user = User(
+                email=email,
+                password_hash=hash_password(pwd),
+                full_name=full_name,
+                role="ADMIN",
+                is_active=True
+            )
+            db.add(user)
+        else:
+            user.role = "ADMIN"
+            user.is_active = True
+            try:
+                valid = verify_password(pwd, user.password_hash)
+            except Exception:
+                valid = False
+            if not valid:
+                user.password_hash = hash_password(pwd)
+    db.commit()
 
     # 2. Seed 3 Test Carts (CART-001, CART-002, CART-003)
     if db.query(Cart).count() == 0:
