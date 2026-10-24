@@ -10,6 +10,7 @@ from app.models.product import Product
 from app.models.alert import Alert
 from app.websocket.manager import ws_manager
 from app.services.alert_service import AlertService
+from app.ai.verification_engine import verification_engine
 
 class SessionService:
     @staticmethod
@@ -17,7 +18,7 @@ class SessionService:
         """Recalculate subtotal, tax, and total for active verified/pending items."""
         active_items = db.query(CartItem).filter(
             CartItem.session_id == session.id,
-            CartItem.status.in_(["PENDING", "VERIFIED", "WARNING_MISMATCH", "WARNING_UNSCANNED"])
+            CartItem.status.in_(["PENDING", "VERIFIED", "WARNING_MISMATCH", "WARNING_UNSCANNED", "REMOVING", "REMOVED_PENDING_RESCAN"])
         ).all()
 
         subtotal = 0.0
@@ -144,6 +145,26 @@ class SessionService:
                     "message": "We noticed an item was placed that wasn't scanned. Please scan its barcode.",
                     "target_barcode": None,
                     "action_required": "SCAN_BARCODE"
+                })
+            elif itm.status == "REMOVING":
+                has_unverified = True
+                active_warnings.append({
+                    "type": "ITEM_REMOVING",
+                    "message": f"Take '{itm.product.name}' out of the cart, then rescan its barcode.",
+                    "target_barcode": itm.product.barcode,
+                    "action_required": "TAKE_OUT_AND_RESCAN",
+                    "item_id": itm.id,
+                    "product_name": itm.product.name
+                })
+            elif itm.status == "REMOVED_PENDING_RESCAN":
+                has_unverified = True
+                active_warnings.append({
+                    "type": "REMOVED_PENDING_RESCAN",
+                    "message": f"Item removed. Please rescan its barcode to take it off your bill.",
+                    "target_barcode": itm.product.barcode,
+                    "action_required": "RESCAN_BARCODE",
+                    "item_id": itm.id,
+                    "product_name": itm.product.name
                 })
 
         # Check for open removal or unscanned warnings in alerts
@@ -392,41 +413,239 @@ class SessionService:
         })
 
     @staticmethod
-    async def rescan_to_remove(db: Session, session_id: str, barcode: str) -> bool:
+    async def initiate_item_removal(db: Session, session_id: str, item_id: str) -> CartItem:
+        """Shopper taps 'Remove' on an item. Sets item to REMOVING state awaiting physical removal."""
+        session = db.query(CartSession).filter(CartSession.id == session_id).first()
+        if not session or session.status != "ACTIVE":
+            raise ValueError("No active shopping session found.")
+
+        item = db.query(CartItem).filter(CartItem.id == item_id, CartItem.session_id == session.id).first()
+        if not item or item.status == "REMOVED":
+            raise ValueError("Item not found in your cart.")
+
+        item.status = "REMOVING"
+        db.commit()
+        db.refresh(item)
+
+        prod_name = item.product.name if item.product else "Item"
+        barcode = item.product.barcode if item.product else ""
+
+        await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_REMOVAL_INITIATED", {
+            "item_id": item.id,
+            "product_name": prod_name,
+            "barcode": barcode,
+            "status": "REMOVING",
+            "message": "Take this item out of the cart, then rescan its barcode."
+        })
+
+        return item
+
+    @staticmethod
+    async def verify_item_removal(
+        db: Session,
+        session_id: str,
+        item_id: str,
+        image_data: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """
+        Cart Camera AI verification of physical item removal.
+        - Verify that the item was actually removed from the cart (not still inside, not covered by hand).
+        - If item still in cart: show 'We still see this item in the cart. Please take it out.'
+        - If AI uncertain: flags for staff review.
+        - When verified: item advances to REMOVED_PENDING_RESCAN.
+        """
+        session = db.query(CartSession).filter(CartSession.id == session_id).first()
+        if not session:
+            raise ValueError("Session not found.")
+
+        item = db.query(CartItem).filter(CartItem.id == item_id, CartItem.session_id == session.id).first()
+        if not item:
+            raise ValueError("Item not found.")
+
+        if item.status == "REMOVED_PENDING_RESCAN":
+            return {
+                "removed": True,
+                "status": "REMOVED_PENDING_RESCAN",
+                "message": "Item removed. Please rescan its barcode to take it off your bill.",
+                "evidence_url": item.verification_evidence_url
+            }
+
+        if item.status == "REMOVED":
+            return {
+                "removed": True,
+                "status": "REMOVED",
+                "message": f"'{item.product.name}' has already been removed from cart."
+            }
+
+        target_bcode = item.product.barcode if item.product else ""
+        eval_res = verification_engine.evaluate_item_removal(
+            db=db,
+            target_barcode=target_bcode,
+            image_data=image_data
+        )
+
+        decision = eval_res.get("decision")
+        evidence_url = eval_res.get("evidence_url")
+
+        if decision == "CONFIRMED_REMOVED":
+            item.status = "REMOVED_PENDING_RESCAN"
+            item.verification_evidence_url = evidence_url
+            db.commit()
+            db.refresh(item)
+
+            await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_REMOVED_AWAITING_RESCAN", {
+                "item_id": item.id,
+                "product_name": item.product.name,
+                "barcode": item.product.barcode,
+                "status": "REMOVED_PENDING_RESCAN",
+                "message": "Item removed. Please rescan its barcode to take it off your bill.",
+                "evidence_url": evidence_url
+            })
+
+            return {
+                "removed": True,
+                "status": "REMOVED_PENDING_RESCAN",
+                "message": "Item removed. Please rescan its barcode to take it off your bill.",
+                "evidence_url": evidence_url
+            }
+
+        elif decision == "STILL_IN_CART":
+            return {
+                "removed": False,
+                "status": "REMOVING",
+                "message": "We still see this item in the cart. Please take it out.",
+                "evidence_url": evidence_url
+            }
+
+        elif decision == "HAND_IN_CART":
+            return {
+                "removed": False,
+                "status": "REMOVING",
+                "message": eval_res.get("message", "We see a hand in the cart. Please remove your hand so the camera can verify."),
+                "evidence_url": evidence_url
+            }
+
+        else:
+            # Uncertain / Escalate to Staff Review
+            await AlertService.create_alert(
+                db=db,
+                cart_id=session.cart_id,
+                session_id=session.id,
+                alert_type="UNCERTAIN_REMOVAL",
+                severity="MEDIUM",
+                message=f"Cart camera uncertain if '{item.product.name}' was removed from cart.",
+                evidence_url=evidence_url,
+                create_review_case=True,
+                confidence=eval_res.get("confidence", 0.5)
+            )
+            return {
+                "removed": False,
+                "status": "REMOVING",
+                "uncertain": True,
+                "message": "AI is uncertain about item removal. Flagged for staff review.",
+                "evidence_url": evidence_url
+            }
+
+    @staticmethod
+    async def cancel_item_removal(db: Session, session_id: str, item_id: str) -> CartItem:
+        """Shopper taps 'Cancel' to keep the item in the cart."""
+        session = db.query(CartSession).filter(CartSession.id == session_id).first()
+        if not session:
+            raise ValueError("Session not found.")
+
+        item = db.query(CartItem).filter(CartItem.id == item_id, CartItem.session_id == session.id).first()
+        if not item:
+            raise ValueError("Item not found.")
+
+        item.status = "VERIFIED"
+        db.commit()
+        db.refresh(item)
+
+        await ws_manager.broadcast_to_cart(session.cart_id, "REMOVAL_CANCELLED", {
+            "item_id": item.id,
+            "product_name": item.product.name,
+            "status": "VERIFIED",
+            "message": f"Removal cancelled. '{item.product.name}' remains in your cart."
+        })
+
+        return item
+
+    @staticmethod
+    async def rescan_to_remove(db: Session, session_id: str, barcode: str) -> Dict[str, Any]:
         """User rescans the removed item's barcode to confirm removal and drop from bill."""
         session = db.query(CartSession).filter(CartSession.id == session_id).first()
         if not session:
-            return False
+            raise ValueError("Session not found.")
 
+        # Check if an item is currently pending barcode rescan (or in removing state)
+        pending_removal_item = db.query(CartItem).join(Product).filter(
+            CartItem.session_id == session.id,
+            CartItem.status.in_(["REMOVED_PENDING_RESCAN", "REMOVING"])
+        ).first()
+
+        if pending_removal_item:
+            # Enforce that the scanned barcode matches the removing item
+            if pending_removal_item.product.barcode != barcode:
+                raise ValueError(
+                    f"This barcode does not match the item you are removing. Please scan {pending_removal_item.product.name}."
+                )
+
+            prod_name = pending_removal_item.product.name
+            pending_removal_item.status = "REMOVED"
+            db.flush()
+            SessionService.recalculate_session_totals(db, session)
+
+            # Resolve removal alerts for this session
+            open_alerts = db.query(Alert).filter(
+                Alert.session_id == session.id,
+                Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "ITEM_REMOVAL", "UNCERTAIN_REMOVAL"]),
+                Alert.status == "OPEN"
+            ).all()
+            for al in open_alerts:
+                al.status = "RESOLVED"
+                al.resolution_notes = f"Customer rescanned barcode; '{prod_name}' successfully dropped from bill."
+                al.resolved_at = datetime.utcnow()
+
+            db.commit()
+
+            # Broadcast cleared warning and updated totals to cart
+            await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+                "message": f"{prod_name} removed from cart.",
+                "product_name": prod_name,
+                "subtotal": session.subtotal_amount,
+                "total": session.total_amount
+            })
+            return {
+                "status": "SUCCESS",
+                "message": f"{prod_name} removed from cart.",
+                "product_name": prod_name
+            }
+
+        # If no item is explicitly in REMOVED_PENDING_RESCAN or REMOVING,
+        # check if item exists with that barcode in other active states
         item = db.query(CartItem).join(Product).filter(
             CartItem.session_id == session.id,
             Product.barcode == barcode,
             CartItem.status.in_(["VERIFIED", "PENDING", "WARNING_UNSCANNED", "WARNING_MISMATCH"])
         ).first()
 
-        if item:
-            item.status = "REMOVED"
-            SessionService.recalculate_session_totals(db, session)
+        if not item:
+            raise ValueError(f"No active item with barcode '{barcode}' found in your cart to remove.")
 
-            # Resolve removal alerts for this session
-            open_alerts = db.query(Alert).filter(
-                Alert.session_id == session.id,
-                Alert.alert_type == "REMOVAL_WITHOUT_RESCAN",
-                Alert.status == "OPEN"
-            ).all()
-            for al in open_alerts:
-                al.status = "RESOLVED"
-                al.resolution_notes = "Customer rescanned barcode; item successfully dropped from bill."
-                al.resolved_at = datetime.utcnow()
+        prod_name = item.product.name
+        item.status = "REMOVED"
+        db.flush()
+        SessionService.recalculate_session_totals(db, session)
+        db.commit()
 
-            db.commit()
-
-            # Broadcast cleared warning to phone
-            await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
-                "message": f"'{item.product.name}' removed from your bill.",
-                "subtotal": session.subtotal_amount,
-                "total": session.total_amount
-            })
-            return True
-
-        return False
+        await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+            "message": f"{prod_name} removed from cart.",
+            "product_name": prod_name,
+            "subtotal": session.subtotal_amount,
+            "total": session.total_amount
+        })
+        return {
+            "status": "SUCCESS",
+            "message": f"{prod_name} removed from cart.",
+            "product_name": prod_name
+        }

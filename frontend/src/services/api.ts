@@ -1,4 +1,4 @@
-import { CartSession, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
+import { CartSession, CartItem, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
 
 export function getApiBaseUrl(): string {
   if ((import.meta as any).env?.VITE_API_URL) {
@@ -27,8 +27,9 @@ export function getWsBaseUrl(): string {
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${getApiBaseUrl()}${endpoint}`;
   const token = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     ...(options.headers as Record<string, string> || {}),
   };
@@ -96,7 +97,32 @@ export const api = {
     });
   },
 
-  async rescanRemove(sessionId: string, barcode: string) {
+  async initiateItemRemove(sessionId: string, itemId: string): Promise<CartItem> {
+    return request<CartItem>(`/shopper/${sessionId}/items/${itemId}/initiate-remove`, {
+      method: 'POST',
+    });
+  },
+
+  async verifyItemRemoval(sessionId: string, itemId: string, imageDataUrl?: string): Promise<{
+    removed: boolean;
+    status: string;
+    message: string;
+    uncertain?: boolean;
+    evidence_url?: string;
+  }> {
+    return request(`/shopper/${sessionId}/items/${itemId}/verify-removal`, {
+      method: 'POST',
+      body: JSON.stringify({ image_data_url: imageDataUrl }),
+    });
+  },
+
+  async cancelItemRemove(sessionId: string, itemId: string): Promise<CartItem> {
+    return request<CartItem>(`/shopper/${sessionId}/items/${itemId}/cancel-remove`, {
+      method: 'POST',
+    });
+  },
+
+  async rescanRemove(sessionId: string, barcode: string): Promise<{ status: string; message: string; product_name?: string }> {
     return request(`/shopper/${sessionId}/rescan-remove`, {
       method: 'POST',
       body: JSON.stringify({ barcode }),
@@ -148,8 +174,43 @@ export const api = {
     });
   },
 
+  async updateProduct(productId: string, data: Partial<Product>): Promise<Product> {
+    return request<Product>(`/products/${productId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
   async deleteProduct(productId: string) {
-    return request(`/products/${productId}`, { method: 'DELETE' });
+    return request<{ status: string; message: string; product_id: string; product_name: string }>(
+      `/products/${productId}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  async restoreProduct(productId: string) {
+    return request<{ status: string; message: string }>(`/products/${productId}/restore`, {
+      method: 'POST',
+    });
+  },
+
+  async bulkDeleteProducts(productIds: string[]) {
+    return request<{ status: string; message: string; deleted_count: number; deleted_names: string[] }>(
+      '/products/bulk-delete',
+      {
+        method: 'POST',
+        body: JSON.stringify({ product_ids: productIds }),
+      }
+    );
+  },
+
+  async bulkUploadCSV(file: File): Promise<{ success_count: number; error_count: number; errors: string[] }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return request('/products/bulk-upload', {
+      method: 'POST',
+      body: formData,
+    });
   },
 
   // Admin Fleet & Incident Management
@@ -217,6 +278,45 @@ export const api = {
       body: JSON.stringify({ resolution_notes: notes, action }),
     });
   },
+
+  async forceRemoveFromAlert(alertId: string, reason: string, cartItemId?: string, barcode?: string) {
+    return request<{
+      status: string;
+      message: string;
+      product_name: string;
+      new_subtotal: number;
+      new_total: number;
+    }>(`/admin/alerts/${alertId}/force-remove`, {
+      method: 'POST',
+      body: JSON.stringify({ reason, cart_item_id: cartItemId, barcode }),
+    });
+  },
+
+  async forceRemoveSessionItem(sessionId: string, itemId: string, reason: string) {
+    return request<{
+      status: string;
+      message: string;
+      product_name: string;
+      new_subtotal: number;
+      new_total: number;
+    }>(`/admin/sessions/${sessionId}/items/${itemId}/force-remove`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  },
+
+  async getAdminSessionItems(sessionId: string) {
+    return request<{
+      session_id: string;
+      cart_id: string;
+      status: string;
+      item_count: number;
+      subtotal_amount: number;
+      total_amount: number;
+      items: CartItem[];
+    }>(`/admin/sessions/${sessionId}/items`);
+  },
+
 
   async getReviewQueue(): Promise<ReviewCase[]> {
     return request<ReviewCase[]>('/admin/review-queue');

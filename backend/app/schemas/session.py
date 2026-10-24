@@ -30,10 +30,12 @@ class CartItemResponse(BaseModel):
         from_attributes = True
 
 class ActiveWarning(BaseModel):
-    type: str  # UNSCANNED_ITEM, MISMATCH_ITEM, REMOVAL_WITHOUT_RESCAN
+    type: str  # UNSCANNED_ITEM, MISMATCH_ITEM, REMOVAL_WITHOUT_RESCAN, ITEM_REMOVING, REMOVED_PENDING_RESCAN
     message: str
     target_barcode: Optional[str] = None
     action_required: str
+    item_id: Optional[str] = None
+    product_name: Optional[str] = None
 
 class SessionResponse(BaseModel):
     id: str
@@ -59,3 +61,6 @@ class ScanItemRequest(BaseModel):
 
 class RescanRemoveRequest(BaseModel):
     barcode: str
+
+class VerifyRemovalRequest(BaseModel):
+    image_data_url: Optional[str] = None

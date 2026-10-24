@@ -9,7 +9,7 @@ from app.models.session import CartSession
 from app.websocket.manager import ws_manager
 from app.schemas.session import (
     PairSessionRequest, SessionResponse, CartItemResponse,
-    ScanItemRequest, RescanRemoveRequest
+    ScanItemRequest, RescanRemoveRequest, VerifyRemovalRequest
 )
 from app.schemas.transaction import CheckoutRequest, ReceiptResponse
 from app.services.session_service import SessionService
@@ -91,13 +91,47 @@ async def scan_item(session_id: str, req: ScanItemRequest, db: Session = Depends
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/{session_id}/items/{item_id}/initiate-remove", response_model=CartItemResponse)
+async def initiate_item_remove(session_id: str, item_id: str, db: Session = Depends(get_db)):
+    """Shopper taps 'Remove' on an item. Sets item to REMOVING state."""
+    try:
+        item = await SessionService.initiate_item_removal(db, session_id, item_id)
+        return _format_item_response(item)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{session_id}/items/{item_id}/verify-removal")
+async def verify_item_removal(
+    session_id: str,
+    item_id: str,
+    req: Optional[VerifyRemovalRequest] = None,
+    db: Session = Depends(get_db)
+):
+    """Cart camera AI verification of item physical departure."""
+    try:
+        img_data = req.image_data_url if req else None
+        res = await SessionService.verify_item_removal(db, session_id, item_id, image_data=img_data)
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{session_id}/items/{item_id}/cancel-remove", response_model=CartItemResponse)
+async def cancel_item_remove(session_id: str, item_id: str, db: Session = Depends(get_db)):
+    """Shopper taps 'Cancel' to keep the item in the cart."""
+    try:
+        item = await SessionService.cancel_item_removal(db, session_id, item_id)
+        return _format_item_response(item)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @router.post("/{session_id}/rescan-remove")
 async def rescan_remove(session_id: str, req: RescanRemoveRequest, db: Session = Depends(get_db)):
     """Shopper rescans an item that was removed from cart to drop it from bill."""
-    success = await SessionService.rescan_to_remove(db, session_id, req.barcode)
-    if not success:
-        raise HTTPException(status_code=400, detail=f"No active item found with barcode {req.barcode} to remove.")
-    return {"status": "SUCCESS", "message": "Item removed from cart and bill updated."}
+    try:
+        res = await SessionService.rescan_to_remove(db, session_id, req.barcode)
+        return res
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/apply-coupon")
 def apply_coupon(session_id: str, req: CouponRequest, db: Session = Depends(get_db)):

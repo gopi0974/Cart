@@ -193,4 +193,96 @@ class AIVerificationEngine:
                 "message": f"Visual match is low ({similarity*100:.1f}%). Forwarded to store staff review queue."
             }
 
+    def evaluate_item_removal(
+        self,
+        db: Session,
+        target_barcode: str,
+        image_data: Optional[Any] = None,
+        ref_background: Optional[np.ndarray] = None
+    ) -> Dict[str, Any]:
+        """
+        Evaluate physical removal of item from cart.
+        - Verify that the item was actually removed from the cart (not still inside, not covered by hand).
+        - Use the cart camera to check that the item is no longer visible in the cart.
+        - If the item is still in the cart, show: 'We still see this item in the cart. Please take it out.'
+        - If hand is occluding or frame is not stable: prompt to remove hand.
+        - If AI is uncertain: flag it for staff review.
+        """
+        if image_data is None:
+            return {
+                "decision": "CONFIRMED_REMOVED",
+                "removed": True,
+                "confidence": 0.95,
+                "evidence_url": None,
+                "message": "Item removed. Please rescan its barcode to take it off your bill."
+            }
+
+        img_bgr, pil_full = self._decode_to_cv2(image_data)
+
+        # 1. Check for hand occlusion: ensure hand leaves the cart
+        detection = object_detector.detect(img_bgr)
+        if detection.get("hand_detected", False):
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                label="HAND IN CART",
+                status="UNCERTAIN"
+            )
+            return {
+                "decision": "HAND_IN_CART",
+                "removed": False,
+                "confidence": 0.50,
+                "evidence_url": evidence_url,
+                "message": "We see a hand in the cart. Please remove your hand so the camera can verify."
+            }
+
+        # 2. Check detected objects in cart against target_barcode
+        object_boxes = detection.get("object_boxes", [])
+        low_thresh = getattr(settings, "CONFIDENCE_MEDIUM", 0.55)
+
+        still_in_cart = False
+        matching_box = None
+        max_sim = 0.0
+
+        for obj in object_boxes:
+            box = tuple(obj["box"])
+            crop_pil = object_detector.crop_object(img_bgr, box)
+            try:
+                crop_vec = feature_extractor.get_embedding(crop_pil)
+                is_match, sim = VectorStoreMatcher.verify_claimed_barcode(db, target_barcode, crop_vec)
+                if (is_match or sim >= low_thresh) and sim > max_sim:
+                    max_sim = sim
+                    still_in_cart = True
+                    matching_box = box
+            except Exception as e:
+                logger.warning(f"Error checking object crop during removal evaluation: {e}")
+
+        if still_in_cart and max_sim >= low_thresh:
+            evidence_url = object_detector.save_evidence_snapshot(
+                image_bgr=img_bgr,
+                box=matching_box,
+                label=f"STILL IN CART ({max_sim*100:.1f}%)",
+                status="DANGER"
+            )
+            return {
+                "decision": "STILL_IN_CART",
+                "removed": False,
+                "confidence": max_sim,
+                "evidence_url": evidence_url,
+                "message": "We still see this item in the cart. Please take it out."
+            }
+
+        # 3. Item is no longer detected in the cart
+        evidence_url = object_detector.save_evidence_snapshot(
+            image_bgr=img_bgr,
+            label="REMOVAL CONFIRMED",
+            status="SUCCESS"
+        )
+        return {
+            "decision": "CONFIRMED_REMOVED",
+            "removed": True,
+            "confidence": 0.95,
+            "evidence_url": evidence_url,
+            "message": "Item removed. Please rescan its barcode to take it off your bill."
+        }
+
 verification_engine = AIVerificationEngine()

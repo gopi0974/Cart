@@ -28,6 +28,7 @@ class ProductCreate(ProductBase):
     pass
 
 class ProductUpdate(BaseModel):
+    barcode: Optional[str] = None
     name: Optional[str] = None
     brand: Optional[str] = None
     category: Optional[str] = None

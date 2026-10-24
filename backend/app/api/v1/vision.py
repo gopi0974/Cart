@@ -231,10 +231,16 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
         pil_img.save(file_path, "JPEG", quality=92)
         saved_images_count += 1
 
-        rel_image_url = f"/uploads/catalog/{filename}"
+        # Generate optimized persistent data URL for database storage
+        thumb_img = pil_img.copy()
+        thumb_img.thumbnail((400, 400))
+        thumb_buffer = io.BytesIO()
+        thumb_img.save(thumb_buffer, format="JPEG", quality=80)
+        persistent_image_url = f"data:image/jpeg;base64,{base64.b64encode(thumb_buffer.getvalue()).decode('utf-8')}"
+
         prod_img = ProductImage(
             product_id=product.id,
-            image_url=rel_image_url,
+            image_url=persistent_image_url,
             angle_tag=cap.angle_tag,
             is_360_scan=True
         )
@@ -242,7 +248,7 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
 
         # Set as primary image if Front view or not yet set
         if not primary_image_set or cap.angle_tag.upper() == "FRONT":
-            product.primary_image_url = rel_image_url
+            product.primary_image_url = persistent_image_url
             primary_image_set = True
 
         # Generate background-removed image
@@ -274,6 +280,7 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
                 logger.error(f"Error computing embedding for {product.barcode} ({full_tag}): {e}")
 
     db.commit()
+    db.refresh(product)
     VectorStoreMatcher.sync_to_disk(db)
 
     return {
@@ -285,7 +292,22 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
         "real_frames_saved": saved_images_count,
         "total_embeddings_stored": stored_vectors_count,
         "model_name": MODEL_NAME,
-        "vector_dim": VECTOR_DIM
+        "vector_dim": VECTOR_DIM,
+        "product": {
+            "id": product.id,
+            "barcode": product.barcode,
+            "name": product.name,
+            "brand": product.brand,
+            "category": product.category,
+            "price": product.price,
+            "discount_price": product.discount_price,
+            "weight_grams": product.weight_grams,
+            "tax_rate": product.tax_rate,
+            "stock_quantity": product.stock_quantity,
+            "primary_image_url": product.primary_image_url,
+            "is_active": product.is_active,
+            "has_embeddings": True
+        }
     }
 
 @router.post("/products/preview-test")

@@ -382,10 +382,14 @@ def list_alerts(
 @router.patch("/alerts/{alert_id}", response_model=AlertResponse)
 async def resolve_alert(alert_id: str, req: AlertResolutionRequest, db: Session = Depends(get_db)):
     """Resolve or dismiss an active incident."""
+    from app.models.user import User
+    staff_user = db.query(User).first()
+    actor_id = staff_user.id if staff_user else None
+
     alert = await AlertService.resolve_alert(
         db=db,
         alert_id=alert_id,
-        user_id="STAFF_MANUAL",
+        user_id=actor_id,
         notes=req.resolution_notes,
         action=req.action
     )
@@ -407,6 +411,227 @@ async def resolve_alert(alert_id: str, req: AlertResolutionRequest, db: Session 
         created_at=alert.created_at,
         resolved_at=alert.resolved_at
     )
+
+class ForceRemoveRequest(BaseModel):
+    reason: str
+    cart_item_id: Optional[str] = None
+    barcode: Optional[str] = None
+
+@router.post("/alerts/{alert_id}/force-remove")
+async def force_remove_from_alert(
+    alert_id: str,
+    req: ForceRemoveRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Store staff force-removes an item associated with an active alert (with mandatory reason).
+    Drops item from cart/bill, resolves alert, logs audit entry, and notifies shopper.
+    """
+    import json
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+
+    if not alert.session_id:
+        raise HTTPException(status_code=400, detail="Alert is not tied to an active session.")
+
+    session = db.query(CartSession).filter(CartSession.id == alert.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Active session not found.")
+
+    # Locate item to force-remove
+    item = None
+    if req.cart_item_id:
+        item = db.query(CartItem).filter(CartItem.id == req.cart_item_id, CartItem.session_id == session.id).first()
+    elif req.barcode:
+        item = db.query(CartItem).join(Product).filter(
+            CartItem.session_id == session.id,
+            Product.barcode == req.barcode,
+            CartItem.status != "REMOVED"
+        ).first()
+
+    if not item:
+        # Check if an item in session is in REMOVED_PENDING_RESCAN or REMOVING
+        item = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.status.in_(["REMOVED_PENDING_RESCAN", "REMOVING", "WARNING_MISMATCH", "WARNING_UNSCANNED"])
+        ).first()
+
+    if not item:
+        # Fallback to the latest item in cart
+        item = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.status != "REMOVED"
+        ).order_by(CartItem.scanned_at.desc()).first()
+
+    if not item:
+        raise HTTPException(status_code=400, detail="No active item found in session to force remove.")
+
+    prod_name = item.product.name if item.product else "Item"
+    prev_status = item.status
+    item.status = "REMOVED"
+    db.flush()
+    SessionService.recalculate_session_totals(db, session)
+
+    from app.models.user import User
+    staff_user = db.query(User).first()
+    actor_id = staff_user.id if staff_user else None
+    actor_name = staff_user.full_name if staff_user else "Store Staff"
+
+    # Resolve this alert and any related removal alerts
+    alert.status = "RESOLVED"
+    alert.resolved_by = actor_id
+    alert.resolution_notes = f"Force-removed by staff. Reason: {req.reason}"
+    alert.resolved_at = datetime.utcnow()
+
+    # Log to AuditLog
+
+    audit = AuditLog(
+        user_id=actor_id,
+        action="FORCE_REMOVE_ITEM",
+        entity_type="CART_ITEM",
+        entity_id=item.id,
+        details_json=json.dumps({
+            "staff_name": actor_name,
+            "product_name": prod_name,
+            "product_barcode": item.product.barcode if item.product else None,
+            "session_id": session.id,
+            "cart_number": alert.cart.cart_number if alert.cart else None,
+            "alert_id": alert.id,
+            "reason": req.reason,
+            "previous_status": prev_status
+        })
+    )
+    db.add(audit)
+    db.commit()
+
+    # Broadcast cleared warning and updated totals to cart WebSocket
+    await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+        "message": f"'{prod_name}' force-removed by store staff.",
+        "product_name": prod_name,
+        "subtotal": session.subtotal_amount,
+        "total": session.total_amount
+    })
+
+    return {
+        "status": "SUCCESS",
+        "message": f"'{prod_name}' successfully force-removed from session.",
+        "product_name": prod_name,
+        "new_subtotal": session.subtotal_amount,
+        "new_total": session.total_amount
+    }
+
+@router.post("/sessions/{session_id}/items/{item_id}/force-remove")
+async def force_remove_session_item(
+    session_id: str,
+    item_id: str,
+    req: ForceRemoveRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Store staff force-removes an item directly from Live Cart Monitor (with mandatory reason).
+    """
+    import json
+    session = db.query(CartSession).filter(CartSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Cart session not found.")
+
+    item = db.query(CartItem).filter(CartItem.id == item_id, CartItem.session_id == session.id).first()
+    if not item or item.status == "REMOVED":
+        raise HTTPException(status_code=404, detail="Item not found or already removed.")
+
+    prod_name = item.product.name if item.product else "Item"
+    prev_status = item.status
+    item.status = "REMOVED"
+    db.flush()
+    SessionService.recalculate_session_totals(db, session)
+
+    from app.models.user import User
+    staff_user = db.query(User).first()
+    actor_id = staff_user.id if staff_user else None
+    actor_name = staff_user.full_name if staff_user else "Store Staff"
+
+    # Resolve open alerts for this session
+    open_alerts = db.query(Alert).filter(
+        Alert.session_id == session.id,
+        Alert.status == "OPEN"
+    ).all()
+    for al in open_alerts:
+        al.status = "RESOLVED"
+        al.resolved_by = actor_id
+        al.resolution_notes = f"Item force-removed by staff. Reason: {req.reason}"
+        al.resolved_at = datetime.utcnow()
+
+    audit = AuditLog(
+        user_id=actor_id,
+        action="FORCE_REMOVE_ITEM",
+        entity_type="CART_ITEM",
+        entity_id=item.id,
+        details_json=json.dumps({
+            "staff_name": actor_name,
+            "product_name": prod_name,
+            "product_barcode": item.product.barcode if item.product else None,
+            "session_id": session.id,
+            "cart_number": session.cart.cart_number if session.cart else None,
+            "reason": req.reason,
+            "previous_status": prev_status
+        })
+    )
+    db.add(audit)
+    db.commit()
+
+    await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+        "message": f"'{prod_name}' force-removed by store staff.",
+        "product_name": prod_name,
+        "subtotal": session.subtotal_amount,
+        "total": session.total_amount
+    })
+
+    return {
+        "status": "SUCCESS",
+        "message": f"'{prod_name}' force-removed by staff.",
+        "product_name": prod_name,
+        "new_subtotal": session.subtotal_amount,
+        "new_total": session.total_amount
+    }
+
+@router.get("/sessions/{session_id}/items")
+def get_session_items(session_id: str, db: Session = Depends(get_db)):
+    """Retrieve all items for a cart session, including REMOVING, REMOVED_PENDING_RESCAN, and camera snapshots."""
+    session = db.query(CartSession).filter(CartSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Cart session not found.")
+    
+    items = db.query(CartItem).filter(CartItem.session_id == session.id).order_by(CartItem.scanned_at.desc()).all()
+    res = []
+    for itm in items:
+        p = itm.product
+        res.append({
+            "id": itm.id,
+            "product_id": p.id if p else None,
+            "product_name": p.name if p else "Item",
+            "product_barcode": p.barcode if p else "",
+            "product_image_url": p.primary_image_url if p else None,
+            "brand": p.brand if p else "",
+            "category": p.category if p else "",
+            "quantity": itm.quantity,
+            "unit_price": itm.unit_price,
+            "status": itm.status,
+            "scanned_at": itm.scanned_at.isoformat() if itm.scanned_at else None,
+            "verified_at": itm.verified_at.isoformat() if itm.verified_at else None,
+            "confidence_score": itm.confidence_score,
+            "verification_evidence_url": itm.verification_evidence_url
+        })
+    return {
+        "session_id": session.id,
+        "cart_id": session.cart_id,
+        "status": session.status,
+        "item_count": session.item_count,
+        "subtotal_amount": session.subtotal_amount,
+        "total_amount": session.total_amount,
+        "items": res
+    }
+
 
 @router.get("/review-queue", response_model=List[ReviewCaseResponse])
 def get_review_queue(db: Session = Depends(get_db)):

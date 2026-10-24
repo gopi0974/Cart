@@ -26,6 +26,13 @@ export const translations = {
     apply: 'Apply',
     paidInFull: 'PAID IN FULL',
     finishSession: 'Finish & Return Cart',
+    removeItem: 'Remove',
+    removingStatus: 'REMOVING • Take out of cart',
+    removedPendingRescanStatus: 'REMOVED • Rescan barcode to drop',
+    takeOutOfCartPrompt: 'Take this item out of the cart, then rescan its barcode.',
+    itemRemovedPrompt: 'Item removed. Please rescan its barcode to take it off your bill.',
+    stillInCartWarning: 'We still see this item in the cart. Please take it out.',
+    cancelKeepItem: 'Cancel - Keep Item',
   },
   te: {
     appName: 'స్మార్ట్ కార్ట్ AI',
@@ -50,6 +57,13 @@ export const translations = {
     apply: 'వర్తింపజేయి',
     paidInFull: 'చెల్లింపు పూర్తయింది',
     finishSession: 'పూర్తి చేసి కార్ట్ అప్పగించండి',
+    removeItem: 'తొలగించు',
+    removingStatus: 'తీసివేత • కార్ట్ నుండి బయటకు తీయండి',
+    removedPendingRescanStatus: 'తొలగించబడింది • బార్‌కోడ్ స్కాన్ చేయండి',
+    takeOutOfCartPrompt: 'ఈ వస్తువును కార్ట్ నుండి తీసివేసి, దాని బార్‌కోడ్‌ను మళ్లీ స్కాన్ చేయండి.',
+    itemRemovedPrompt: 'వస్తువు తీసివేయబడింది. దయచేసి మీ బిల్లు నుండి తీసివేయడానికి దాని బార్‌కోడ్‌ను స్కాన్ చేయండి.',
+    stillInCartWarning: 'ఈ వస్తువు ఇంకా కార్ట్ లోపల కనిపిస్తోంది. దయచేసి బయటకు తీయండి.',
+    cancelKeepItem: 'రద్దు చేయి - ఉంచండి',
   },
   hi: {
     appName: 'स्मार्ट कार्ट AI',
@@ -74,6 +88,13 @@ export const translations = {
     apply: 'लागू करें',
     paidInFull: 'भुगतान सफल',
     finishSession: 'समाप्त करें और कार्ट वापस करें',
+    removeItem: 'हटाएं',
+    removingStatus: 'हटाया जा रहा है • कार्ट से बाहर निकालें',
+    removedPendingRescanStatus: 'हटाया गया • बिल से हटाने के लिए बारकोड स्कैन करें',
+    takeOutOfCartPrompt: 'इस सामान को कार्ट से बाहर निकालें, फिर उसका बारकोड स्कैन करें।',
+    itemRemovedPrompt: 'सामान हटा दिया गया। बिल से हटाने के लिए कृपया उसका बारकोड स्कैन करें।',
+    stillInCartWarning: 'सामान अभी भी कार्ट में दिख रहा है। कृपया इसे बाहर निकालें।',
+    cancelKeepItem: 'रद्द करें - सामान रखें',
   }
 };
 

@@ -58,6 +58,12 @@ def init_db():
                 logger.info("PostgreSQL pgvector extension verified or created.")
         except Exception as e:
             logger.warning(f"Note: pgvector extension could not be auto-created ({e}). Fallback vector JSON matching active.")
+        try:
+            with engine.connect() as conn:
+                conn.execution_options(isolation_level="AUTOCOMMIT")
+                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
+        except Exception:
+            pass
     else:
         try:
             with engine.connect() as conn:

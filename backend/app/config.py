@@ -10,10 +10,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR.parent / ".env")
 
+DEFAULT_DATABASE_URL = "postgresql://postgres:Cart0974Gopi@db.hpuktolsnetlwotihkap.supabase.co:5432/postgres?sslmode=require"
+
 def _normalize_db_url(url: Optional[str]) -> str:
     """Normalize SQLAlchemy database URL for PostgreSQL/Supabase/Neon/Render."""
     if not url or not str(url).strip():
-        return f"sqlite:///{BASE_DIR}/smartcart.db"
+        return DEFAULT_DATABASE_URL
     clean_url = str(url).strip().strip("'\"")
     if clean_url.startswith("postgres://"):
         clean_url = clean_url.replace("postgres://", "postgresql://", 1)

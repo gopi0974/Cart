@@ -1,4 +1,4 @@
-export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'REMOVED';
+export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'REMOVED' | 'REMOVING' | 'REMOVED_PENDING_RESCAN';
 
 export interface CartItem {
   id: string;
@@ -18,10 +18,12 @@ export interface CartItem {
 }
 
 export interface ActiveWarning {
-  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN';
+  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN';
   message: string;
   target_barcode?: string;
   action_required: string;
+  item_id?: string;
+  product_name?: string;
 }
 
 export interface CartSession {

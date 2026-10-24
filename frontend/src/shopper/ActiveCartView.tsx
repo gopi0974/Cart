@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck,
-  LogOut, ChevronRight, ShoppingCart, RefreshCw, Tag
+  LogOut, ChevronRight, ShoppingCart, RefreshCw, Tag, Trash2, X, AlertCircle
 } from 'lucide-react';
 import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
@@ -27,7 +27,36 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   const [couponLoading, setCouponLoading] = useState(false);
   const [couponFeedback, setCouponFeedback] = useState<{ text: string; success: boolean } | null>(null);
 
+  // User-Side Item Removal State
+  const [activeRemovalItem, setActiveRemovalItem] = useState<CartItem | null>(null);
+  const [removalStep, setRemovalStep] = useState<'TAKE_OUT' | 'AWAITING_RESCAN' | null>(null);
+  const [removalStatusMsg, setRemovalStatusMsg] = useState<string>('');
+  const [removalVerifying, setRemovalVerifying] = useState<boolean>(false);
+  const [removalToast, setRemovalToast] = useState<string | null>(null);
+
   const { t } = useTranslation();
+
+  // Restore pending removal state across page refresh
+  useEffect(() => {
+    if (!session.items) return;
+    const pendingItem = session.items.find(
+      (i) => i.status === 'REMOVING' || i.status === 'REMOVED_PENDING_RESCAN'
+    );
+    if (pendingItem) {
+      setActiveRemovalItem(pendingItem);
+      if (pendingItem.status === 'REMOVING') {
+        setRemovalStep('TAKE_OUT');
+        setRemovalStatusMsg('Take this item out of the cart, then rescan its barcode.');
+      } else {
+        setRemovalStep('AWAITING_RESCAN');
+        setRemovalStatusMsg('Item removed. Please rescan its barcode to take it off your bill.');
+      }
+    } else if (activeRemovalItem && !session.items.some(i => i.id === activeRemovalItem.id && (i.status === 'REMOVING' || i.status === 'REMOVED_PENDING_RESCAN'))) {
+      setActiveRemovalItem(null);
+      setRemovalStep(null);
+      setRemovalStatusMsg('');
+    }
+  }, [session.items]);
 
   // Sync state & connect to Cart WebSocket
   useEffect(() => {
@@ -42,10 +71,20 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           if (evtType === 'ITEM_VERIFIED') {
             audioFeedback.playItemVerified();
             refreshSession();
-          } else if (evtType === 'ITEM_MISMATCH' || evtType === 'UNSCANNED_ITEM_DETECTED' || evtType === 'ITEM_REMOVAL_DETECTED') {
+          } else if (
+            evtType === 'ITEM_MISMATCH' || 
+            evtType === 'UNSCANNED_ITEM_DETECTED' || 
+            evtType === 'ITEM_REMOVAL_DETECTED' ||
+            evtType === 'ITEM_REMOVAL_INITIATED'
+          ) {
             audioFeedback.playWarning();
             refreshSession();
-          } else if (evtType === 'WARNING_CLEARED' || evtType === 'ITEM_SCANNED_PENDING') {
+          } else if (evtType === 'ITEM_REMOVED_AWAITING_RESCAN') {
+            audioFeedback.playItemVerified();
+            setRemovalStep('AWAITING_RESCAN');
+            setRemovalStatusMsg('Item removed. Please rescan its barcode to take it off your bill.');
+            refreshSession();
+          } else if (evtType === 'WARNING_CLEARED' || evtType === 'ITEM_SCANNED_PENDING' || evtType === 'REMOVAL_CANCELLED') {
             refreshSession();
           } else if (evtType === 'CART_CAMERA_STATUS') {
             setSession((prev) => ({
@@ -91,13 +130,89 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   };
 
+  // 1. Shopper clicks "Remove" on an item
+  const handleInitiateRemove = async (item: CartItem) => {
+    try {
+      setActiveRemovalItem(item);
+      setRemovalStep('TAKE_OUT');
+      setRemovalStatusMsg('Take this item out of the cart, then rescan its barcode.');
+      audioFeedback.playWarning();
+
+      const updatedItem = await api.initiateItemRemove(session.id, item.id);
+      await refreshSession();
+
+      // Trigger AI camera check after giving user a moment to reach in
+      setTimeout(() => {
+        triggerRemovalVerification(updatedItem.id);
+      }, 1600);
+    } catch (err: any) {
+      alert(err.message || 'Failed to initiate item removal');
+    }
+  };
+
+  // 2. Cart Camera AI verification of physical item removal
+  const triggerRemovalVerification = async (itemId: string) => {
+    setRemovalVerifying(true);
+    try {
+      const res = await api.verifyItemRemoval(session.id, itemId);
+      if (res.removed) {
+        // AI verified item has physically departed the cart!
+        setRemovalStep('AWAITING_RESCAN');
+        setRemovalStatusMsg('Item removed. Please rescan its barcode to take it off your bill.');
+        audioFeedback.playItemVerified();
+        await refreshSession();
+
+        // Prompt shopper with barcode scanner in REMOVE mode
+        setScannerMode('REMOVE');
+        setScannerOpen(true);
+      } else {
+        // Still in cart, hand occluded, or uncertain
+        setRemovalStep('TAKE_OUT');
+        setRemovalStatusMsg(res.message || 'We still see this item in the cart. Please take it out.');
+        audioFeedback.playWarning();
+        await refreshSession();
+      }
+    } catch (err: any) {
+      console.error('Verification error:', err);
+    } finally {
+      setRemovalVerifying(false);
+    }
+  };
+
+  // 3. Shopper taps "Cancel" to keep the item in cart
+  const handleCancelRemove = async (itemId: string) => {
+    try {
+      await api.cancelItemRemove(session.id, itemId);
+      setActiveRemovalItem(null);
+      setRemovalStep(null);
+      setRemovalStatusMsg('');
+      await refreshSession();
+    } catch (err: any) {
+      alert(err.message || 'Failed to cancel removal');
+    }
+  };
+
+  // 4. Barcode scanned during ADD or REMOVE mode
   const handleBarcodeDetected = async (barcode: string) => {
     if (scannerMode === 'REMOVE') {
       try {
-        await api.rescanRemove(session.id, barcode);
+        const res = await api.rescanRemove(session.id, barcode);
+        const removedName = res.product_name || activeRemovalItem?.product_name || 'Item';
+
+        // Success notification
+        setRemovalToast(`${removedName} removed from cart.`);
+        setTimeout(() => setRemovalToast(null), 4500);
+
+        audioFeedback.playItemVerified();
+        setActiveRemovalItem(null);
+        setRemovalStep(null);
+        setRemovalStatusMsg('');
+
         await refreshSession();
       } catch (err: any) {
-        throw new Error(err.message || `Item removal failed for barcode ${barcode}`);
+        audioFeedback.playWarning();
+        // Propagate error to modal for explicit mismatch message
+        throw new Error(err.message || `This barcode does not match the item you are removing.`);
       }
     } else {
       try {
@@ -137,13 +252,28 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     setScannerOpen(true);
   };
 
-  const openRemoveScanner = () => {
+  const openRemoveScanner = (barcode?: string) => {
     setScannerMode('REMOVE');
     setScannerOpen(true);
   };
 
+  // Checkout is blocked if any removal is pending, camera is offline, or unverified items exist
+  const hasPendingRemoval = session.items.some(
+    (i) => i.status === 'REMOVING' || i.status === 'REMOVED_PENDING_RESCAN'
+  ) || activeRemovalItem !== null;
+
+  const checkoutBlocked = hasPendingRemoval || !session.can_checkout || session.camera_status === 'OFFLINE';
+
   return (
-    <div className="max-w-md mx-auto min-h-screen flex flex-col justify-between pb-36 animate-fade-in">
+    <div className="max-w-md mx-auto min-h-screen flex flex-col justify-between pb-36 animate-fade-in relative">
+      {/* Floating Success Toast */}
+      {removalToast && (
+        <div className="fixed top-16 left-4 right-4 z-50 max-w-sm mx-auto bg-emerald-600 text-white px-4 py-3 rounded-2xl shadow-2xl flex items-center gap-2.5 animate-bounce">
+          <CheckCircle2 className="w-5 h-5 shrink-0" />
+          <span className="text-xs font-semibold">{removalToast}</span>
+        </div>
+      )}
+
       {/* Top Cart Status Header */}
       <div className="sticky top-0 z-20 glass-panel border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between shadow-sm">
         <div className="flex items-center gap-2.5">
@@ -202,7 +332,93 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           warnings={session.active_warnings}
           onScanClick={openAddScanner}
           onRescanRemoveClick={openRemoveScanner}
+          onCancelRemove={handleCancelRemove}
+          onVerifyRemovalClick={triggerRemovalVerification}
         />
+
+        {/* Dedicated Removal Flow Banner / Card */}
+        {activeRemovalItem && (
+          <div className="mb-5 p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-400 dark:border-amber-600/70 text-amber-950 dark:text-amber-100 shadow-xl space-y-3 animate-fade-in">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
+                <span className="font-bold text-sm text-amber-950 dark:text-amber-100">
+                  Removing: {activeRemovalItem.product_name}
+                </span>
+              </div>
+              <button
+                onClick={() => handleCancelRemove(activeRemovalItem.id)}
+                className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-white px-2 py-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 flex items-center gap-1"
+                title="Cancel removal and keep item"
+              >
+                <X className="w-3.5 h-3.5" />
+                Cancel
+              </button>
+            </div>
+
+            {removalStep === 'TAKE_OUT' && (
+              <div className="space-y-2.5">
+                <div className="p-3 rounded-xl bg-white/90 dark:bg-slate-900/90 border border-amber-300 dark:border-amber-700/60 text-xs">
+                  <p className="font-semibold text-slate-900 dark:text-white text-sm">
+                    Take this item out of the cart, then rescan its barcode.
+                  </p>
+                  {removalStatusMsg && (
+                    <p className="mt-1 text-amber-700 dark:text-amber-300 font-medium">
+                      {removalStatusMsg}
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => triggerRemovalVerification(activeRemovalItem.id)}
+                    disabled={removalVerifying}
+                    className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${removalVerifying ? 'animate-spin' : ''}`} />
+                    {removalVerifying ? 'Checking Cart Camera...' : "I've Removed It (Check Camera)"}
+                  </button>
+                  <button
+                    onClick={() => handleCancelRemove(activeRemovalItem.id)}
+                    className="px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Cancel (Keep Item)
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {removalStep === 'AWAITING_RESCAN' && (
+              <div className="space-y-2.5">
+                <div className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/70 border border-blue-300 dark:border-blue-700/60 text-xs">
+                  <p className="font-semibold text-blue-950 dark:text-blue-100 text-sm">
+                    Item removed. Please rescan its barcode to take it off your bill.
+                  </p>
+                  <p className="mt-1 text-blue-700 dark:text-blue-300">
+                    Scan the barcode on <strong>{activeRemovalItem.product_name}</strong> to confirm and drop it from your bill.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setScannerMode('REMOVE');
+                      setScannerOpen(true);
+                    }}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                  >
+                    <Camera className="w-4 h-4" />
+                    Rescan Barcode to Drop from Bill
+                  </button>
+                  <button
+                    onClick={() => handleCancelRemove(activeRemovalItem.id)}
+                    className="px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Cancel (Keep Item)
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Section Heading */}
         <div className="flex items-center justify-between mb-3">
@@ -237,83 +453,162 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           </div>
         ) : (
           <div className="space-y-3">
-            {session.items.map((item: CartItem) => (
-              <div
-                key={item.id}
-                className={`bg-white dark:bg-[#131B2E] border rounded-2xl p-3.5 shadow-sm transition-all flex items-start gap-3 relative overflow-hidden ${
-                  item.status === 'PENDING'
-                    ? 'border-amber-400/80 dark:border-amber-500/70 shadow-amber-500/10 shadow-lg'
-                    : item.status === 'VERIFIED'
-                    ? 'border-emerald-200 dark:border-emerald-900/60'
-                    : 'border-red-300 dark:border-red-900/60'
-                }`}
-              >
-                {/* Product Thumbnail */}
-                <div className="w-14 h-14 bg-slate-100 dark:bg-slate-800 rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-slate-100 dark:border-slate-800">
-                  {item.product_image_url ? (
-                    <img
-                      src={item.product_image_url}
-                      alt={item.product_name}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <ShoppingCart className="w-6 h-6 text-slate-400" />
-                  )}
+            {session.items.map((item: CartItem) => {
+              const isItemRemoving = item.status === 'REMOVING';
+              const isItemRemovedPending = item.status === 'REMOVED_PENDING_RESCAN';
+
+              return (
+                <div
+                  key={item.id}
+                  className={`bg-white dark:bg-[#131B2E] border rounded-2xl p-3.5 shadow-sm transition-all flex items-start gap-3 relative overflow-hidden ${
+                    isItemRemoving
+                      ? 'border-amber-400/90 dark:border-amber-500/80 shadow-amber-500/10 shadow-lg ring-1 ring-amber-400'
+                      : isItemRemovedPending
+                      ? 'border-blue-400/90 dark:border-blue-500/80 shadow-blue-500/10 shadow-lg ring-1 ring-blue-400'
+                      : item.status === 'PENDING'
+                      ? 'border-amber-400/80 dark:border-amber-500/70 shadow-amber-500/10 shadow-lg'
+                      : item.status === 'VERIFIED'
+                      ? 'border-emerald-200 dark:border-emerald-900/60'
+                      : 'border-red-300 dark:border-red-900/60'
+                  }`}
+                >
+                  {/* Product Thumbnail */}
+                  <div className="w-14 h-14 bg-slate-100 dark:bg-slate-800 rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-slate-100 dark:border-slate-800">
+                    {item.product_image_url ? (
+                      <img
+                        src={item.product_image_url}
+                        alt={item.product_name}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <ShoppingCart className="w-6 h-6 text-slate-400" />
+                    )}
+                  </div>
+
+                  {/* Info & State */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start">
+                      <h4 className="font-semibold text-sm text-slate-900 dark:text-white truncate pr-2">
+                        {item.product_name}
+                      </h4>
+                      <div className="text-right flex-shrink-0">
+                        <span className="font-mono font-bold text-sm text-slate-900 dark:text-white">
+                          ₹{item.unit_price.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono mt-0.5">
+                      <span>{item.brand} • Qty: {item.quantity}</span>
+                      
+                      {/* Remove Button for Verified/Pending Items */}
+                      {!isItemRemoving && !isItemRemovedPending && (
+                        <button
+                          onClick={() => handleInitiateRemove(item)}
+                          className="text-red-500 hover:text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs px-2 py-0.5 rounded-lg border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all font-sans"
+                          title="Remove item from cart"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>{t.removeItem || 'Remove'}</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Dynamic Status Badges */}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {item.status === 'VERIFIED' && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800/40">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                          {t.verifiedStatus}
+                          {item.confidence_score && (
+                            <span className="opacity-75 font-mono text-[10px]">
+                              ({(item.confidence_score * 100).toFixed(0)}%)
+                            </span>
+                          )}
+                        </span>
+                      )}
+
+                      {isItemRemoving && (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/60 px-2.5 py-0.5 rounded-md border border-amber-300 dark:border-amber-700 animate-pulse">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                          {t.removingStatus || 'REMOVING • Take out of cart'}
+                        </span>
+                      )}
+
+                      {isItemRemovedPending && (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-800 dark:text-blue-300 bg-blue-100 dark:bg-blue-950/60 px-2.5 py-0.5 rounded-md border border-blue-300 dark:border-blue-700">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                          {t.removedPendingRescanStatus || 'REMOVED • Rescan barcode to drop'}
+                        </span>
+                      )}
+
+                      {item.status === 'PENDING' && (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
+                          <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                          {t.pendingStatus}
+                        </span>
+                      )}
+
+                      {item.status === 'WARNING_MISMATCH' && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                          {t.mismatchStatus}
+                        </span>
+                      )}
+
+                      {item.status === 'WARNING_UNSCANNED' && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                          {t.unscannedStatus}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Inline actions for removing items */}
+                    {isItemRemoving && (
+                      <div className="flex items-center gap-2 mt-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                        <button
+                          onClick={() => triggerRemovalVerification(item.id)}
+                          disabled={removalVerifying}
+                          className="bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-sm"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${removalVerifying ? 'animate-spin' : ''}`} />
+                          Check Camera
+                        </button>
+                        <button
+                          onClick={() => handleCancelRemove(item.id)}
+                          className="border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] px-2.5 py-1 rounded-lg"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+
+                    {isItemRemovedPending && (
+                      <div className="flex items-center gap-2 mt-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                        <button
+                          onClick={() => {
+                            setActiveRemovalItem(item);
+                            setScannerMode('REMOVE');
+                            setScannerOpen(true);
+                          }}
+                          className="bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-sm"
+                        >
+                          <Camera className="w-3 h-3" />
+                          Rescan Barcode
+                        </button>
+                        <button
+                          onClick={() => handleCancelRemove(item.id)}
+                          className="border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] px-2.5 py-1 rounded-lg"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-
-                {/* Info & State */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-start">
-                    <h4 className="font-semibold text-sm text-slate-900 dark:text-white truncate pr-2">
-                      {item.product_name}
-                    </h4>
-                    <span className="font-mono font-bold text-sm text-slate-900 dark:text-white">
-                      ₹{item.unit_price.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-400 font-mono mt-0.5">
-                    {item.brand} • Qty: {item.quantity}
-                  </div>
-
-                  {/* Dynamic Status Badges */}
-                  <div className="mt-2 flex items-center gap-2">
-                    {item.status === 'VERIFIED' && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800/40">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                        {t.verifiedStatus}
-                        {item.confidence_score && (
-                          <span className="opacity-75 font-mono text-[10px]">
-                            ({(item.confidence_score * 100).toFixed(0)}%)
-                          </span>
-                        )}
-                      </span>
-                    )}
-
-                    {item.status === 'PENDING' && (
-                      <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
-                        <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                        {t.pendingStatus}
-                      </span>
-                    )}
-
-                    {item.status === 'WARNING_MISMATCH' && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
-                        <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                        {t.mismatchStatus}
-                      </span>
-                    )}
-
-                    {item.status === 'WARNING_UNSCANNED' && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
-                        <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                        {t.unscannedStatus}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -385,19 +680,21 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             {t.scanBarcode}
           </button>
 
-          {/* Pay Button with Verification Guard */}
+          {/* Pay Button with Verification & Removal Guards */}
           <button
             onClick={() => setCheckoutOpen(true)}
-            disabled={!session.can_checkout || session.camera_status === 'OFFLINE'}
+            disabled={checkoutBlocked}
             title={
-              session.camera_status === 'OFFLINE'
+              hasPendingRemoval
+                ? 'Please complete the item removal before checking out.'
+                : session.camera_status === 'OFFLINE'
                 ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
                 : !session.can_checkout
                 ? 'All items must be verified by camera and warnings cleared before paying'
                 : 'Proceed to Payment'
             }
             className={`flex-1 font-semibold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-1.5 transition-all text-sm ${
-              session.can_checkout && session.camera_status !== 'OFFLINE'
+              !checkoutBlocked
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30 active:scale-95'
                 : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed shadow-none'
             }`}
@@ -407,9 +704,11 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           </button>
         </div>
 
-        {(!session.can_checkout || session.camera_status === 'OFFLINE') && session.items.length > 0 && (
+        {checkoutBlocked && session.items.length > 0 && (
           <p className="text-[11px] text-center text-amber-600 dark:text-amber-400 mt-2 font-medium">
-            {session.camera_status === 'OFFLINE'
+            {hasPendingRemoval
+              ? 'Please complete the item removal before checking out.'
+              : session.camera_status === 'OFFLINE'
               ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
               : "Checkout opens once all items are placed and verified in cart."}
           </p>
@@ -422,6 +721,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         onClose={() => setScannerOpen(false)}
         onBarcodeDetected={handleBarcodeDetected}
         mode={scannerMode}
+        targetProductName={activeRemovalItem?.product_name}
       />
 
       {/* Checkout Modal */}

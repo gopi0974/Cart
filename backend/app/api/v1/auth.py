@@ -26,6 +26,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         )
     return user
 
+def require_admin_or_manager(current_user: User = Depends(get_current_user)) -> User:
+    """Ensure authenticated staff has ADMIN or MANAGER privileges."""
+    if current_user.role not in ["ADMIN", "MANAGER"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied: Only Admin and Manager roles can delete catalog items."
+        )
+    return current_user
+
 @router.post("/login", response_model=Token)
 def login(login_data: UserLogin, db: Session = Depends(get_db)):
     """Staff/Admin login endpoint providing JWT access token."""

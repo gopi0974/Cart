@@ -13,6 +13,7 @@ interface Props {
   onClose: () => void;
   onBarcodeDetected: (barcode: string) => Promise<void> | void;
   mode?: 'ADD' | 'REMOVE';
+  targetProductName?: string;
 }
 
 type ScannerStatus = 'STARTING' | 'SCANNING' | 'DECODED' | 'ERROR';
@@ -21,7 +22,8 @@ export const BarcodeScannerModal: React.FC<Props> = ({
   isOpen, 
   onClose, 
   onBarcodeDetected, 
-  mode = 'ADD' 
+  mode = 'ADD',
+  targetProductName
 }) => {
   // Scanner state
   const [status, setStatus] = useState<ScannerStatus>('STARTING');
@@ -104,9 +106,12 @@ export const BarcodeScannerModal: React.FC<Props> = ({
           onClose();
         }, 400);
       } catch (err: any) {
-        // If product lookup failed, show error in modal
+        // If product lookup or rescan failed, show error in modal and resume scanning
         setStatus('ERROR');
-        setErrorMessage(err?.message || `Product not found (barcode ${cleanCode})`);
+        setErrorMessage(err?.message || `Error with barcode ${cleanCode}`);
+        setTimeout(() => {
+          setStatus('SCANNING');
+        }, 3200);
       }
     }
   }, [onBarcodeDetected, onClose]);
@@ -319,7 +324,9 @@ export const BarcodeScannerModal: React.FC<Props> = ({
             <span>{mode === 'REMOVE' ? 'Rescan Removed Item' : 'Real Barcode Scanner'}</span>
           </h3>
           <p className="text-[11px] text-white/70">
-            {mode === 'REMOVE' ? 'Scan barcode to drop from cart' : 'Align retail barcode inside the frame'}
+            {mode === 'REMOVE' 
+              ? (targetProductName ? `Rescan barcode for ${targetProductName}` : 'Scan barcode to drop from cart')
+              : 'Align retail barcode inside the frame'}
           </p>
         </div>
 

@@ -28,6 +28,7 @@ class Product(Base):
     stock_quantity = Column(Integer, nullable=False, default=100)
     primary_image_url = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_deleted = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

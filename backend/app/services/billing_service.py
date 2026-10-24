@@ -63,6 +63,9 @@ class BillingService:
         if not session_details["can_checkout"]:
             if cart and cart.camera_status != "ONLINE":
                 raise ValueError("Checkout blocked: This cart's camera is not connected. Verification is paused. Please ask staff for assistance.")
+            for itm in session_details["items"]:
+                if itm.status in ["REMOVING", "REMOVED_PENDING_RESCAN"]:
+                    raise ValueError("Please complete the item removal before checking out.")
             if len(session_details["active_warnings"]) > 0:
                 raise ValueError("Checkout blocked: You have unresolved alerts or warnings in your cart.")
             for itm in session_details["items"]:

@@ -1,10 +1,18 @@
 import csv
 import io
+import json
+from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.product import Product, ProductImage, ProductEmbedding
+from app.models.session import CartSession, CartItem
+from app.models.transaction import AuditLog
+from app.models.user import User
+from app.api.v1.auth import require_admin_or_manager
+from app.ai.vector_store import VectorStoreMatcher
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, BulkUploadResponse
 
 router = APIRouter(prefix="/products", tags=["Product Catalog"])
@@ -79,7 +87,10 @@ def create_product(prod_in: ProductCreate, db: Session = Depends(get_db)):
     """Add a new product to supermarket inventory."""
     existing = db.query(Product).filter(Product.barcode == prod_in.barcode).first()
     if existing:
-        raise HTTPException(status_code=400, detail=f"Product with barcode '{prod_in.barcode}' already exists.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Product with barcode '{prod_in.barcode}' already exists ('{existing.name}'). Please provide a unique barcode."
+        )
 
     product = Product(**prod_in.model_dump())
     db.add(product)
@@ -111,6 +122,17 @@ def update_product(product_id: str, prod_in: ProductUpdate, db: Session = Depend
         raise HTTPException(status_code=404, detail="Product not found")
 
     update_data = prod_in.model_dump(exclude_unset=True)
+    if "barcode" in update_data and update_data["barcode"] != p.barcode:
+        dup = db.query(Product).filter(Product.barcode == update_data["barcode"], Product.id != product_id).first()
+        if dup:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Barcode '{update_data['barcode']}' is already in use by '{dup.name}'. Each product must have a unique barcode."
+            )
+        # Keep barcodes on existing embeddings in sync
+        for emb in p.embeddings:
+            emb.barcode = update_data["barcode"]
+
     for field, val in update_data.items():
         setattr(p, field, val)
     db.commit()
@@ -134,15 +156,188 @@ def update_product(product_id: str, prod_in: ProductUpdate, db: Session = Depend
         has_embeddings=has_emb
     )
 
+class BulkDeleteRequest(BaseModel):
+    product_ids: List[str]
+
 @router.delete("/{product_id}")
-def delete_product(product_id: str, db: Session = Depends(get_db)):
-    """Soft delete product from active catalog."""
+def delete_product(
+    product_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Soft delete product from active catalog:
+    1. Blocks deletion if product is currently present in an active shopping cart.
+    2. Removes embeddings from vector store so it is no longer recognized.
+    3. Soft deletes (marks is_active=False, is_deleted=True) so past receipts still show the product.
+    4. Records deletion in immutable audit log (who, what, when). Only Admin/Manager permitted.
+    """
+    p = db.query(Product).filter(Product.id == product_id).first()
+    if not p or not p.is_active:
+        raise HTTPException(status_code=404, detail="Product not found or already deleted")
+
+    # 1. Block deletion if product is in an active cart
+    active_items = (
+        db.query(CartItem)
+        .join(CartSession, CartItem.session_id == CartSession.id)
+        .filter(
+            CartItem.product_id == p.id,
+            CartItem.status != "REMOVED",
+            CartSession.status == "ACTIVE"
+        )
+        .all()
+    )
+    if active_items:
+        cart_numbers = set()
+        for item in active_items:
+            if item.session and item.session.cart:
+                cart_numbers.add(item.session.cart.cart_number)
+        carts_str = ", ".join(cart_numbers) if cart_numbers else "one or more active carts"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete '{p.name}'. This product is currently in active shopping cart(s): {carts_str}. Deletion is blocked until the shopper completes checkout or removes the item."
+        )
+
+    # 2. Remove embeddings from vector store so it is no longer recognized
+    removed_embeddings_count = VectorStoreMatcher.delete_embeddings_for_product(db, p.id)
+
+    # 3. Soft delete (mark as inactive & deleted)
+    p.is_active = False
+    p.is_deleted = True
+
+    # 4. Record in audit log (who, what, when)
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="DELETE_PRODUCT",
+        entity_type="PRODUCT",
+        entity_id=p.id,
+        details_json=json.dumps({
+            "barcode": p.barcode,
+            "product_name": p.name,
+            "brand": p.brand,
+            "deleted_by_email": current_user.email,
+            "deleted_by_name": current_user.full_name,
+            "deleted_by_role": current_user.role,
+            "embeddings_removed": removed_embeddings_count,
+            "deleted_at": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Product '{p.name}' deleted successfully.",
+        "product_id": p.id,
+        "product_name": p.name,
+        "embeddings_removed": removed_embeddings_count
+    }
+
+@router.post("/{product_id}/restore")
+def restore_product(
+    product_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Restore a previously deleted product back to active catalog."""
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Product not found")
-    p.is_active = False
+
+    p.is_active = True
+    p.is_deleted = False
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="RESTORE_PRODUCT",
+        entity_type="PRODUCT",
+        entity_id=p.id,
+        details_json=json.dumps({
+            "barcode": p.barcode,
+            "product_name": p.name,
+            "restored_by_email": current_user.email,
+            "restored_by_role": current_user.role,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
-    return {"status": "SUCCESS", "message": f"Product '{p.name}' marked inactive."}
+    db.refresh(p)
+    return {"status": "SUCCESS", "message": f"Product '{p.name}' restored successfully."}
+
+@router.post("/bulk-delete")
+def bulk_delete_products(
+    req: BulkDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Bulk soft delete products, removing their AI embeddings and logging audit trail."""
+    if not req.product_ids:
+        raise HTTPException(status_code=400, detail="No product IDs provided for deletion.")
+
+    # 1. Check for active cart conflicts across all requested items
+    active_conflicts = (
+        db.query(CartItem)
+        .join(CartSession, CartItem.session_id == CartSession.id)
+        .filter(
+            CartItem.product_id.in_(req.product_ids),
+            CartItem.status != "REMOVED",
+            CartSession.status == "ACTIVE"
+        )
+        .all()
+    )
+    if active_conflicts:
+        conflict_prods = set()
+        conflict_carts = set()
+        for ci in active_conflicts:
+            if ci.product:
+                conflict_prods.add(ci.product.name)
+            if ci.session and ci.session.cart:
+                conflict_carts.add(ci.session.cart.cart_number)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete selected products. The following item(s) are currently in active cart(s) ({', '.join(conflict_carts)}): {', '.join(conflict_prods)}. Deletion is blocked until carts complete checkout or items are removed."
+        )
+
+    deleted_count = 0
+    deleted_names = []
+
+    for pid in req.product_ids:
+        p = db.query(Product).filter(Product.id == pid, Product.is_active == True).first()
+        if not p:
+            continue
+
+        VectorStoreMatcher.delete_embeddings_for_product(db, p.id)
+        p.is_active = False
+        p.is_deleted = True
+
+        audit = AuditLog(
+            user_id=current_user.id,
+            action="BULK_DELETE_PRODUCT",
+            entity_type="PRODUCT",
+            entity_id=p.id,
+            details_json=json.dumps({
+                "barcode": p.barcode,
+                "product_name": p.name,
+                "deleted_by_email": current_user.email,
+                "deleted_by_role": current_user.role,
+                "timestamp": datetime.utcnow().isoformat()
+            }),
+            created_at=datetime.utcnow()
+        )
+        db.add(audit)
+        deleted_count += 1
+        deleted_names.append(p.name)
+
+    db.commit()
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully deleted {deleted_count} product(s).",
+        "deleted_count": deleted_count,
+        "deleted_names": deleted_names
+    }
 
 @router.post("/bulk-upload", response_model=BulkUploadResponse)
 async def bulk_upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
