@@ -17,7 +17,7 @@ import { ReportsView } from './ReportsView';
 import { StaffRolesView } from './StaffRolesView';
 import { AdminLogin } from './AdminLogin';
 import { Product } from '../types';
-import { api } from '../services/api';
+import { api, getApiBaseUrl } from '../services/api';
 
 interface AuthUser {
   email: string;
@@ -166,6 +166,33 @@ export const AdminPortal: React.FC = () => {
             title="Sign Out"
           >
             <LogOut className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Backend API Connection Indicator & Setting */}
+        <div className="px-3 py-2 bg-slate-50/80 dark:bg-slate-900/40 border border-slate-200/80 dark:border-slate-800/80 rounded-xl flex items-center justify-between text-[10px]">
+          <div className="flex items-center gap-1.5 overflow-hidden">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span className="font-mono text-slate-500 truncate" title={getApiBaseUrl()}>
+              API: {getApiBaseUrl().replace('/api/v1', '')}
+            </span>
+          </div>
+          <button
+            onClick={() => {
+              const current = localStorage.getItem('smartcart_api_url') || '';
+              const newUrl = prompt('Enter Backend Server URL (e.g. https://your-backend.onrender.com or leave empty for default):', current);
+              if (newUrl !== null) {
+                if (newUrl.trim()) {
+                  localStorage.setItem('smartcart_api_url', newUrl.trim());
+                } else {
+                  localStorage.removeItem('smartcart_api_url');
+                }
+                window.location.reload();
+              }
+            }}
+            className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold hover:underline shrink-0 ml-1"
+          >
+            Edit
           </button>
         </div>
       </aside>

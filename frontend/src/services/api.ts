@@ -1,27 +1,55 @@
 import { CartSession, CartItem, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
 
 export function getApiBaseUrl(): string {
+  // 1. Runtime override via localStorage (useful for pointing frontend to Render)
+  if (typeof window !== 'undefined') {
+    const custom = localStorage.getItem('smartcart_api_url');
+    if (custom && custom.trim()) {
+      const clean = custom.trim().replace(/\/+$/, '');
+      return clean.endsWith('/api/v1') ? clean : `${clean}/api/v1`;
+    }
+  }
+
+  // 2. Vite environment variable
   if ((import.meta as any).env?.VITE_API_URL) {
     const raw = (import.meta as any).env.VITE_API_URL.replace(/\/+$/, '');
     return raw.endsWith('/api/v1') ? raw : `${raw}/api/v1`;
   }
+
+  // 3. Host detection
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const proto = isHttps ? 'https' : 'http';
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  return `${proto}://${host}:8000/api/v1`;
+
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return `${proto}://${host}:8000/api/v1`;
+  }
+  // On cloud deployments (Render, Vercel), port 8000 does not exist
+  return `${proto}://${host}/api/v1`;
 }
 
 export function getWsBaseUrl(): string {
+  if (typeof window !== 'undefined') {
+    const custom = localStorage.getItem('smartcart_api_url');
+    if (custom && custom.trim()) {
+      const wsProto = custom.startsWith('https') ? 'wss' : 'ws';
+      const cleanHost = custom.replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
+      return `${wsProto}://${cleanHost}`;
+    }
+  }
   const envApi = (import.meta as any).env?.VITE_API_URL;
   if (envApi) {
     const wsProto = envApi.startsWith('https') ? 'wss' : 'ws';
-    const cleanHost = envApi.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const cleanHost = envApi.replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
     return `${wsProto}://${cleanHost}`;
   }
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const proto = isHttps ? 'wss' : 'ws';
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-  return `${proto}://${host}:8000`;
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return `${proto}://${host}:8000`;
+  }
+  return `${proto}://${host}`;
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -34,12 +62,31 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     ...(options.headers as Record<string, string> || {}),
   };
 
-  const response = await fetch(url, { ...options, headers });
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(errorBody.detail || 'Network request failed');
+  try {
+    const response = await fetch(url, { ...options, headers });
+    if (!response.ok) {
+      let errorDetail = response.statusText;
+      try {
+        const errorBody = await response.json();
+        if (typeof errorBody.detail === 'string') {
+          errorDetail = errorBody.detail;
+        } else if (Array.isArray(errorBody.detail)) {
+          errorDetail = errorBody.detail.map((d: any) => d.msg || d.detail || JSON.stringify(d)).join(', ');
+        } else if (errorBody.message) {
+          errorDetail = errorBody.message;
+        }
+      } catch {}
+      throw new Error(errorDetail || `HTTP ${response.status} Request Failed`);
+    }
+    return response.json();
+  } catch (err: any) {
+    if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
+      throw new Error(
+        `Unable to reach backend API at ${url}. Please verify that the backend server is running and reachable.`
+      );
+    }
+    throw err;
   }
-  return response.json();
 }
 
 export const api = {
