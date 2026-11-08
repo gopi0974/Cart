@@ -126,12 +126,55 @@ app.include_router(products_router, prefix=settings.API_V1_STR)
 app.include_router(admin_router, prefix=settings.API_V1_STR)
 app.include_router(vision_router, prefix=settings.API_V1_STR)
 
-def _get_health_data():
-    """Compute real system health metrics across database, AI model, and filesystem."""
+from app.utils.sanitization import sanitize_secrets, SanitizingLogFilter
+from app.api.v1.auth import get_current_user
+
+# Attach secret sanitization filter to root logging handlers
+for handler in logging.root.handlers:
+    handler.addFilter(SanitizingLogFilter())
+
+
+def _get_public_health_data():
+    """
+    Minimal public health check:
+    Returns strictly {status, database_ok, schema_ok, model_loaded}.
+    Never includes secrets, revision IDs, error traces, or diagnostic internals.
+    """
     db_ok = check_db_health()
     model_ok = is_model_ready()
 
-    # Check database migration status (schema_ok: true only when DB is at latest Alembic head)
+    schema_ok = False
+    if db_ok:
+        try:
+            from app.migrations import check_schema_health
+            schema_ok = check_schema_health()
+        except Exception:
+            schema_ok = False
+
+    overall_status = "HEALTHY"
+    if not db_ok:
+        overall_status = "UNHEALTHY"
+    elif not schema_ok:
+        overall_status = "DEGRADED"
+    elif not model_ok:
+        overall_status = "STARTING"
+
+    return {
+        "status": overall_status,
+        "database_ok": db_ok,
+        "schema_ok": schema_ok,
+        "model_loaded": model_ok,
+    }
+
+
+def _get_detailed_health_data():
+    """
+    Full diagnostic metrics for authenticated staff portal (/admin/system-health).
+    Always masks database credentials, passwords, and tokens.
+    """
+    db_ok = check_db_health()
+    model_ok = is_model_ready()
+
     schema_ok = False
     current_revision = None
     head_revision = None
@@ -143,12 +186,11 @@ def _get_health_data():
             schema_ok = schema_info.get("is_up_to_date", False)
             current_revision = schema_info.get("current_revision")
             head_revision = schema_info.get("head_revision")
-            migration_error = schema_info.get("migration_error")
+            migration_error = sanitize_secrets(schema_info.get("migration_error"))
         except Exception as e:
             schema_ok = False
-            migration_error = str(e)[:200]
+            migration_error = sanitize_secrets(str(e)[:200])
 
-    # Verify storage writeability
     storage_ok = False
     try:
         test_file = settings.EVIDENCE_DIR / f".probe_{uuid.uuid4().hex[:6]}"
@@ -159,7 +201,6 @@ def _get_health_data():
     except Exception:
         storage_ok = False
 
-    # Count real stored vectors and enrolled products from database if db is reachable
     vectors_count = 0
     products_enrolled = 0
     if db_ok and SessionLocal:
@@ -168,7 +209,6 @@ def _get_health_data():
             try:
                 from app.models.product import ProductEmbedding
                 vectors_count = db.query(ProductEmbedding).count()
-                # Count distinct products that have registered embeddings
                 from sqlalchemy import func
                 products_enrolled = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
             finally:
@@ -176,7 +216,6 @@ def _get_health_data():
         except Exception:
             pass
 
-    # Read real resident memory (RSS in MB)
     memory_rss_mb = 0.0
     try:
         import psutil
@@ -198,12 +237,12 @@ def _get_health_data():
 
     return {
         "status": overall_status,
+        "database_ok": db_ok,
         "schema_ok": schema_ok,
+        "model_loaded": model_ok,
         "current_revision": current_revision,
         "head_revision": head_revision,
         "migration_error": migration_error,
-        "database_ok": db_ok,
-        "model_loaded": model_ok,
         "model_name": MODEL_NAME,
         "vector_dimension": VECTOR_DIM,
         "storage_ok": storage_ok,
@@ -216,22 +255,40 @@ def _get_health_data():
         "use_mock": settings.USE_MOCK,
     }
 
+
+# Backwards compatibility alias
+_get_health_data = _get_public_health_data
+
+
 @app.get("/health")
 def health_check(response: Response):
     """
-    Comprehensive system health check:
-    Reports live status, model state, database connectivity, and vector inventory.
+    Public health check: minimal status indicators.
     Returns HTTP 200 when healthy/starting, HTTP 503 when critical DB service is down.
+    Never exposes internal configurations, revisions, or credentials.
     """
-    data = _get_health_data()
+    data = _get_public_health_data()
     if not data["database_ok"]:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return data
 
+
 @app.get(f"{settings.API_V1_STR}/health")
 def api_health_check(response: Response):
-    """API v1 health route alias."""
+    """API v1 health route alias (minimal public output)."""
     return health_check(response)
+
+
+@app.get("/admin/system-health")
+@app.get(f"{settings.API_V1_STR}/admin/system-health")
+def admin_system_health(current_user=Depends(get_current_user)):
+    """
+    Detailed system health diagnostics for authenticated staff.
+    Includes schema revisions, sanitized migration error (if any), model metrics,
+    memory usage, and vector counts.
+    Never exposes raw database credentials or connection strings.
+    """
+    return _get_detailed_health_data()
 
 # Real-Time WebSocket Endpoints
 @app.websocket("/ws/cart/{cart_id}")

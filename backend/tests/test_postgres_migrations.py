@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.main import app, _get_health_data
+from app.main import app, _get_public_health_data, _get_detailed_health_data
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.migrations import run_db_migrations, get_schema_info, check_schema_health
@@ -355,18 +355,25 @@ def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service)
             sess_count = conn.execute(text("SELECT COUNT(*) FROM cart_sessions;")).scalar()
             assert sess_count == 1
 
-        # Step 10: Verify /health output
-        health_data = _get_health_data()
-        print("\n--- LIVE POSTGRESQL /health OUTPUT ---")
+        # Step 10: Verify public minimal /health output and authenticated detailed diagnostics
+        public_health = _get_public_health_data()
+        detailed_health = _get_detailed_health_data()
+        print("\n--- LIVE POSTGRESQL MINIMAL /health OUTPUT ---")
         import json
-        print(json.dumps(health_data, indent=2))
+        print(json.dumps(public_health, indent=2))
+        print("\n--- LIVE POSTGRESQL DETAILED /admin/system-health OUTPUT ---")
+        print(json.dumps(detailed_health, indent=2))
 
-        assert health_data["schema_ok"] is True
-        assert health_data["current_revision"] == "f3a4b5c6d7e8"
-        assert health_data["head_revision"] == "f3a4b5c6d7e8"
-        assert health_data["migration_error"] is None
-        assert health_data["database_ok"] is True
-        assert health_data["status"] in ("HEALTHY", "STARTING")
+        assert set(public_health.keys()) == {"status", "database_ok", "schema_ok", "model_loaded"}
+        assert public_health["schema_ok"] is True
+        assert public_health["database_ok"] is True
+        assert public_health["status"] in ("HEALTHY", "STARTING")
+
+        assert detailed_health["schema_ok"] is True
+        assert detailed_health["current_revision"] == "f3a4b5c6d7e8"
+        assert detailed_health["head_revision"] == "f3a4b5c6d7e8"
+        assert detailed_health["migration_error"] is None
+        assert detailed_health["database_ok"] is True
 
     finally:
         settings.DATABASE_URL = old_db_url

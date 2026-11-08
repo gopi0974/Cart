@@ -285,14 +285,29 @@ export const api = {
     status: string;
     model_loaded: boolean;
     database_ok: boolean;
-    storage_ok: boolean;
+    schema_ok: boolean;
+  }> {
+    return request('/health');
+  },
+
+  async getSystemHealth(): Promise<{
+    status: string;
+    model_loaded: boolean;
+    database_ok: boolean;
+    schema_ok: boolean;
+    current_revision?: string | null;
+    head_revision?: string | null;
+    migration_error?: string | null;
+    storage_ok?: boolean;
     vectors_count?: number;
     products_enrolled?: number;
     embed_ms_last?: number | null;
     embed_ms_avg?: number | null;
     memory_rss_mb?: number;
+    demo_mode?: boolean;
+    use_mock?: boolean;
   }> {
-    return request('/health');
+    return request('/admin/system-health');
   },
 
   // Products Master

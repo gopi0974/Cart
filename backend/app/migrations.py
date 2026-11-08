@@ -7,18 +7,23 @@ from alembic import command
 from alembic.script import ScriptDirectory
 from alembic.runtime.migration import MigrationContext
 from app.config import settings
+from app.utils.sanitization import sanitize_secrets
 
 logger = logging.getLogger("smartcart.migrations")
 
 # Baseline revision corresponding to commit b816c12
 BASELINE_REVISION: str = "d54e41411396"
 
-# Track last migration error for /health diagnostics
+# Track last migration error for /health diagnostics (ALWAYS sanitized)
 _last_migration_error: Optional[str] = None
 
 
-def get_alembic_config(connection=None) -> Config:
-    """Build and configure Alembic Config object pointing to the backend alembic.ini."""
+def get_alembic_config(connection=None, custom_url=None) -> Config:
+    """
+    Build and configure Alembic Config object pointing to the backend alembic.ini.
+    Safely escapes '%' as '%%' for ConfigParser to prevent InterpolationSyntaxError
+    when passwords contain percent-encoded characters (%21, %40, %25).
+    """
     backend_dir = Path(__file__).resolve().parent.parent
     alembic_ini_path = backend_dir / "alembic.ini"
     
@@ -28,8 +33,15 @@ def get_alembic_config(connection=None) -> Config:
     alembic_cfg = Config(str(alembic_ini_path))
     alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
     
-    if settings.DATABASE_URL:
-        alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+    target_url = custom_url or settings.DATABASE_URL
+    if target_url:
+        # ConfigParser interprets '%' as variable interpolation syntax.
+        # Passwords with '%' (e.g. %21, %40, %25) trigger InterpolationSyntaxError.
+        # Escape '%' as '%%' for alembic.ini ConfigParser:
+        escaped_url = target_url.replace("%", "%%")
+        alembic_cfg.set_main_option("sqlalchemy.url", escaped_url)
+        # Also store raw URL in config attributes to allow direct engine creation
+        alembic_cfg.attributes["target_url"] = target_url
         
     if connection is not None:
         alembic_cfg.attributes["connection"] = connection
@@ -86,14 +98,14 @@ def _ensure_baseline_pieces_idempotent(bind_or_conn) -> None:
             conn.close()
 
 
-def run_db_migrations(target: str = "head", connection=None) -> bool:
+def run_db_migrations(target: str = "head", connection=None, custom_url=None) -> bool:
     """
     Run Alembic migrations automatically up to the specified target (default: 'head').
     If the database was previously initialized with create_all() and has no alembic_version table:
       1. Ensures any missing baseline pieces are added idempotently.
       2. Stamps the baseline revision (d54e41411396).
       3. Upgrades to head (applying incremental migrations e528b12f6891, f3a4b5c6d7e8).
-    Never runs destructive steps. A migration failure sets migration_error and returns False
+    Never runs destructive steps. A migration failure sets sanitized migration_error and returns False
     without crashing the app.
     """
     global _last_migration_error
@@ -101,7 +113,7 @@ def run_db_migrations(target: str = "head", connection=None) -> bool:
 
     _last_migration_error = None
     try:
-        alembic_cfg = get_alembic_config(connection=connection)
+        alembic_cfg = get_alembic_config(connection=connection, custom_url=custom_url)
 
         # Helper to inspect table names and stamp if needed
         def check_and_stamp(conn):
@@ -131,21 +143,22 @@ def run_db_migrations(target: str = "head", connection=None) -> bool:
         _last_migration_error = None
         return True
     except Exception as e:
-        _last_migration_error = str(e)
-        logger.error(f"Failed to apply database migrations to '{target}': {e}", exc_info=True)
+        _last_migration_error = sanitize_secrets(str(e))
+        logger.error(f"Failed to apply database migrations to '{target}': {_last_migration_error}")
         return False
 
 
-def get_schema_info(connection=None) -> Dict[str, Any]:
+def get_schema_info(connection=None, custom_url=None) -> Dict[str, Any]:
     """
     Inspect the database and Alembic scripts to determine current and head revisions,
-    is_up_to_date flag, and short migration_error if any.
+    is_up_to_date flag, and sanitized migration_error if any.
+    Never exposes raw database credentials.
     """
     from app.database import engine
     global _last_migration_error
 
     try:
-        alembic_cfg = get_alembic_config(connection=connection)
+        alembic_cfg = get_alembic_config(connection=connection, custom_url=custom_url)
         script = ScriptDirectory.from_config(alembic_cfg)
         heads = script.get_heads()
         head_rev = heads[0] if heads else None
@@ -173,21 +186,22 @@ def get_schema_info(connection=None) -> Dict[str, Any]:
             "current_revision": current_rev,
             "head_revision": head_rev,
             "is_up_to_date": is_up_to_date,
-            "migration_error": err_msg if not is_up_to_date else None,
+            "migration_error": sanitize_secrets(err_msg) if not is_up_to_date else None,
         }
     except Exception as e:
-        logger.error(f"Failed to retrieve schema info: {e}")
+        sanitized_err = sanitize_secrets(str(e))
+        logger.error(f"Failed to retrieve schema info: {sanitized_err}")
         return {
             "current_revision": None,
             "head_revision": None,
             "is_up_to_date": False,
-            "migration_error": str(e),
+            "migration_error": sanitized_err,
         }
 
 
-def check_schema_health(connection=None) -> bool:
+def check_schema_health(connection=None, custom_url=None) -> bool:
     """
     Returns True only when the database is at the latest Alembic migration (head).
     """
-    info = get_schema_info(connection=connection)
+    info = get_schema_info(connection=connection, custom_url=custom_url)
     return bool(info.get("is_up_to_date", False))

@@ -50,7 +50,7 @@ export const AdminPortal: React.FC = () => {
 
   const fetchHealth = async () => {
     try {
-      const data = await api.checkHealth();
+      const data = await api.getSystemHealth().catch(() => api.checkHealth());
       setHealthData(data);
       setBackendStatus('CONNECTED');
     } catch (err: any) {

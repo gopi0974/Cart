@@ -22,7 +22,11 @@ target_metadata = Base.metadata
 
 
 def get_url():
-    return config.get_main_option("sqlalchemy.url") or settings.DATABASE_URL
+    return (
+        config.attributes.get("target_url")
+        or config.get_main_option("sqlalchemy.url")
+        or settings.DATABASE_URL
+    )
 
 
 def run_migrations_offline() -> None:
@@ -53,8 +57,8 @@ def run_migrations_online() -> None:
             context.run_migrations()
         return
 
-    # If a specific url is set in the Alembic config (e.g. during tests), use it
-    custom_url = config.get_main_option("sqlalchemy.url")
+    # Check if custom target url was injected or configured
+    custom_url = config.attributes.get("target_url") or config.get_main_option("sqlalchemy.url")
     engine_url_unmasked = (
         db_engine.url.render_as_string(hide_password=False)
         if db_engine is not None else None
