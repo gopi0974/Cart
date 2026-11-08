@@ -64,7 +64,7 @@ class SessionService:
         if not cart.is_enabled:
             raise ValueError(f"Cart '{cart.cart_number}' is currently disabled by store management.")
 
-        # 3. Cryptographic HMAC signature check (if signature provided)
+        # 3. Cryptographic HMAC signature check
         if signature:
             expected_sig = hmac.new(
                 settings.QR_SIGNING_SECRET.encode("utf-8"),
@@ -73,6 +73,12 @@ class SessionService:
             ).hexdigest()[:16]
             if not hmac.compare_digest(signature, expected_sig):
                 raise ValueError("Security verification failed: Invalid or tampered cart QR signature.")
+        else:
+            if not settings.DEMO_MODE:
+                raise ValueError(
+                    "Security verification failed: Missing HMAC signature. "
+                    "Unsigned pairing is disabled in production. Please scan the physical QR code on the cart."
+                )
 
         # 4. Enforce ONE active session per cart rule
         existing_session = db.query(CartSession).filter(

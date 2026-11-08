@@ -25,12 +25,19 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   const [phoneInput, setPhoneInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ConnectionError | null>(null);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const { t } = useTranslation();
   const hasAutoAttempted = useRef(false);
 
   // Ping /health immediately on mount so sleeping Render free instance begins waking before user connects
   useEffect(() => {
-    api.checkHealth().catch(() => {});
+    api.checkHealth()
+      .then((data: any) => {
+        if (data && typeof data.demo_mode === 'boolean') {
+          setIsDemoMode(data.demo_mode);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const categorizeError = (err: any): ConnectionError => {
@@ -204,14 +211,21 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
               : t.connectDesc}
           </p>
 
-          <button
-            onClick={() => handleConnect(`QR-${cartInput}`)}
-            disabled={loading}
-            className="mt-5 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-4 rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-          >
-            <Zap className="w-4 h-4 fill-current" />
-            {loading ? 'Authenticating Cart...' : `${t.connectBtn} (${cartInput})`}
-          </button>
+          {isDemoMode ? (
+            <button
+              onClick={() => handleConnect(`QR-${cartInput}`)}
+              disabled={loading}
+              className="mt-5 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-3 px-4 rounded-2xl shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+            >
+              <Zap className="w-4 h-4 fill-current" />
+              {loading ? 'Authenticating Cart...' : `${t.connectBtn} (${cartInput}) [Demo]`}
+            </button>
+          ) : (
+            <div className="mt-5 p-3 rounded-xl bg-slate-100/80 dark:bg-slate-800/80 text-xs text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700/60 flex items-center justify-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              <span>Physical QR code scan required to unlock cart</span>
+            </div>
+          )}
         </div>
 
         {/* Optional Mobile Phone for SMS / Receipt */}
@@ -228,35 +242,42 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
           />
         </div>
 
-        {/* Manual Cart Selection Fallback */}
-        <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
-          <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">
-            Or Pick Cart Manually
-          </label>
-          <div className="flex gap-2">
-            <select
-              value={cartInput}
-              onChange={(e) => setCartInput(e.target.value)}
-              className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            >
-              {[1, 2, 3, 4, 5, 6, 7, 8].map((num) => {
-                const c = `CART-${num < 10 ? '00' : '0'}${num}`;
-                return (
-                  <option key={c} value={c}>
-                    {c} (Floor Level 1)
-                  </option>
-                );
-              })}
-            </select>
-            <button
-              onClick={() => handleConnect(cartInput)}
-              disabled={loading}
-              className="bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white px-4 rounded-xl flex items-center justify-center disabled:opacity-50"
-            >
-              <ArrowRight className="w-4 h-4" />
-            </button>
+        {/* Manual Cart Selection Fallback (Active only in Demo Mode) */}
+        {isDemoMode && (
+          <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                Or Pick Cart Manually (Demo Mode)
+              </label>
+              <span className="text-[10px] font-mono bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 px-2 py-0.5 rounded-full font-bold">
+                DEMO
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <select
+                value={cartInput}
+                onChange={(e) => setCartInput(e.target.value)}
+                className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-white rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8].map((num) => {
+                  const c = `CART-${num < 10 ? '00' : '0'}${num}`;
+                  return (
+                    <option key={c} value={c}>
+                      {c} (Floor Level 1)
+                    </option>
+                  );
+                })}
+              </select>
+              <button
+                onClick={() => handleConnect(cartInput)}
+                disabled={loading}
+                className="bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white px-4 rounded-xl flex items-center justify-center disabled:opacity-50"
+              >
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Privacy Notice Banner */}
