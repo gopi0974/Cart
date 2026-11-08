@@ -1,22 +1,14 @@
 import { CartSession, CartItem, Product, ReceiptData, CartFleetItem, CartRegistrationResult, AdminAlert, ReviewCase } from '../types';
 
 export function getApiBaseUrl(): string {
-  // 1. Runtime override via localStorage (useful for pointing frontend to Render)
-  if (typeof window !== 'undefined') {
-    const custom = localStorage.getItem('smartcart_api_url');
-    if (custom && custom.trim()) {
-      const clean = custom.trim().replace(/\/+$/, '');
-      return clean.endsWith('/api/v1') ? clean : `${clean}/api/v1`;
-    }
-  }
-
-  // 2. Vite environment variable
-  if ((import.meta as any).env?.VITE_API_URL) {
-    const raw = (import.meta as any).env.VITE_API_URL.replace(/\/+$/, '');
+  // Read ONLY from build-time Vite environment variable
+  const envApi = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.NEXT_PUBLIC_API_URL;
+  if (envApi && typeof envApi === 'string' && envApi.trim()) {
+    const raw = envApi.trim().replace(/\/+$/, '');
     return raw.endsWith('/api/v1') ? raw : `${raw}/api/v1`;
   }
 
-  // 3. Host detection
+  // Same-origin or local development fallback
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const proto = isHttps ? 'https' : 'http';
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -24,25 +16,17 @@ export function getApiBaseUrl(): string {
   if (host === 'localhost' || host === '127.0.0.1') {
     return `${proto}://${host}:8000/api/v1`;
   }
-  // On cloud deployments (Render, Vercel), port 8000 does not exist
   return `${proto}://${host}/api/v1`;
 }
 
 export function getWsBaseUrl(): string {
-  if (typeof window !== 'undefined') {
-    const custom = localStorage.getItem('smartcart_api_url');
-    if (custom && custom.trim()) {
-      const wsProto = custom.startsWith('https') ? 'wss' : 'ws';
-      const cleanHost = custom.replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
-      return `${wsProto}://${cleanHost}`;
-    }
-  }
-  const envApi = (import.meta as any).env?.VITE_API_URL;
-  if (envApi) {
-    const wsProto = envApi.startsWith('https') ? 'wss' : 'ws';
-    const cleanHost = envApi.replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
+  const envApi = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.NEXT_PUBLIC_API_URL;
+  if (envApi && typeof envApi === 'string' && envApi.trim()) {
+    const wsProto = envApi.trim().startsWith('https') ? 'wss' : 'ws';
+    const cleanHost = envApi.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
     return `${wsProto}://${cleanHost}`;
   }
+
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
   const proto = isHttps ? 'wss' : 'ws';
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -52,8 +36,21 @@ export function getWsBaseUrl(): string {
   return `${proto}://${host}`;
 }
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const url = `${getApiBaseUrl()}${endpoint}`;
+export interface FriendlyApiError extends Error {
+  isWakingUp?: boolean;
+  isNetworkOffline?: boolean;
+  statusCode?: number;
+}
+
+async function request<T>(endpoint: string, options: RequestInit = {}, retries = 3): Promise<T> {
+  const isFullUrl = endpoint.startsWith('http://') || endpoint.startsWith('https://');
+  const baseUrl = getApiBaseUrl();
+  const url = isFullUrl
+    ? endpoint
+    : endpoint.startsWith('/health')
+    ? `${baseUrl.replace(/\/api\/v1$/, '')}/health`
+    : `${baseUrl}${endpoint}`;
+
   const token = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const headers: Record<string, string> = {
@@ -62,31 +59,88 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     ...(options.headers as Record<string, string> || {}),
   };
 
-  try {
-    const response = await fetch(url, { ...options, headers });
-    if (!response.ok) {
-      let errorDetail = response.statusText;
-      try {
-        const errorBody = await response.json();
-        if (typeof errorBody.detail === 'string') {
-          errorDetail = errorBody.detail;
-        } else if (Array.isArray(errorBody.detail)) {
-          errorDetail = errorBody.detail.map((d: any) => d.msg || d.detail || JSON.stringify(d)).join(', ');
-        } else if (errorBody.message) {
-          errorDetail = errorBody.message;
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        let errorDetail = '';
+        try {
+          const errorBody = await response.json();
+          if (typeof errorBody.detail === 'string') {
+            errorDetail = errorBody.detail;
+          } else if (Array.isArray(errorBody.detail)) {
+            errorDetail = errorBody.detail.map((d: any) => d.msg || d.detail || JSON.stringify(d)).join(', ');
+          } else if (errorBody.message) {
+            errorDetail = errorBody.message;
+          }
+        } catch {}
+
+        // Backend waking up (Render free tier spin-up returns 502, 503, or 504)
+        if ([502, 503, 504].includes(response.status) && attempt < retries) {
+          console.warn(`[SmartCart API] Server waking up (${response.status}), retrying ${attempt}/${retries}...`);
+          await new Promise((r) => setTimeout(r, attempt * 1500));
+          continue;
         }
-      } catch {}
-      throw new Error(errorDetail || `HTTP ${response.status} Request Failed`);
+
+        const err: FriendlyApiError = new Error(
+          errorDetail || (response.status === 503 ? 'Starting the cart server, this can take up to a minute...' : `Request failed (HTTP ${response.status})`)
+        );
+        err.statusCode = response.status;
+        if (response.status === 503) {
+          err.isWakingUp = true;
+        }
+        throw err;
+      }
+
+      return response.json();
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      lastError = err;
+
+      // Abort / timeout error
+      if (err.name === 'AbortError') {
+        const timeoutErr: FriendlyApiError = new Error('The cart server is taking longer than usual to respond. Please tap Retry.');
+        timeoutErr.isWakingUp = true;
+        throw timeoutErr;
+      }
+
+      // Transient network failure while waking up
+      const isFetchFailure = err.name === 'TypeError' && err.message === 'Failed to fetch';
+      if (isFetchFailure && attempt < retries) {
+        console.warn(`[SmartCart API] Network attempt ${attempt}/${retries} failed, retrying in ${attempt * 1.5}s...`);
+        await new Promise((r) => setTimeout(r, attempt * 1500));
+        continue;
+      }
+
+      if (isFetchFailure) {
+        const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        const friendlyErr: FriendlyApiError = new Error(
+          isOffline
+            ? 'No internet connection. Please check your network and try again.'
+            : 'Starting the cart server, this can take up to a minute... Please tap Retry.'
+        );
+        friendlyErr.isWakingUp = !isOffline;
+        friendlyErr.isNetworkOffline = isOffline;
+        console.error('[SmartCart API] Connection failed:', { url, originalError: err.message });
+        throw friendlyErr;
+      }
+
+      throw err;
     }
-    return response.json();
-  } catch (err: any) {
-    if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
-      throw new Error(
-        `Unable to reach backend API at ${url}. Please verify that the backend server is running and reachable.`
-      );
-    }
-    throw err;
   }
+
+  throw lastError || new Error('Connection failed. Please retry.');
 }
 
 export const api = {
@@ -176,16 +230,6 @@ export const api = {
     });
   },
 
-  async applyCoupon(sessionId: string, couponCode: string) {
-    return request<{ status: string; coupon_code: string; discount_amount: number; new_total: number; description: string }>(
-      `/shopper/${sessionId}/apply-coupon`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ coupon_code: couponCode }),
-      }
-    );
-  },
-
   async checkout(sessionId: string, paymentMethod: string = 'UPI', upiId?: string) {
     return request<{ status: string; receipt_number: string; amount_paid: number }>(
       `/shopper/${sessionId}/checkout`,
@@ -201,9 +245,23 @@ export const api = {
   },
 
   async exitSession(sessionId: string): Promise<{ status: string; message: string }> {
-    return request<{ status: string; message: string }>(`/shopper/${sessionId}/exit`, {
+    return request<{ status: string; message: string }>(`/shopper/${sessionId}/end-session`, {
       method: 'POST',
     });
+  },
+
+  async checkHealth(): Promise<{
+    status: string;
+    model_loaded: boolean;
+    database_ok: boolean;
+    storage_ok: boolean;
+    vectors_count?: number;
+    products_enrolled?: number;
+    embed_ms_last?: number | null;
+    embed_ms_avg?: number | null;
+    memory_rss_mb?: number;
+  }> {
+    return request('/health');
   },
 
   // Products Master

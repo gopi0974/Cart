@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { QrCode, ShoppingCart, ShieldCheck, Zap, ArrowRight, AlertTriangle, ShieldAlert, CheckCircle2, Lock } from 'lucide-react';
+import {
+  QrCode, ShoppingCart, ShieldCheck, Zap, ArrowRight, AlertTriangle,
+  ShieldAlert, Lock, RefreshCw, Loader2
+} from 'lucide-react';
 import { api } from '../services/api';
 import { CartSession } from '../types';
 import { useTranslation } from '../services/i18n';
@@ -9,14 +12,64 @@ interface Props {
   onConnected: (session: CartSession) => void;
 }
 
+interface ConnectionError {
+  title?: string;
+  message: string;
+  type?: 'security' | 'disabled' | 'occupied' | 'waking_up' | 'generic';
+  canRetry?: boolean;
+}
+
 export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   const [searchParams] = useSearchParams();
   const [cartInput, setCartInput] = useState('CART-001');
   const [phoneInput, setPhoneInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<{ title?: string; message: string; type?: 'security' | 'disabled' | 'occupied' | 'generic' } | null>(null);
+  const [error, setError] = useState<ConnectionError | null>(null);
   const { t } = useTranslation();
   const hasAutoAttempted = useRef(false);
+
+  // Ping /health immediately on mount so sleeping Render free instance begins waking before user connects
+  useEffect(() => {
+    api.checkHealth().catch(() => {});
+  }, []);
+
+  const categorizeError = (err: any): ConnectionError => {
+    const isWaking = Boolean(
+      err?.isWakingUp ||
+      err?.status === 502 ||
+      err?.status === 503 ||
+      err?.status === 504 ||
+      (typeof err?.message === 'string' && (
+        err.message.toLowerCase().includes('starting the cart server') ||
+        err.message.toLowerCase().includes('waking up') ||
+        err.message.toLowerCase().includes('timeout')
+      ))
+    );
+
+    if (isWaking) {
+      return {
+        title: 'Starting Cart Server',
+        message: 'Starting the cart server, this can take up to a minute... Please hold on while the cloud instance spins up.',
+        type: 'waking_up',
+        canRetry: true
+      };
+    }
+
+    let msg: string = (err?.message || 'Failed to connect to cart. Please check cart number or QR.').trim();
+    // Guarantee raw backend URLs are never shown to shoppers
+    msg = msg.replace(/https?:\/\/[^\s]+/g, 'backend service');
+
+    if (msg.toLowerCase().includes('signature') || msg.toLowerCase().includes('security') || msg.toLowerCase().includes('tamper')) {
+      return { title: 'Security Verification Failed', message: msg, type: 'security' };
+    }
+    if (msg.toLowerCase().includes('disabled')) {
+      return { title: 'Cart Temporarily Disabled', message: msg, type: 'disabled' };
+    }
+    if (msg.toLowerCase().includes('occupied') || msg.toLowerCase().includes('active shopper')) {
+      return { title: 'Cart In Use', message: msg, type: 'occupied' };
+    }
+    return { title: 'Connection Failed', message: msg, type: 'generic', canRetry: true };
+  };
 
   // Check URL search parameters (from scanned QR code: /user/connect?cart=CART-001&token=...&sig=...)
   useEffect(() => {
@@ -37,22 +90,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
           onConnected(session);
         })
         .catch((err: any) => {
-          const msg: string = err.message || 'Failed to connect to cart.';
-          let type: 'security' | 'disabled' | 'occupied' | 'generic' = 'generic';
-          let title = 'Connection Failed';
-
-          if (msg.toLowerCase().includes('signature') || msg.toLowerCase().includes('security') || msg.toLowerCase().includes('tamper')) {
-            type = 'security';
-            title = 'Security Verification Failed';
-          } else if (msg.toLowerCase().includes('disabled')) {
-            type = 'disabled';
-            title = 'Cart Temporarily Disabled';
-          } else if (msg.toLowerCase().includes('occupied') || msg.toLowerCase().includes('active shopper')) {
-            type = 'occupied';
-            title = 'Cart In Use';
-          }
-
-          setError({ title, message: msg, type });
+          setError(categorizeError(err));
         })
         .finally(() => {
           setLoading(false);
@@ -67,22 +105,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
       const session = await api.pairCart(tokenOrNumber, phoneInput || undefined);
       onConnected(session);
     } catch (err: any) {
-      const msg: string = err.message || 'Failed to connect to cart. Please check cart number or QR.';
-      let type: 'security' | 'disabled' | 'occupied' | 'generic' = 'generic';
-      let title = 'Connection Failed';
-
-      if (msg.toLowerCase().includes('signature') || msg.toLowerCase().includes('security') || msg.toLowerCase().includes('tamper')) {
-        type = 'security';
-        title = 'Security Verification Failed';
-      } else if (msg.toLowerCase().includes('disabled')) {
-        type = 'disabled';
-        title = 'Cart Temporarily Disabled';
-      } else if (msg.toLowerCase().includes('occupied') || msg.toLowerCase().includes('active shopper')) {
-        type = 'occupied';
-        title = 'Cart In Use';
-      }
-
-      setError({ title, message: msg, type });
+      setError(categorizeError(err));
     } finally {
       setLoading(false);
     }
@@ -106,8 +129,10 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
 
         {/* Status / Error Banner */}
         {error && (
-          <div className={`mb-6 p-4 rounded-2xl border flex items-start gap-3.5 text-sm transition-all animate-fadeIn ${
-            error.type === 'security'
+          <div className={`mb-6 p-4 rounded-2xl border flex flex-col sm:flex-row items-start gap-3.5 text-sm transition-all animate-fadeIn ${
+            error.type === 'waking_up'
+              ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-200'
+              : error.type === 'security'
               ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900/60 text-rose-800 dark:text-rose-300'
               : error.type === 'occupied'
               ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60 text-amber-800 dark:text-amber-300'
@@ -115,18 +140,37 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
               ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-200 dark:border-purple-900/60 text-purple-800 dark:text-purple-300'
               : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/60 text-red-800 dark:text-red-300'
           }`}>
-            <div className="flex-shrink-0 mt-0.5">
-              {error.type === 'security' ? (
-                <ShieldAlert className="w-5 h-5 text-rose-600 dark:text-rose-400" />
-              ) : error.type === 'occupied' ? (
-                <Lock className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-              ) : (
-                <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400" />
-              )}
-            </div>
-            <div className="flex-1">
-              {error.title && <div className="font-semibold text-xs uppercase tracking-wider mb-1">{error.title}</div>}
-              <div className="leading-relaxed">{error.message}</div>
+            <div className="flex items-start gap-3 w-full">
+              <div className="flex-shrink-0 mt-0.5">
+                {error.type === 'waking_up' ? (
+                  <Loader2 className="w-5 h-5 text-amber-600 dark:text-amber-400 animate-spin" />
+                ) : error.type === 'security' ? (
+                  <ShieldAlert className="w-5 h-5 text-rose-600 dark:text-rose-400" />
+                ) : error.type === 'occupied' ? (
+                  <Lock className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+                ) : (
+                  <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400" />
+                )}
+              </div>
+              <div className="flex-1">
+                {error.title && <div className="font-semibold text-xs uppercase tracking-wider mb-1">{error.title}</div>}
+                <div className="leading-relaxed">{error.message}</div>
+                {error.type === 'waking_up' && (
+                  <div className="mt-2.5 w-full bg-amber-200/60 dark:bg-amber-900/40 rounded-full h-1.5 overflow-hidden">
+                    <div className="bg-amber-500 h-1.5 rounded-full animate-pulse w-3/4"></div>
+                  </div>
+                )}
+                {error.canRetry && (
+                  <button
+                    onClick={() => handleConnect(`QR-${cartInput}`)}
+                    disabled={loading}
+                    className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors shadow-sm"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+                    Retry Connection
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}

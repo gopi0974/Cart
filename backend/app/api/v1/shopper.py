@@ -1,6 +1,5 @@
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -16,9 +15,6 @@ from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 
 router = APIRouter(prefix="/shopper", tags=["Shopper Mobile App"])
-
-class CouponRequest(BaseModel):
-    coupon_code: str
 
 @router.post("/pair", response_model=SessionResponse)
 async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
@@ -133,14 +129,6 @@ async def rescan_remove(session_id: str, req: RescanRemoveRequest, db: Session =
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.post("/{session_id}/apply-coupon")
-def apply_coupon(session_id: str, req: CouponRequest, db: Session = Depends(get_db)):
-    """Apply promotional coupon/discount to cart."""
-    try:
-        return BillingService.apply_coupon(db, session_id, req.coupon_code)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
 @router.post("/{session_id}/checkout")
 async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(get_db)):
     """Process checkout payment. Allowed ONLY if all items are VERIFIED and no warnings open."""
@@ -168,10 +156,11 @@ def get_receipt(session_id: str, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@router.post("/{session_id}/exit")
-async def exit_session(session_id: str, db: Session = Depends(get_db)):
+@router.post("/{session_id}/end-session")
+@router.post("/{session_id}/exit", include_in_schema=False)
+async def end_session(session_id: str, db: Session = Depends(get_db)):
     """
-    Shopper clicks 'Exit' to leave or cancel session.
+    Shopper ends session to leave or cancel.
     Frees the cart immediately (sets cart to IDLE) so other shoppers can occupy it.
     """
     session = db.query(CartSession).filter(CartSession.id == session_id).first()

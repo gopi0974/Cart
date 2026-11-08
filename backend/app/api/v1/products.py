@@ -83,7 +83,11 @@ def get_product(product_id: str, db: Session = Depends(get_db)):
     )
 
 @router.post("", response_model=ProductResponse)
-def create_product(prod_in: ProductCreate, db: Session = Depends(get_db)):
+def create_product(
+    prod_in: ProductCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """Add a new product to supermarket inventory."""
     existing = db.query(Product).filter(Product.barcode == prod_in.barcode).first()
     if existing:
@@ -115,7 +119,12 @@ def create_product(prod_in: ProductCreate, db: Session = Depends(get_db)):
     )
 
 @router.put("/{product_id}", response_model=ProductResponse)
-def update_product(product_id: str, prod_in: ProductUpdate, db: Session = Depends(get_db)):
+def update_product(
+    product_id: str,
+    prod_in: ProductUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """Update existing product details."""
     p = db.query(Product).filter(Product.id == product_id).first()
     if not p:
@@ -340,7 +349,11 @@ def bulk_delete_products(
     }
 
 @router.post("/bulk-upload", response_model=BulkUploadResponse)
-async def bulk_upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def bulk_upload_csv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """Import inventory catalog via CSV file."""
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported.")

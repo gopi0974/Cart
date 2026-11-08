@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck,
-  LogOut, ChevronRight, ShoppingCart, RefreshCw, Tag, Trash2, X, AlertCircle
+  LogOut, ChevronRight, ShoppingCart, RefreshCw, Trash2, X, AlertCircle
 } from 'lucide-react';
 import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
@@ -23,9 +23,6 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   const [scannerMode, setScannerMode] = useState<'ADD' | 'REMOVE'>('ADD');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [couponCode, setCouponCode] = useState('');
-  const [couponLoading, setCouponLoading] = useState(false);
-  const [couponFeedback, setCouponFeedback] = useState<{ text: string; success: boolean } | null>(null);
 
   // User-Side Item Removal State
   const [activeRemovalItem, setActiveRemovalItem] = useState<CartItem | null>(null);
@@ -221,29 +218,6 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
       } catch (err: any) {
         throw new Error(err.message || `Product not found (barcode ${barcode})`);
       }
-    }
-  };
-
-  const handleApplyCoupon = async () => {
-    if (!couponCode.trim()) return;
-    setCouponLoading(true);
-    setCouponFeedback(null);
-    try {
-      const res = await api.applyCoupon(session.id, couponCode.trim());
-      setCouponFeedback({
-        text: `Coupon applied: Rs.${res.discount_amount.toFixed(2)} off! (${res.description})`,
-        success: true
-      });
-      audioFeedback.playItemVerified();
-      await refreshSession();
-    } catch (err: any) {
-      setCouponFeedback({
-        text: err.message || 'Invalid coupon code. Try WELCOME10 or SUPER50.',
-        success: false
-      });
-      audioFeedback.playWarning();
-    } finally {
-      setCouponLoading(false);
     }
   };
 
@@ -612,41 +586,6 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           </div>
         )}
 
-        {/* Promo Code Application Box */}
-        {session.items.length > 0 && (
-          <div className="mt-4 p-3.5 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5 text-emerald-500" />
-                {t.coupons}
-              </span>
-              <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
-                Try: WELCOME10 or SUPER50
-              </span>
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={couponCode}
-                onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
-                placeholder="PROMO CODE"
-                className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-1.5 text-xs font-mono uppercase focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
-              <button
-                onClick={handleApplyCoupon}
-                disabled={couponLoading || !couponCode.trim()}
-                className="bg-slate-900 dark:bg-slate-800 hover:bg-emerald-600 dark:hover:bg-emerald-600 text-white text-xs font-semibold px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
-              >
-                {couponLoading ? '...' : t.apply}
-              </button>
-            </div>
-            {couponFeedback && (
-              <div className={`text-[11px] font-medium ${couponFeedback.success ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
-                {couponFeedback.text}
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Persistent Sticky Bottom Action Deck */}

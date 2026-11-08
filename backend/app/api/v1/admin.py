@@ -10,17 +10,20 @@ from app.models.session import CartSession, CartItem
 from app.models.alert import Alert, ReviewCase
 from app.models.transaction import Transaction, ModelVersion, AuditLog
 from app.models.product import Product
+import json
 import secrets
 import hashlib
 import hmac
 from app.config import settings
+from app.models.user import User
+from app.api.v1.auth import require_admin_or_manager
 from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse, CartStatusUpdate
 from app.schemas.alert import AlertResponse, AlertResolutionRequest, ReviewCaseResponse, ReviewDecisionRequest
 from app.services.alert_service import AlertService
 from app.services.session_service import SessionService
 from app.websocket.manager import ws_manager
 
-router = APIRouter(prefix="/admin", tags=["Admin Portal"])
+router = APIRouter(prefix="/admin", tags=["Admin Portal"], dependencies=[Depends(require_admin_or_manager)])
 
 @router.get("/overview")
 def get_overview(db: Session = Depends(get_db)):
@@ -737,12 +740,38 @@ def get_model_health(db: Session = Depends(get_db)):
     }
 
 @router.post("/model-thresholds")
-def update_model_thresholds(req: ModelThresholdsUpdate):
+def update_model_thresholds(
+    req: ModelThresholdsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """Dynamically configure high and low verification thresholds."""
     if not (0.0 <= req.confidence_low < req.confidence_high <= 1.0):
         raise HTTPException(status_code=400, detail="Thresholds must satisfy 0.0 <= low < high <= 1.0")
+    old_high = settings.CONFIDENCE_HIGH
+    old_low = settings.CONFIDENCE_LOW
     settings.CONFIDENCE_HIGH = round(req.confidence_high, 4)
     settings.CONFIDENCE_LOW = round(req.confidence_low, 4)
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="UPDATE_MODEL_THRESHOLDS",
+        entity_type="SYSTEM",
+        entity_id="model_thresholds",
+        details_json=json.dumps({
+            "old_confidence_high": old_high,
+            "old_confidence_low": old_low,
+            "confidence_high": settings.CONFIDENCE_HIGH,
+            "confidence_low": settings.CONFIDENCE_LOW,
+            "updated_by_email": current_user.email,
+            "updated_by_role": current_user.role,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+
     return {
         "status": "SUCCESS",
         "confidence_high": settings.CONFIDENCE_HIGH,
@@ -756,7 +785,11 @@ def list_models(db: Session = Depends(get_db)):
     return models
 
 @router.post("/models/{model_id}/activate")
-def activate_model(model_id: str, db: Session = Depends(get_db)):
+def activate_model(
+    model_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """One-click rollback or activation of an AI model version."""
     target_model = db.query(ModelVersion).filter(ModelVersion.id == model_id).first()
     if not target_model:
@@ -765,7 +798,24 @@ def activate_model(model_id: str, db: Session = Depends(get_db)):
     # Deactivate all others
     db.query(ModelVersion).update({ModelVersion.is_active: False})
     target_model.is_active = True
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="ACTIVATE_MODEL",
+        entity_type="MODEL",
+        entity_id=target_model.id,
+        details_json=json.dumps({
+            "version_tag": target_model.version_tag,
+            "accuracy": target_model.accuracy,
+            "activated_by_email": current_user.email,
+            "activated_by_role": current_user.role,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
+
     return {"status": "SUCCESS", "message": f"Activated model {target_model.version_tag}."}
 
 @router.get("/reports")

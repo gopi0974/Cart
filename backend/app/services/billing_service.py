@@ -10,43 +10,7 @@ from app.services.alert_service import AlertService
 from app.utils.receipt import generate_receipt_number
 from app.websocket.manager import ws_manager
 
-VALID_COUPONS = {
-    "WELCOME10": {"type": "PERCENT", "value": 10.0, "description": "10% Welcome Discount"},
-    "SUPER50": {"type": "FLAT", "value": 50.0, "description": "₹50 SuperMart Special"},
-    "FREESHIP": {"type": "FLAT", "value": 20.0, "description": "₹20 Instant Savings"}
-}
-
 class BillingService:
-    @staticmethod
-    def apply_coupon(db: Session, session_id: str, coupon_code: str) -> Dict[str, Any]:
-        """Validate and apply promotional discount code to active session."""
-        code = coupon_code.upper().strip()
-        if code not in VALID_COUPONS:
-            raise ValueError(f"Invalid coupon code '{code}'. Try WELCOME10 or SUPER50.")
-
-        session = db.query(CartSession).filter(CartSession.id == session_id).first()
-        if not session or session.status != "ACTIVE":
-            raise ValueError("No active session found.")
-
-        coupon = VALID_COUPONS[code]
-        if coupon["type"] == "PERCENT":
-            discount = round(session.subtotal_amount * (coupon["value"] / 100.0), 2)
-        else:
-            discount = min(coupon["value"], session.subtotal_amount)
-
-        session.total_discount = discount
-        session.total_amount = max(0.0, round(session.subtotal_amount + session.total_tax - discount, 2))
-        db.commit()
-        db.refresh(session)
-
-        return {
-            "status": "SUCCESS",
-            "coupon_code": code,
-            "discount_amount": discount,
-            "new_total": session.total_amount,
-            "description": coupon["description"]
-        }
-
     @staticmethod
     async def process_checkout(
         db: Session,

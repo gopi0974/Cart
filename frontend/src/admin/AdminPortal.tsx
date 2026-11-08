@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ShoppingCart, AlertTriangle, Layers, Camera, CheckSquare,
   QrCode, Cpu, ShieldCheck, ChevronRight, Menu, X, Eye, BarChart3, Users,
-  LogOut, Sun, Moon
+  LogOut, Sun, Moon, Activity
 } from 'lucide-react';
 import { AdminDashboard } from './AdminDashboard';
 import { LiveCartMonitor } from './LiveCartMonitor';
@@ -13,11 +13,12 @@ import { Guided360ScanView } from './Guided360ScanView';
 import { PreviewTestView } from './PreviewTestView';
 import { CartFleetView } from './CartFleetView';
 import { ModelManagerView } from './ModelManagerView';
+import { SystemDiagnosticsView } from './SystemDiagnosticsView';
 import { ReportsView } from './ReportsView';
 import { StaffRolesView } from './StaffRolesView';
 import { AdminLogin } from './AdminLogin';
 import { Product } from '../types';
-import { api, getApiBaseUrl } from '../services/api';
+import { api } from '../services/api';
 
 interface AuthUser {
   email: string;
@@ -44,6 +45,28 @@ export const AdminPortal: React.FC = () => {
   const [darkMode, setDarkMode] = useState(() => {
     return document.documentElement.classList.contains('dark');
   });
+  const [healthData, setHealthData] = useState<any>(null);
+  const [backendStatus, setBackendStatus] = useState<'CONNECTED' | 'WAKING_UP' | 'OFFLINE'>('WAKING_UP');
+
+  const fetchHealth = async () => {
+    try {
+      const data = await api.checkHealth();
+      setHealthData(data);
+      setBackendStatus('CONNECTED');
+    } catch (err: any) {
+      if (err?.isWakingUp) {
+        setBackendStatus('WAKING_UP');
+      } else {
+        setBackendStatus('OFFLINE');
+      }
+    }
+  };
+
+  useEffect(() => {
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const toggleDarkMode = () => {
     const next = !darkMode;
@@ -89,6 +112,7 @@ export const AdminPortal: React.FC = () => {
     { id: 'PRODUCTS', label: 'Product Inventory', icon: Layers },
     { id: 'SCAN_360', label: '360° Vision Scan', icon: Camera },
     { id: 'MODELS', label: 'AI Models & Stats', icon: Cpu },
+    { id: 'SYSTEM', label: 'Settings & System', icon: Activity },
     { id: 'REPORTS', label: 'Financial & Loss Reports', icon: BarChart3 },
     { id: 'CARTS_REGISTRY', label: 'Fleet & QR Sheet', icon: QrCode },
     { id: 'STAFF', label: 'Staff & Roles', icon: Users },
@@ -169,32 +193,34 @@ export const AdminPortal: React.FC = () => {
           </button>
         </div>
 
-        {/* Backend API Connection Indicator & Setting */}
-        <div className="px-3 py-2 bg-slate-50/80 dark:bg-slate-900/40 border border-slate-200/80 dark:border-slate-800/80 rounded-xl flex items-center justify-between text-[10px]">
-          <div className="flex items-center gap-1.5 overflow-hidden">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-            <span className="font-mono text-slate-500 truncate" title={getApiBaseUrl()}>
-              API: {getApiBaseUrl().replace('/api/v1', '')}
+        {/* Backend System Status Indicator Button */}
+        <button
+          onClick={() => setCurrentTab('SYSTEM')}
+          className="px-3 py-2 bg-slate-50/80 dark:bg-slate-900/40 border border-slate-200/80 dark:border-slate-800/80 rounded-xl flex items-center justify-between text-[11px] hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors w-full text-left"
+          title="Click to view Backend System Diagnostics & /health"
+        >
+          <div className="flex items-center gap-2 overflow-hidden">
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                backendStatus === 'CONNECTED'
+                  ? 'bg-emerald-500 animate-pulse'
+                  : backendStatus === 'WAKING_UP'
+                  ? 'bg-amber-500 animate-pulse'
+                  : 'bg-red-500'
+              }`}
+            />
+            <span className="font-semibold text-slate-700 dark:text-slate-300">
+              {backendStatus === 'CONNECTED'
+                ? 'Connected'
+                : backendStatus === 'WAKING_UP'
+                ? 'Waking up...'
+                : 'Offline'}
             </span>
           </div>
-          <button
-            onClick={() => {
-              const current = localStorage.getItem('smartcart_api_url') || '';
-              const newUrl = prompt('Enter Backend Server URL (e.g. https://your-backend.onrender.com or leave empty for default):', current);
-              if (newUrl !== null) {
-                if (newUrl.trim()) {
-                  localStorage.setItem('smartcart_api_url', newUrl.trim());
-                } else {
-                  localStorage.removeItem('smartcart_api_url');
-                }
-                window.location.reload();
-              }
-            }}
-            className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold hover:underline shrink-0 ml-1"
-          >
-            Edit
-          </button>
-        </div>
+          <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold hover:underline shrink-0 ml-1">
+            Diagnostics
+          </span>
+        </button>
       </aside>
 
       {/* Main Admin Content Body */}
@@ -291,6 +317,13 @@ export const AdminPortal: React.FC = () => {
           <PreviewTestView initialProduct={targetProduct} onBackToCatalog={() => setCurrentTab('PRODUCTS')} />
         )}
         {currentTab === 'MODELS' && <ModelManagerView />}
+        {currentTab === 'SYSTEM' && (
+          <SystemDiagnosticsView
+            health={healthData}
+            status={backendStatus}
+            onRefresh={fetchHealth}
+          />
+        )}
         {currentTab === 'REPORTS' && <ReportsView />}
         {currentTab === 'CARTS_REGISTRY' && <CartFleetView />}
         {currentTab === 'STAFF' && <StaffRolesView />}

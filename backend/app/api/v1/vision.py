@@ -24,10 +24,11 @@ from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
 from app.ai.feature_extractor import get_embedding, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
 from app.ai.vector_store import VectorStoreMatcher
+from app.api.v1.auth import require_admin_or_manager
 
 logger = logging.getLogger("smartcart.vision")
 
-router = APIRouter(prefix="/vision", tags=["Vision & AI Real Pipeline"])
+router = APIRouter(prefix="/vision", tags=["Vision & AI Real Pipeline"], dependencies=[Depends(require_admin_or_manager)])
 
 class SimulateActionRequest(BaseModel):
     cart_id: str
