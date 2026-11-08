@@ -3,7 +3,7 @@ import uuid
 import logging
 import numpy as np
 from PIL import Image
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Tuple, Optional
 from app.config import settings
 
 logger = logging.getLogger("smartcart.detector")

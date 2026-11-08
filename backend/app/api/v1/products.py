@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.product import Product, ProductImage, ProductEmbedding
+from app.models.product import Product, ProductEmbedding
 from app.models.session import CartSession, CartItem
 from app.models.transaction import AuditLog
 from app.models.user import User

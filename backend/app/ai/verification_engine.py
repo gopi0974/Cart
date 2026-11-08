@@ -3,7 +3,7 @@ import logging
 import io
 import numpy as np
 from PIL import Image
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.ai.feature_extractor import feature_extractor

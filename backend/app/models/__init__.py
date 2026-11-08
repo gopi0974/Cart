@@ -3,7 +3,7 @@ from app.models.cart import Cart
 from app.models.product import Product, ProductImage, ProductEmbedding
 from app.models.session import CartSession, CartItem
 from app.models.alert import Alert, ReviewCase
-from app.models.transaction import Transaction, AuditLog, ModelVersion
+from app.models.transaction import Transaction, AuditLog, ModelVersion, MaintenanceFlag
 
 __all__ = [
     "User",
@@ -17,5 +17,6 @@ __all__ = [
     "ReviewCase",
     "Transaction",
     "AuditLog",
-    "ModelVersion"
+    "ModelVersion",
+    "MaintenanceFlag"
 ]

@@ -62,7 +62,6 @@ def get_db() -> Generator[Session, None, None]:
     If database connection is offline, immediately returns HTTP 503 Service Unavailable.
     Never silently falls back to SQLite in production.
     """
-    global database_ok
     if SessionLocal is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -88,7 +87,8 @@ def get_db() -> Generator[Session, None, None]:
 def init_db():
     """Create all database tables defined in models and ensure pgvector extension if PostgreSQL."""
     global database_ok
-    import app.models  # Register all models with Base.metadata
+    import app.models as _models  # Register all models with Base.metadata
+    _ = _models
 
     if engine is None or not check_db_health():
         logger.error("Cannot initialize database schema: Database engine is unreachable.")

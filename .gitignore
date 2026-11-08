@@ -11,6 +11,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.venv/
+venv/
+backend/.venv/
 backend/smartcart.db*
 *.db
 *.sqlite3

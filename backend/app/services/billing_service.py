@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from sqlalchemy.orm import Session
 from app.models.session import CartSession, CartItem
 from app.models.transaction import Transaction

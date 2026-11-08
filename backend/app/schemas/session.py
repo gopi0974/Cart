@@ -1,7 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel
-from app.schemas.product import ProductResponse
 
 class PairSessionRequest(BaseModel):
     qr_token: str

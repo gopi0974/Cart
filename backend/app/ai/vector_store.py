@@ -3,7 +3,6 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
-import numpy as np
 from sqlalchemy.orm import Session
 from app.models.product import ProductEmbedding, Product
 from app.ai.feature_extractor import VisualFeatureExtractor, MODEL_NAME, MODEL_VERSION, VECTOR_DIM

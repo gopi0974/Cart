@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import hmac
 import hashlib
 from sqlalchemy.orm import Session
@@ -123,12 +123,10 @@ class SessionService:
 
         # Build list of active warnings
         active_warnings = []
-        has_pending = False
         has_unverified = False
 
         for itm in items:
             if itm.status == "PENDING":
-                has_pending = True
                 has_unverified = True
             elif itm.status == "WARNING_MISMATCH":
                 has_unverified = True
@@ -160,7 +158,7 @@ class SessionService:
                 has_unverified = True
                 active_warnings.append({
                     "type": "REMOVED_PENDING_RESCAN",
-                    "message": f"Item removed. Please rescan its barcode to take it off your bill.",
+                    "message": "Item removed. Please rescan its barcode to take it off your bill.",
                     "target_barcode": itm.product.barcode,
                     "action_required": "RESCAN_BARCODE",
                     "item_id": itm.id,

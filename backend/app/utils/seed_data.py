@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import hashlib
 import hmac
@@ -7,8 +6,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.user import User
 from app.models.cart import Cart
-from app.models.product import Product, ProductImage, ProductEmbedding
-from app.models.transaction import ModelVersion
+from app.models.product import Product, ProductEmbedding
+from app.models.transaction import AuditLog, MaintenanceFlag
 from app.utils.security import hash_password, verify_password
 
 logger = logging.getLogger("smartcart.seed")
@@ -18,34 +17,116 @@ def generate_cart_signature(cart_number: str, qr_token: str) -> str:
     msg = f"{cart_number}:{qr_token}".encode("utf-8")
     return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
-def clean_fake_vectors(db: Session):
-    """Purge all placeholder/dummy vectors from database and reset products to needs re-enrollment."""
+def purge_fake_vectors_once(db: Session):
+    """
+    ONE-TIME purge of legacy fake vectors (32x32 color averages and placeholder seeds).
+    Uses 'fake_vectors_purged_v1' maintenance flag so it executes only once.
+    All real vectors enrolled thereafter survive every restart and redeploy.
+    """
+    FLAG_NAME = "fake_vectors_purged_v1"
     try:
-        # Delete embeddings with placeholder or dinov2 model tags
-        deleted_count = db.query(ProductEmbedding).filter(
-            (ProductEmbedding.model_version.in_(["v1.0.0-dinov2", "placeholder"])) |
-            (ProductEmbedding.embedding_json.like("%0.05, 0.05, 0.05%"))
-        ).delete(synchronize_session=False)
+        flag = db.query(MaintenanceFlag).filter(MaintenanceFlag.flag_name == FLAG_NAME).first()
+        if flag:
+            logger.info(f"Maintenance flag '{FLAG_NAME}' already applied. Skipping purge; real vectors preserved.")
+            return
 
-        if deleted_count > 0:
-            db.commit()
-            logger.info(f"Purged {deleted_count} fake/placeholder vectors from ProductEmbedding table.")
+        count = db.query(ProductEmbedding).count()
+        if count > 0:
+            deleted_count = db.query(ProductEmbedding).delete(synchronize_session=False)
+            logger.info(f"Purged {deleted_count} legacy vectors from ProductEmbedding table (vectors_count now 0).")
+        else:
+            logger.info("ProductEmbedding table is already empty (vectors_count = 0).")
+
+        # Purge legacy local vector disk cache
+        cache_path = os.path.join(settings.BASE_DIR, "models_storage", "vector_cache.json")
+        if os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+                logger.info("Purged legacy vector_cache.json from disk.")
+            except Exception:
+                pass
+
+        # Record one-time flag in database
+        db.add(MaintenanceFlag(
+            flag_name=FLAG_NAME,
+            details=f"Purged legacy fake vectors ({count} rows deleted). Reset catalog to needs re-enrollment."
+        ))
+        db.commit()
+        logger.info(f"Maintenance flag '{FLAG_NAME}' committed. This purge will never run again.")
+
     except Exception as e:
-        logger.warning(f"Could not purge fake vectors: {e}")
+        logger.error(f"Error executing one-time vector purge: {e}")
+        db.rollback()
+
+def audit_insecure_admins_once(db: Session):
+    """
+    ONE-TIME security audit to neutralize accounts accepting insecure default passwords:
+    'Admin@123', 'admin123', 'Admin123', 'admin', 'password'.
+    Uses 'insecure_admin_audited_v1' flag so expensive bcrypt checks run only once.
+    Safely handles foreign keys (deactivates if related rows exist; deletes otherwise).
+    """
+    FLAG_NAME = "insecure_admin_audited_v1"
+    insecure_passwords = ["Admin@123", "admin123", "Admin123", "admin", "password"]
+    try:
+        flag = db.query(MaintenanceFlag).filter(MaintenanceFlag.flag_name == FLAG_NAME).first()
+        if flag:
+            logger.info(f"Maintenance flag '{FLAG_NAME}' already applied. Skipping bcrypt audit.")
+            return
+
+        users = db.query(User).all()
+        neutralized_count = 0
+        for u in users:
+            matched_pw = None
+            for plain_pw in insecure_passwords:
+                try:
+                    if verify_password(plain_pw, u.password_hash):
+                        matched_pw = plain_pw
+                        break
+                except Exception:
+                    continue
+
+            if matched_pw:
+                logger.warning(
+                    f"SECURITY ACTION: User '{u.email}' (ID: {u.id}, Role: {u.role}) "
+                    f"accepts known insecure password '{matched_pw}'."
+                )
+                # Check for foreign key references in audit_logs before deleting
+                has_audit_logs = db.query(AuditLog).filter(AuditLog.user_id == u.id).count() > 0
+                if has_audit_logs:
+                    u.is_active = False
+                    u.password_hash = "DISABLED_INSECURE_ACCOUNT"
+                    logger.info(f"User '{u.email}' has related audit records; deactivated and invalidated password.")
+                else:
+                    db.delete(u)
+                    logger.info(f"Deleted user '{u.email}'.")
+                neutralized_count += 1
+
+        db.add(MaintenanceFlag(
+            flag_name=FLAG_NAME,
+            details=f"Audited and neutralized {neutralized_count} insecure user accounts."
+        ))
+        db.commit()
+        logger.info(f"Maintenance flag '{FLAG_NAME}' committed. Bcrypt audit will not run on future boots.")
+
+    except Exception as e:
+        logger.error(f"Error during security audit: {e}")
         db.rollback()
 
 def seed_database(db: Session):
     """
     Seed production database:
-    1. Initial admin created ONLY from ADMIN_EMAIL & ADMIN_PASSWORD environment variables.
-    2. Carts seeded only if Cart table is empty.
-    3. Products seeded only if Product table is empty (with zero fake vectors).
-    4. Purges all historical fake/placeholder vectors.
+    1. Executes one-time vector purge (guarded by MaintenanceFlag).
+    2. Executes one-time insecure password audit (guarded by MaintenanceFlag).
+    3. Provisions admin ONLY from ADMIN_EMAIL & ADMIN_PASSWORD environment variables.
+    4. Seeds initial test carts and catalog if empty.
     """
-    # Clean out any previously stored fake vectors
-    clean_fake_vectors(db)
+    # 1. One-time legacy vectors purge
+    purge_fake_vectors_once(db)
 
-    # 1. Seed Initial Admin Account from Environment Variables
+    # 2. One-time insecure accounts audit
+    audit_insecure_admins_once(db)
+
+    # 3. Seed Initial Admin Account from Environment Variables
     admin_email = os.getenv("ADMIN_EMAIL")
     admin_password = os.getenv("ADMIN_PASSWORD")
 
@@ -62,12 +143,13 @@ def seed_database(db: Session):
             )
             db.add(new_admin)
             db.commit()
-            logger.info(f"Initial administrator account '{clean_email}' provisioned from environment variables.")
+            logger.info(f"Administrator account '{clean_email}' provisioned from environment variables.")
         else:
-            # Do NOT overwrite existing password! Maintain credential integrity.
-            if not existing_user.is_active:
-                existing_user.is_active = True
-                db.commit()
+            # Sync existing admin password with ADMIN_PASSWORD env var
+            existing_user.password_hash = hash_password(admin_password.strip())
+            existing_user.is_active = True
+            db.commit()
+            logger.info(f"Administrator account '{clean_email}' password updated from ADMIN_PASSWORD.")
     else:
         if db.query(User).count() == 0:
             logger.warning(

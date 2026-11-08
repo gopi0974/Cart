@@ -117,7 +117,7 @@ async def process_camera_frame(
             evidence_url = eval_result.get("evidence_url")
 
             if decision == "AUTO_APPROVE":
-                verified_item = await SessionService.verify_item_placement(
+                await SessionService.verify_item_placement(
                     db=db,
                     session_id=active_session.id,
                     barcode=claimed_barcode,
@@ -191,9 +191,8 @@ async def process_camera_frame(
         else:
             # 5. No pending item: Check for Unscanned Item Placement
             motion_box = object_detector.compute_motion_box(tracker.ref_background, img_bgr)
-            detection_has_objects = bool(detection["object_boxes"])
 
-            if motion_box or detection_has_objects:
+            if motion_box is not None:
                 eval_result = verification_engine.evaluate_item_placement(
                     db=db,
                     claimed_barcode=None,

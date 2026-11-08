@@ -1,7 +1,6 @@
 from typing import Optional, List
 from datetime import datetime
 from pydantic import BaseModel
-from app.schemas.session import CartItemResponse
 
 class CheckoutRequest(BaseModel):
     payment_method: str = "UPI"  # UPI, CARD, SANDBOX

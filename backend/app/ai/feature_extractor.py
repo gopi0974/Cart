@@ -1,9 +1,10 @@
 import os
 import io
+import time
 import base64
 import logging
 import threading
-from typing import List, Any, Union, Optional
+from typing import List, Any, Optional
 import numpy as np
 from PIL import Image
 
@@ -23,6 +24,27 @@ _model_loading: bool = False
 _model_loaded: bool = False
 _model_error: Optional[str] = None
 _lock = threading.Lock()
+
+# Real inference latency metrics (populated ONLY on real embeddings, never warmup)
+_embed_ms_last: Optional[float] = None
+_embed_count: int = 0
+_embed_total_ms: float = 0.0
+
+def get_embedding_metrics() -> dict:
+    """Return latest and average embedding inference latencies in milliseconds from REAL embeddings."""
+    with _lock:
+        if _embed_count == 0 or _embed_ms_last is None:
+            return {
+                "embed_ms_last": None,
+                "embed_ms_avg": None,
+                "embed_count": 0
+            }
+        avg = round(_embed_total_ms / _embed_count, 1)
+        return {
+            "embed_ms_last": round(_embed_ms_last, 1),
+            "embed_ms_avg": avg,
+            "embed_count": _embed_count
+        }
 
 # CLIP ViT-B/32 normalization constants
 CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
@@ -81,11 +103,19 @@ def load_onnx_model():
                 sess_options=opts,
                 providers=["CPUExecutionProvider"]
             )
+
+            # Warm up ONNX session without recording latency metrics
+            input_name = session.get_inputs()[0].name
+            dummy_tensor = np.zeros((1, 3, 224, 224), dtype=np.float32)
+            t_warm_0 = time.perf_counter()
+            _ = session.run(None, {input_name: dummy_tensor})
+            warmup_ms = round((time.perf_counter() - t_warm_0) * 1000, 2)
+
             _onnx_session = session
             _model_loaded = True
             _model_loading = False
             _model_error = None
-            logger.info("ONNX INT8 CLIP ViT-B/32 model successfully loaded and ready.")
+            logger.info(f"ONNX INT8 CLIP ViT-B/32 model loaded and ready (session warmup: {warmup_ms} ms).")
             return _onnx_session
         except Exception as e:
             err_msg = f"Failed to initialize ONNX Runtime session: {e}"
@@ -191,6 +221,8 @@ def get_embedding(image: Any) -> List[float]:
             "Please ensure `download_model.py` ran at build time."
         )
 
+    t0 = time.perf_counter()
+
     # Preprocess image into (1, 3, 224, 224) float32 tensor
     tensor = _preprocess_image_for_clip(image)
 
@@ -207,6 +239,13 @@ def get_embedding(image: Any) -> List[float]:
         normalized_vector = raw_vector / norm
     else:
         normalized_vector = raw_vector
+
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+    global _embed_ms_last, _embed_count, _embed_total_ms
+    with _lock:
+        _embed_ms_last = elapsed_ms
+        _embed_count += 1
+        _embed_total_ms += elapsed_ms
 
     return normalized_vector.tolist()
 

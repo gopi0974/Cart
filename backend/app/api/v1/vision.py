@@ -2,9 +2,8 @@ import os
 import io
 import uuid
 import base64
-import json
 import logging
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -20,7 +19,7 @@ from app.database import get_db
 from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
-from app.models.product import Product, ProductImage, ProductEmbedding
+from app.models.product import Product, ProductImage
 from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
 from app.ai.feature_extractor import get_embedding, MODEL_NAME, MODEL_VERSION, VECTOR_DIM

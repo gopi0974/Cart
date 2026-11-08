@@ -45,3 +45,11 @@ class ModelVersion(Base):
     is_active = Column(Boolean, default=False)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class MaintenanceFlag(Base):
+    """System maintenance and migration flags ensuring one-time execution of critical migrations/purges."""
+    __tablename__ = "maintenance_flags"
+
+    flag_name = Column(String(100), primary_key=True)
+    applied_at = Column(DateTime, default=datetime.utcnow)
+    details = Column(Text, nullable=True)

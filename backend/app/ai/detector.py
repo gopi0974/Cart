@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Dict, Any, Optional, List
 import numpy as np
 from app.ai.object_detector import object_detector
 

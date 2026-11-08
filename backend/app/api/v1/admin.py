@@ -714,7 +714,6 @@ def get_model_health(db: Session = Depends(get_db)):
     import os
     from app.ai.feature_extractor import MODEL_NAME, MODEL_VERSION, VECTOR_DIM, LOCAL_MODEL_DIR, FALLBACK_MODEL_DIR
     from app.models.product import ProductEmbedding
-    from sqlalchemy import func
 
     total_vectors = db.query(ProductEmbedding).count()
     enrolled_products = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0

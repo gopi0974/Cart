@@ -9,7 +9,7 @@ services:
     plan: free
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.8
+        value: 3.11.9
       - key: DATABASE_URL
         sync: false
       - key: SECRET_KEY

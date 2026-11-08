@@ -15,6 +15,7 @@ from app.websocket.device_handler import handle_device_websocket
 from app.ai.feature_extractor import (
     start_background_model_loader,
     is_model_ready,
+    get_embedding_metrics,
     MODEL_NAME,
     VECTOR_DIM
 )
@@ -127,7 +128,7 @@ def _get_health_data():
         try:
             db = SessionLocal()
             try:
-                from app.models.product import ProductEmbedding, Product
+                from app.models.product import ProductEmbedding
                 vectors_count = db.query(ProductEmbedding).count()
                 # Count distinct products that have registered embeddings
                 from sqlalchemy import func
@@ -153,6 +154,8 @@ def _get_health_data():
     elif not storage_ok:
         overall_status = "DEGRADED"
 
+    metrics = get_embedding_metrics()
+
     return {
         "status": overall_status,
         "model_loaded": model_ok,
@@ -162,6 +165,8 @@ def _get_health_data():
         "storage_ok": storage_ok,
         "vectors_count": vectors_count,
         "products_enrolled": products_enrolled,
+        "embed_ms_last": metrics["embed_ms_last"],
+        "embed_ms_avg": metrics["embed_ms_avg"],
         "memory_rss_mb": memory_rss_mb,
     }
 
