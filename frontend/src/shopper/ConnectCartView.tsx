@@ -15,7 +15,7 @@ interface Props {
 interface ConnectionError {
   title?: string;
   message: string;
-  type?: 'security' | 'disabled' | 'occupied' | 'waking_up' | 'generic';
+  type?: 'security' | 'disabled' | 'occupied' | 'waking_up' | 'server_error' | 'generic';
   canRetry?: boolean;
 }
 
@@ -34,16 +34,30 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   }, []);
 
   const categorizeError = (err: any): ConnectionError => {
+    const statusCode = err?.statusCode || err?.status;
+
+    // Developer logging only: status code and internal error details
+    console.error('[ConnectCart] Pairing error:', {
+      statusCode,
+      message: err?.message,
+    });
+
+    // 1. HTTP 500: Internal server error (never say server is waking up)
+    if (statusCode === 500 || (typeof err?.message === 'string' && err.message.includes('Something went wrong on our side'))) {
+      return {
+        title: 'Server Error',
+        message: 'Something went wrong on our side. Please try again.',
+        type: 'server_error',
+        canRetry: true,
+      };
+    }
+
+    // 2. Genuine wake-up situations ONLY: network offline/error, timeout, 502, 503, 504
     const isWaking = Boolean(
       err?.isWakingUp ||
-      err?.status === 502 ||
-      err?.status === 503 ||
-      err?.status === 504 ||
-      (typeof err?.message === 'string' && (
-        err.message.toLowerCase().includes('starting the cart server') ||
-        err.message.toLowerCase().includes('waking up') ||
-        err.message.toLowerCase().includes('timeout')
-      ))
+      statusCode === 502 ||
+      statusCode === 503 ||
+      statusCode === 504
     );
 
     if (isWaking) {

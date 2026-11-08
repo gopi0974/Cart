@@ -91,20 +91,39 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
           }
         } catch {}
 
-        // Backend waking up (Render free tier spin-up returns 502, 503, or 504)
-        if ([502, 503, 504].includes(response.status) && attempt < retries) {
-          console.warn(`[SmartCart API] Server waking up (${response.status}), retrying ${attempt}/${retries}...`);
-          await new Promise((r) => setTimeout(r, attempt * 1500));
-          continue;
+        // Developer logging: log status and endpoint path to console only (no backend URL shown to user)
+        console.error(`[SmartCart API] HTTP ${response.status} on endpoint: ${endpoint}`, {
+          status: response.status,
+          endpoint,
+          detail: errorDetail || '(none)',
+        });
+
+        // 1. HTTP 500: Internal server error (never say server is waking up)
+        if (response.status === 500) {
+          const err: FriendlyApiError = new Error('Something went wrong on our side. Please try again.');
+          err.statusCode = 500;
+          err.isWakingUp = false;
+          throw err;
         }
 
-        const err: FriendlyApiError = new Error(
-          errorDetail || (response.status === 503 ? 'Starting the cart server, this can take up to a minute...' : `Request failed (HTTP ${response.status})`)
-        );
-        err.statusCode = response.status;
-        if (response.status === 503) {
-          err.isWakingUp = true;
+        // 2. Genuine wake-up situations on Render free tier (502, 503, 504)
+        if ([502, 503, 504].includes(response.status)) {
+          if (attempt < retries) {
+            console.warn(`[SmartCart API] Server waking up (${response.status}) on ${endpoint}, retrying ${attempt}/${retries}...`);
+            await new Promise((r) => setTimeout(r, attempt * 1500));
+            continue;
+          }
+          const wakeErr: FriendlyApiError = new Error('Starting the cart server, this can take up to a minute... Please tap Retry.');
+          wakeErr.statusCode = response.status;
+          wakeErr.isWakingUp = true;
+          throw wakeErr;
         }
+
+        // 3. User-facing client/auth error: sanitize any backend URLs
+        const cleanMsg = (errorDetail || `Request failed (HTTP ${response.status})`).replace(/https?:\/\/[^\s'"]+/g, 'server');
+        const err: FriendlyApiError = new Error(cleanMsg);
+        err.statusCode = response.status;
+        err.isWakingUp = false;
         throw err;
       }
 
@@ -113,23 +132,30 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
       clearTimeout(timeoutId);
       lastError = err;
 
-      // Abort / timeout error
+      // Re-throw if already handled with explicit statusCode
+      if (err.statusCode) {
+        throw err;
+      }
+
+      // Abort / timeout error (genuine wake-up situation)
       if (err.name === 'AbortError') {
-        const timeoutErr: FriendlyApiError = new Error('The cart server is taking longer than usual to respond. Please tap Retry.');
+        console.error(`[SmartCart API] Request timeout on endpoint: ${endpoint}`);
+        const timeoutErr: FriendlyApiError = new Error('Starting the cart server, this can take up to a minute... Please tap Retry.');
         timeoutErr.isWakingUp = true;
         throw timeoutErr;
       }
 
       // Transient network failure while waking up
-      const isFetchFailure = err.name === 'TypeError' && err.message === 'Failed to fetch';
+      const isFetchFailure = err.name === 'TypeError' || err.message === 'Failed to fetch';
       if (isFetchFailure && attempt < retries) {
-        console.warn(`[SmartCart API] Network attempt ${attempt}/${retries} failed, retrying in ${attempt * 1.5}s...`);
+        console.warn(`[SmartCart API] Network attempt ${attempt}/${retries} failed on ${endpoint}, retrying in ${attempt * 1.5}s...`);
         await new Promise((r) => setTimeout(r, attempt * 1500));
         continue;
       }
 
       if (isFetchFailure) {
         const isOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+        console.error(`[SmartCart API] Network failure on endpoint: ${endpoint}`, { offline: isOffline });
         const friendlyErr: FriendlyApiError = new Error(
           isOffline
             ? 'No internet connection. Please check your network and try again.'
@@ -137,10 +163,10 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
         );
         friendlyErr.isWakingUp = !isOffline;
         friendlyErr.isNetworkOffline = isOffline;
-        console.error('[SmartCart API] Connection failed:', { url, originalError: err.message });
         throw friendlyErr;
       }
 
+      console.error(`[SmartCart API] Request error on endpoint: ${endpoint}:`, err.message);
       throw err;
     }
   }
