@@ -71,10 +71,14 @@ export const CartFleetView: React.FC = () => {
       fetchCarts();
     }, 3500);
 
-    // 2. Real-time fleet WebSocket connection
+    // 2. Real-time fleet WebSocket connection (authenticated with staff JWT token)
     let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(`${getWsBaseUrl()}/ws/admin`);
+    const adminToken = localStorage.getItem('smartcart_admin_token');
+    if (!adminToken) {
+      console.warn('[CartFleetView] No staff admin token found; skipping /ws/admin connection.');
+    } else {
+      try {
+        ws = new WebSocket(`${getWsBaseUrl()}/ws/admin?token=${encodeURIComponent(adminToken)}`);
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -95,8 +99,9 @@ export const CartFleetView: React.FC = () => {
           }
         } catch {}
       };
-    } catch (e) {
-      console.warn('Failed to connect to admin fleet WebSocket:', e);
+      } catch (e) {
+        console.warn('Failed to connect to admin fleet WebSocket:', e);
+      }
     }
 
     return () => {

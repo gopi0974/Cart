@@ -55,11 +55,13 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   }, [session.items]);
 
-  // Sync state & connect to Cart WebSocket
+  // Sync state & connect to Cart WebSocket (authenticated with shopper session token)
   useEffect(() => {
     let ws: WebSocket | null = null;
+    const sessionToken = session.session_token || (typeof window !== 'undefined' ? localStorage.getItem('smartcart_session_token') : null);
+    const tokenQuery = sessionToken ? `?token=${encodeURIComponent(sessionToken)}` : '';
     try {
-      ws = new WebSocket(`${getWsBaseUrl()}/ws/cart/${session.cart_id}`);
+      ws = new WebSocket(`${getWsBaseUrl()}/ws/cart/${session.cart_id}${tokenQuery}`);
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);

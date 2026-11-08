@@ -3,15 +3,17 @@ import uuid
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import init_db, SessionLocal, check_db_health
+from app.database import init_db, SessionLocal, check_db_health, get_db
 from app.utils.seed_data import seed_database
 from app.websocket.manager import ws_manager
 from app.websocket.device_handler import handle_device_websocket
+from app.websocket.auth import authenticate_admin_ws, authenticate_cart_ws
 from app.ai.feature_extractor import (
     start_background_model_loader,
     is_model_ready,
@@ -201,8 +203,23 @@ def api_health_check(response: Response):
 
 # Real-Time WebSocket Endpoints
 @app.websocket("/ws/cart/{cart_id}")
-async def websocket_cart_endpoint(websocket: WebSocket, cart_id: str):
-    """Cart-specific channel for Shopper Mobile App and Smart Cart Camera Agent."""
+async def websocket_cart_endpoint(
+    websocket: WebSocket,
+    cart_id: str,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Cart-specific channel for Shopper Mobile App and Smart Cart Camera Agent.
+    Requires a valid shopper session token or staff JWT.
+    Rejects unauthenticated connections with close code 1008 (Policy Violation) before accepting.
+    """
+    auth_token = token or websocket.query_params.get("token") or websocket.headers.get("x-session-token")
+    if not authenticate_cart_ws(cart_id, auth_token, db):
+        logger.warning(f"Rejecting unauthorized /ws/cart/{cart_id} connection.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws_manager.connect_cart(websocket, cart_id)
     try:
         while True:
@@ -216,8 +233,23 @@ async def websocket_cart_endpoint(websocket: WebSocket, cart_id: str):
         ws_manager.disconnect_cart(websocket, cart_id)
 
 @app.websocket("/ws/admin")
-async def websocket_admin_endpoint(websocket: WebSocket):
-    """Store staff admin portal channel for real-time fleet events and alerts."""
+async def websocket_admin_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Store staff admin portal channel for real-time fleet events and alerts.
+    Requires a valid staff JWT access token.
+    Rejects unauthenticated connections with close code 1008 (Policy Violation) before accepting.
+    """
+    auth_token = token or websocket.query_params.get("token")
+    user = authenticate_admin_ws(auth_token, db)
+    if not user:
+        logger.warning("Rejecting unauthorized /ws/admin connection.")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await ws_manager.connect_admin(websocket)
     try:
         while True:
