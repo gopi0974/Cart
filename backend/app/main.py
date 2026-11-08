@@ -110,6 +110,15 @@ def _get_health_data():
     db_ok = check_db_health()
     model_ok = is_model_ready()
 
+    # Check database migration status (schema_ok: true only when DB is at latest Alembic head)
+    schema_ok = False
+    if db_ok:
+        try:
+            from app.migrations import check_schema_health
+            schema_ok = check_schema_health()
+        except Exception:
+            schema_ok = False
+
     # Verify storage writeability
     storage_ok = False
     try:
@@ -149,6 +158,8 @@ def _get_health_data():
     overall_status = "HEALTHY"
     if not db_ok:
         overall_status = "UNHEALTHY"
+    elif not schema_ok:
+        overall_status = "DEGRADED"
     elif not model_ok:
         overall_status = "STARTING"
     elif not storage_ok:
@@ -158,10 +169,11 @@ def _get_health_data():
 
     return {
         "status": overall_status,
+        "schema_ok": schema_ok,
+        "database_ok": db_ok,
         "model_loaded": model_ok,
         "model_name": MODEL_NAME,
         "vector_dimension": VECTOR_DIM,
-        "database_ok": db_ok,
         "storage_ok": storage_ok,
         "vectors_count": vectors_count,
         "products_enrolled": products_enrolled,

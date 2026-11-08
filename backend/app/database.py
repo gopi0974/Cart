@@ -85,7 +85,7 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 def init_db():
-    """Create all database tables defined in models and ensure pgvector extension if PostgreSQL."""
+    """Run migrations and ensure database schema is up-to-date."""
     global database_ok
     import app.models as _models  # Register all models with Base.metadata
     _ = _models
@@ -95,24 +95,16 @@ def init_db():
         database_ok = False
         return
 
-    is_sqlite = engine.dialect.name == "sqlite"
+    # 1. Run Alembic migrations automatically up to latest revision (head)
+    try:
+        from app.migrations import run_db_migrations
+        mig_ok = run_db_migrations("head")
+        if not mig_ok:
+            logger.warning("Alembic migrations did not complete cleanly; falling back to Base.metadata.create_all.")
+    except Exception as e:
+        logger.warning(f"Alembic auto-migration exception ({e}); falling back to Base.metadata.create_all.")
 
-    if not is_sqlite:
-        try:
-            with engine.connect() as conn:
-                conn.execution_options(isolation_level="AUTOCOMMIT")
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-                logger.info("PostgreSQL pgvector extension verified or created.")
-        except Exception as e:
-            logger.warning(f"Note: pgvector extension check warning ({e}). JSON fallback matching available.")
-
-        try:
-            with engine.connect() as conn:
-                conn.execution_options(isolation_level="AUTOCOMMIT")
-                conn.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
-        except Exception:
-            pass
-
+    # 2. Safety fallback for any newly registered models
     Base.metadata.create_all(bind=engine)
     database_ok = True
     logger.info(f"Database schema initialized on engine: {engine.name}")
