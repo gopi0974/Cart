@@ -81,3 +81,4 @@ def downgrade() -> None:
         existing_cols = {c["name"] for c in inspector.get_columns("cart_sessions")}
         if "session_token" in existing_cols:
             op.drop_column("cart_sessions", "session_token")
+

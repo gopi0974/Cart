@@ -107,6 +107,9 @@ def init_db():
         logger.warning(f"Alembic auto-migration exception ({e}); falling back to Base.metadata.create_all.")
 
     # 2. Safety fallback for any newly registered models
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as ce:
+        logger.warning(f"create_all safety check encountered: {ce}")
     database_ok = True
     logger.info(f"Database schema initialized on engine: {engine.name}")

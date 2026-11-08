@@ -68,3 +68,4 @@ def downgrade() -> None:
                     op.drop_index(index_name, table_name=table_name)
                 except Exception:
                     pass
+

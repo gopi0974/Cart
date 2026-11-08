@@ -57,3 +57,4 @@ def authenticate_cart_ws(cart_id: str, token: Optional[str], db: Session) -> boo
             return True
 
     return False
+

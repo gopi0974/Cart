@@ -26,3 +26,4 @@ def get_query_count() -> int:
 def reset_query_count() -> contextvars.Token:
     """Reset the database query counter for the current request context."""
     return db_query_counter.set(0)
+

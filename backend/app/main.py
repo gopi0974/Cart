@@ -133,12 +133,20 @@ def _get_health_data():
 
     # Check database migration status (schema_ok: true only when DB is at latest Alembic head)
     schema_ok = False
+    current_revision = None
+    head_revision = None
+    migration_error = None
     if db_ok:
         try:
-            from app.migrations import check_schema_health
-            schema_ok = check_schema_health()
-        except Exception:
+            from app.migrations import get_schema_info
+            schema_info = get_schema_info()
+            schema_ok = schema_info.get("is_up_to_date", False)
+            current_revision = schema_info.get("current_revision")
+            head_revision = schema_info.get("head_revision")
+            migration_error = schema_info.get("migration_error")
+        except Exception as e:
             schema_ok = False
+            migration_error = str(e)[:200]
 
     # Verify storage writeability
     storage_ok = False
@@ -191,6 +199,9 @@ def _get_health_data():
     return {
         "status": overall_status,
         "schema_ok": schema_ok,
+        "current_revision": current_revision,
+        "head_revision": head_revision,
+        "migration_error": migration_error,
         "database_ok": db_ok,
         "model_loaded": model_ok,
         "model_name": MODEL_NAME,

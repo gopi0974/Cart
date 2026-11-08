@@ -34,7 +34,12 @@ def upgrade() -> None:
 
     # 1. PostgreSQL Extension: vector
     if is_postgres:
-        op.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
+        try:
+            op.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector;"))
+        except Exception:
+            # Managed PostgreSQL hosts (Supabase, Neon, etc.) manage extensions
+            # via dashboard or lack superuser privileges on connection poolers.
+            pass
 
     # 2. Users Table
     if "users" not in existing_tables:
@@ -260,3 +265,4 @@ def downgrade() -> None:
             op.drop_table(table_name)
         except Exception:
             pass
+

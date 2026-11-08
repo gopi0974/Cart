@@ -37,3 +37,4 @@ class SimpleTTLCache:
 
 
 catalog_cache = SimpleTTLCache(ttl_seconds=45)
+

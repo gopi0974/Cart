@@ -55,7 +55,11 @@ def run_migrations_online() -> None:
 
     # If a specific url is set in the Alembic config (e.g. during tests), use it
     custom_url = config.get_main_option("sqlalchemy.url")
-    if custom_url and (db_engine is None or str(db_engine.url) != custom_url):
+    engine_url_unmasked = (
+        db_engine.url.render_as_string(hide_password=False)
+        if db_engine is not None else None
+    )
+    if custom_url and (db_engine is None or engine_url_unmasked != custom_url):
         connect_args = {"check_same_thread": False} if custom_url.startswith("sqlite") else {}
         connectable = create_engine(custom_url, connect_args=connect_args)
     elif db_engine is not None:

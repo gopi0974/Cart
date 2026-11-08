@@ -145,3 +145,4 @@ def test_ws_cart_staff_jwt_accepted():
         ws.send_text("ping")
         response = ws.receive_text()
         assert response == "pong"
+
