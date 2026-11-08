@@ -20,15 +20,16 @@ from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
 from app.models.product import Product, ProductImage
+from app.models.user import User
 from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
 from app.ai.feature_extractor import get_embedding, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
 from app.ai.vector_store import VectorStoreMatcher
-from app.api.v1.auth import require_admin_or_manager
+from app.api.v1.auth import get_current_user, require_admin_or_manager
 
 logger = logging.getLogger("smartcart.vision")
 
-router = APIRouter(prefix="/vision", tags=["Vision & AI Real Pipeline"], dependencies=[Depends(require_admin_or_manager)])
+router = APIRouter(prefix="/vision", tags=["Vision & AI Real Pipeline"], dependencies=[Depends(get_current_user)])
 
 class SimulateActionRequest(BaseModel):
     cart_id: str
@@ -190,7 +191,12 @@ async def simulate_cart_camera_action(req: SimulateActionRequest, db: Session = 
         raise HTTPException(status_code=400, detail=f"Unknown action type: {req.action_type}")
 
 @router.post("/products/{product_id}/360-scan/complete")
-def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: Session = Depends(get_db)):
+def save_360_scan_embeddings(
+    product_id: str,
+    req: Complete360ScanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """
     Ingest real 360-degree camera captures:
     1. Decode real base64 frames and save JPEG files to disk.
@@ -322,7 +328,11 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
     }
 
 @router.post("/products/preview-test")
-def preview_recognition_test(req: PreviewTestRequest, db: Session = Depends(get_db)):
+def preview_recognition_test(
+    req: PreviewTestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """
     Live real camera preview test:
     Admin holds product in front of webcam, system computes real CLIP embedding

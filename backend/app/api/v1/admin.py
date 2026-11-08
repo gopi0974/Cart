@@ -16,14 +16,14 @@ import hashlib
 import hmac
 from app.config import settings
 from app.models.user import User
-from app.api.v1.auth import require_admin_or_manager
+from app.api.v1.auth import get_current_user, require_admin_or_manager
 from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse, CartStatusUpdate
 from app.schemas.alert import AlertResponse, AlertResolutionRequest, ReviewCaseResponse, ReviewDecisionRequest
 from app.services.alert_service import AlertService
 from app.services.session_service import SessionService
 from app.websocket.manager import ws_manager
 
-router = APIRouter(prefix="/admin", tags=["Admin Portal"], dependencies=[Depends(require_admin_or_manager)])
+router = APIRouter(prefix="/admin", tags=["Admin Portal"], dependencies=[Depends(get_current_user)])
 
 @router.get("/overview")
 def get_overview(db: Session = Depends(get_db)):
@@ -111,9 +111,13 @@ def list_carts(db: Session = Depends(get_db)):
     return results
 
 @router.post("/carts", response_model=CartRegistrationResponse)
-def register_cart(cart_in: CartCreate, db: Session = Depends(get_db)):
+def register_cart(
+    cart_in: CartCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """
-    Register new smart cart in the fleet.
+    Register new smart cart in the fleet (Admin and Manager only).
     Generates a secure random device token, stores ONLY its SHA-256 hash,
     and returns the raw device token once for configuration.
     """
@@ -141,6 +145,22 @@ def register_cart(cart_in: CartCreate, db: Session = Depends(get_db)):
         camera_status="ONLINE"
     )
     db.add(new_cart)
+    db.flush()
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="REGISTER_CART",
+        entity_type="CART",
+        entity_id=new_cart.id,
+        details_json=json.dumps({
+            "cart_number": new_cart.cart_number,
+            "registered_by": current_user.email,
+            "role": current_user.role,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
     db.refresh(new_cart)
 
@@ -158,8 +178,12 @@ def register_cart(cart_in: CartCreate, db: Session = Depends(get_db)):
     )
 
 @router.post("/carts/{cart_id}/regenerate-qr", response_model=CartResponse)
-def regenerate_cart_qr(cart_id: str, db: Session = Depends(get_db)):
-    """Regenerate cart QR token and HMAC signature, invalidating the previous QR code."""
+def regenerate_cart_qr(
+    cart_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Regenerate cart QR token and HMAC signature, invalidating previous QR code (Admin and Manager only)."""
     cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
     if not cart:
         raise HTTPException(status_code=404, detail="Cart not found.")
@@ -169,6 +193,21 @@ def regenerate_cart_qr(cart_id: str, db: Session = Depends(get_db)):
 
     cart.qr_code_token = new_token
     cart.signed_connect_url = signed_url
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="REGENERATE_CART_QR",
+        entity_type="CART",
+        entity_id=cart.id,
+        details_json=json.dumps({
+            "cart_number": cart.cart_number,
+            "new_qr_token": new_token,
+            "regenerated_by": current_user.email,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
     db.refresh(cart)
 
@@ -185,14 +224,32 @@ def regenerate_cart_qr(cart_id: str, db: Session = Depends(get_db)):
     )
 
 @router.post("/carts/{cart_id}/regenerate-token", response_model=CartRegistrationResponse)
-def regenerate_device_token(cart_id: str, db: Session = Depends(get_db)):
-    """Regenerate cart device token (stores new SHA-256 hash, returns raw token once)."""
+def regenerate_device_token(
+    cart_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Regenerate cart device token (stores new SHA-256 hash, returns raw token once) (Admin and Manager only)."""
     cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
     if not cart:
         raise HTTPException(status_code=404, detail="Cart not found.")
 
     raw_token = secrets.token_hex(16)
     cart.device_token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="REGENERATE_DEVICE_TOKEN",
+        entity_type="CART",
+        entity_id=cart.id,
+        details_json=json.dumps({
+            "cart_number": cart.cart_number,
+            "regenerated_by": current_user.email,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
     db.refresh(cart)
 
@@ -210,13 +267,33 @@ def regenerate_device_token(cart_id: str, db: Session = Depends(get_db)):
     )
 
 @router.post("/carts/{cart_id}/toggle-status", response_model=CartResponse)
-def toggle_cart_status(cart_id: str, db: Session = Depends(get_db)):
-    """Toggle cart enabled/disabled status. Disabled carts cannot be paired by shoppers."""
+def toggle_cart_status(
+    cart_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Toggle cart enabled/disabled status. Disabled carts cannot be paired (Admin and Manager only)."""
     cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
     if not cart:
         raise HTTPException(status_code=404, detail="Cart not found.")
 
     cart.is_enabled = not cart.is_enabled
+    action_type = "ENABLE_CART" if cart.is_enabled else "DISABLE_CART"
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action=action_type,
+        entity_type="CART",
+        entity_id=cart.id,
+        details_json=json.dumps({
+            "cart_number": cart.cart_number,
+            "is_enabled": cart.is_enabled,
+            "toggled_by": current_user.email,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
     db.commit()
     db.refresh(cart)
 
@@ -233,7 +310,11 @@ def toggle_cart_status(cart_id: str, db: Session = Depends(get_db)):
     )
 
 @router.post("/carts/{cart_id}/reset-session")
-async def reset_cart_session(cart_id: str, db: Session = Depends(get_db)):
+async def reset_cart_session(
+    cart_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """
     Force-terminate and release any active session on the cart.
     Resets cart status to IDLE and frees it immediately for new shoppers.
@@ -280,7 +361,12 @@ async def reset_cart_session(cart_id: str, db: Session = Depends(get_db)):
     }
 
 @router.patch("/carts/{cart_id}", response_model=CartResponse)
-async def update_cart_details(cart_id: str, update_in: CartStatusUpdate, db: Session = Depends(get_db)):
+async def update_cart_details(
+    cart_id: str,
+    update_in: CartStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
     """
     Edit cart attributes (cart_number, status, is_enabled, battery_level, camera_status).
     If status is set to IDLE, any lingering active session is automatically cleared.
@@ -383,16 +469,17 @@ def list_alerts(
     ]
 
 @router.patch("/alerts/{alert_id}", response_model=AlertResponse)
-async def resolve_alert(alert_id: str, req: AlertResolutionRequest, db: Session = Depends(get_db)):
-    """Resolve or dismiss an active incident."""
-    from app.models.user import User
-    staff_user = db.query(User).first()
-    actor_id = staff_user.id if staff_user else None
-
+async def resolve_alert(
+    alert_id: str,
+    req: AlertResolutionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Resolve or dismiss an active incident (All staff)."""
     alert = await AlertService.resolve_alert(
         db=db,
         alert_id=alert_id,
-        user_id=actor_id,
+        user_id=current_user.id,
         notes=req.resolution_notes,
         action=req.action
     )
@@ -424,13 +511,13 @@ class ForceRemoveRequest(BaseModel):
 async def force_remove_from_alert(
     alert_id: str,
     req: ForceRemoveRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
 ):
     """
-    Store staff force-removes an item associated with an active alert (with mandatory reason).
+    Store staff force-removes an item associated with an active alert (Admin and Manager only).
     Drops item from cart/bill, resolves alert, logs audit entry, and notifies shopper.
     """
-    import json
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found.")
@@ -476,26 +563,25 @@ async def force_remove_from_alert(
     db.flush()
     SessionService.recalculate_session_totals(db, session)
 
-    from app.models.user import User
-    staff_user = db.query(User).first()
-    actor_id = staff_user.id if staff_user else None
-    actor_name = staff_user.full_name if staff_user else "Store Staff"
+    actor_id = current_user.id
+    actor_name = current_user.full_name or current_user.email
 
     # Resolve this alert and any related removal alerts
     alert.status = "RESOLVED"
     alert.resolved_by = actor_id
-    alert.resolution_notes = f"Force-removed by staff. Reason: {req.reason}"
+    alert.resolution_notes = f"Force-removed by {current_user.role}. Reason: {req.reason}"
     alert.resolved_at = datetime.utcnow()
 
     # Log to AuditLog
-
     audit = AuditLog(
         user_id=actor_id,
-        action="FORCE_REMOVE_ITEM",
+        action="FORCE_REMOVE_ALERT_ITEM",
         entity_type="CART_ITEM",
         entity_id=item.id,
         details_json=json.dumps({
             "staff_name": actor_name,
+            "staff_email": current_user.email,
+            "staff_role": current_user.role,
             "product_name": prod_name,
             "product_barcode": item.product.barcode if item.product else None,
             "session_id": session.id,
@@ -503,7 +589,8 @@ async def force_remove_from_alert(
             "alert_id": alert.id,
             "reason": req.reason,
             "previous_status": prev_status
-        })
+        }),
+        created_at=datetime.utcnow()
     )
     db.add(audit)
     db.commit()
@@ -529,12 +616,12 @@ async def force_remove_session_item(
     session_id: str,
     item_id: str,
     req: ForceRemoveRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
 ):
     """
-    Store staff force-removes an item directly from Live Cart Monitor (with mandatory reason).
+    Store staff force-removes an item directly from Live Cart Monitor (Admin and Manager only).
     """
-    import json
     session = db.query(CartSession).filter(CartSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Cart session not found.")
@@ -549,10 +636,8 @@ async def force_remove_session_item(
     db.flush()
     SessionService.recalculate_session_totals(db, session)
 
-    from app.models.user import User
-    staff_user = db.query(User).first()
-    actor_id = staff_user.id if staff_user else None
-    actor_name = staff_user.full_name if staff_user else "Store Staff"
+    actor_id = current_user.id
+    actor_name = current_user.full_name or current_user.email
 
     # Resolve open alerts for this session
     open_alerts = db.query(Alert).filter(
@@ -562,23 +647,26 @@ async def force_remove_session_item(
     for al in open_alerts:
         al.status = "RESOLVED"
         al.resolved_by = actor_id
-        al.resolution_notes = f"Item force-removed by staff. Reason: {req.reason}"
+        al.resolution_notes = f"Item force-removed by {current_user.role}. Reason: {req.reason}"
         al.resolved_at = datetime.utcnow()
 
     audit = AuditLog(
         user_id=actor_id,
-        action="FORCE_REMOVE_ITEM",
+        action="FORCE_REMOVE_SESSION_ITEM",
         entity_type="CART_ITEM",
         entity_id=item.id,
         details_json=json.dumps({
             "staff_name": actor_name,
+            "staff_email": current_user.email,
+            "staff_role": current_user.role,
             "product_name": prod_name,
             "product_barcode": item.product.barcode if item.product else None,
             "session_id": session.id,
             "cart_number": session.cart.cart_number if session.cart else None,
             "reason": req.reason,
             "previous_status": prev_status
-        })
+        }),
+        created_at=datetime.utcnow()
     )
     db.add(audit)
     db.commit()
@@ -665,8 +753,13 @@ def get_review_queue(db: Session = Depends(get_db)):
     return result
 
 @router.post("/review-queue/{case_id}/decision")
-async def submit_review_decision(case_id: str, req: ReviewDecisionRequest, db: Session = Depends(get_db)):
-    """Approve or reject a low-confidence detection."""
+async def submit_review_decision(
+    case_id: str,
+    req: ReviewDecisionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Approve or reject a low-confidence detection (All staff)."""
     case = db.query(ReviewCase).filter(ReviewCase.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Review case not found")
@@ -679,8 +772,8 @@ async def submit_review_decision(case_id: str, req: ReviewDecisionRequest, db: S
         await AlertService.resolve_alert(
             db=db,
             alert_id=case.alert_id,
-            user_id="STAFF_REVIEWER",
-            notes=f"Staff approved match. {req.notes or ''}",
+            user_id=current_user.id,
+            notes=f"Staff approved match ({current_user.email}). {req.notes or ''}",
             action="RESOLVED"
         )
         # If there's an active session with this barcode in PENDING, verify it!
@@ -790,7 +883,7 @@ def activate_model(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
-    """One-click rollback or activation of an AI model version."""
+    """One-click activation of an AI model version (Admin and Manager only)."""
     target_model = db.query(ModelVersion).filter(ModelVersion.id == model_id).first()
     if not target_model:
         raise HTTPException(status_code=404, detail="Model version not found")
@@ -817,6 +910,85 @@ def activate_model(
     db.commit()
 
     return {"status": "SUCCESS", "message": f"Activated model {target_model.version_tag}."}
+
+@router.post("/models/{model_id}/rollback")
+@router.post("/models/rollback")
+def rollback_model(
+    model_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Roll back AI model to a specified or previous checkpoint (Admin and Manager only)."""
+    if model_id:
+        target_model = db.query(ModelVersion).filter(ModelVersion.id == model_id).first()
+    else:
+        # Pick the latest inactive model version
+        target_model = db.query(ModelVersion).filter(ModelVersion.is_active == False).order_by(ModelVersion.created_at.desc()).first()
+
+    if not target_model:
+        raise HTTPException(status_code=404, detail="Target model version for rollback not found.")
+
+    current_active = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
+    prev_tag = current_active.version_tag if current_active else "None"
+
+    db.query(ModelVersion).update({ModelVersion.is_active: False})
+    target_model.is_active = True
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        action="ROLLBACK_MODEL",
+        entity_type="MODEL",
+        entity_id=target_model.id,
+        details_json=json.dumps({
+            "previous_version": prev_tag,
+            "new_version": target_model.version_tag,
+            "rolled_back_by_email": current_user.email,
+            "rolled_back_by_role": current_user.role,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully rolled back model from {prev_tag} to {target_model.version_tag}.",
+        "active_model": target_model.version_tag
+    }
+
+@router.get("/audit-logs")
+def get_audit_logs(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    action: Optional[str] = Query(None, description="Filter by action type"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Retrieve immutable system audit logs (Admin and Manager only)."""
+    query = db.query(AuditLog)
+    if action:
+        query = query.filter(AuditLog.action.ilike(f"%{action}%"))
+    total = query.count()
+    logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "action": log.action,
+                "entity_type": log.entity_type,
+                "entity_id": log.entity_id,
+                "details": json.loads(log.details_json) if log.details_json else {},
+                "created_at": log.created_at.isoformat() if log.created_at else None
+            }
+            for log in logs
+        ]
+    }
 
 @router.get("/reports")
 def get_reports(db: Session = Depends(get_db)):

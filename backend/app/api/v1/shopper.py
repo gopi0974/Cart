@@ -1,10 +1,13 @@
+import secrets
 from typing import Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Header, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.cart import Cart
 from app.models.session import CartSession
+from app.models.user import User
+from app.utils.security import decode_access_token
 from app.websocket.manager import ws_manager
 from app.schemas.session import (
     PairSessionRequest, SessionResponse, CartItemResponse,
@@ -15,6 +18,59 @@ from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 
 router = APIRouter(prefix="/shopper", tags=["Shopper Mobile App"])
+
+def verify_shopper_session(
+    session_id: str,
+    x_session_token: Optional[str] = Header(None, alias="X-Session-Token"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    db: Session = Depends(get_db)
+) -> CartSession:
+    """
+    Enforce shopper session ownership.
+    A shopper must provide their unguessable session_token matching the session.
+    Store staff with a valid JWT token can also access the session.
+    """
+    session = db.query(CartSession).filter(CartSession.id == session_id).first()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Shopping session not found."
+        )
+
+    # 1. Check direct session token header
+    token_to_check = x_session_token
+
+    # 2. Check if provided in Authorization header: Bearer <token>
+    if not token_to_check and authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            raw_token = parts[1]
+            # Check if this is an admin/staff JWT access token
+            payload = decode_access_token(raw_token)
+            if payload and "sub" in payload:
+                user = db.query(User).filter(User.email.ilike(str(payload["sub"]).strip())).first()
+                if user and user.is_active:
+                    return session
+            # Otherwise treat as session token
+            token_to_check = raw_token
+
+    if not token_to_check:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing session authorization token. Please pair with the cart."
+        )
+
+    if not getattr(session, 'session_token', None):
+        session.session_token = secrets.token_urlsafe(32)
+        db.commit()
+
+    if not secrets.compare_digest(token_to_check, session.session_token):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session authorization failed: Invalid session token for this cart session."
+        )
+
+    return session
 
 @router.post("/pair", response_model=SessionResponse)
 async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
@@ -70,72 +126,72 @@ def get_available_carts(db: Session = Depends(get_db)):
     return [{"id": c.id, "cart_number": c.cart_number, "status": c.status, "camera_status": c.camera_status} for c in carts]
 
 @router.get("/{session_id}", response_model=SessionResponse)
-def get_session(session_id: str, db: Session = Depends(get_db)):
+def get_session(session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Retrieve full live session state, items, warnings, and running bill."""
     try:
-        details = SessionService.get_session_details(db, session_id)
+        details = SessionService.get_session_details(db, session.id)
         return _format_session_response(details)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{session_id}/scan-item", response_model=CartItemResponse)
-async def scan_item(session_id: str, req: ScanItemRequest, db: Session = Depends(get_db)):
+async def scan_item(req: ScanItemRequest, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Shopper scans barcode with phone camera. Item enters PENDING state."""
     try:
-        item = await SessionService.scan_item(db, session_id, req.barcode)
+        item = await SessionService.scan_item(db, session.id, req.barcode)
         return _format_item_response(item)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/items/{item_id}/initiate-remove", response_model=CartItemResponse)
-async def initiate_item_remove(session_id: str, item_id: str, db: Session = Depends(get_db)):
+async def initiate_item_remove(item_id: str, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Shopper taps 'Remove' on an item. Sets item to REMOVING state."""
     try:
-        item = await SessionService.initiate_item_removal(db, session_id, item_id)
+        item = await SessionService.initiate_item_removal(db, session.id, item_id)
         return _format_item_response(item)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/items/{item_id}/verify-removal")
 async def verify_item_removal(
-    session_id: str,
     item_id: str,
     req: Optional[VerifyRemovalRequest] = None,
+    session: CartSession = Depends(verify_shopper_session),
     db: Session = Depends(get_db)
 ):
     """Cart camera AI verification of item physical departure."""
     try:
         img_data = req.image_data_url if req else None
-        res = await SessionService.verify_item_removal(db, session_id, item_id, image_data=img_data)
+        res = await SessionService.verify_item_removal(db, session.id, item_id, image_data=img_data)
         return res
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/items/{item_id}/cancel-remove", response_model=CartItemResponse)
-async def cancel_item_remove(session_id: str, item_id: str, db: Session = Depends(get_db)):
+async def cancel_item_remove(item_id: str, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Shopper taps 'Cancel' to keep the item in the cart."""
     try:
-        item = await SessionService.cancel_item_removal(db, session_id, item_id)
+        item = await SessionService.cancel_item_removal(db, session.id, item_id)
         return _format_item_response(item)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/rescan-remove")
-async def rescan_remove(session_id: str, req: RescanRemoveRequest, db: Session = Depends(get_db)):
+async def rescan_remove(req: RescanRemoveRequest, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Shopper rescans an item that was removed from cart to drop it from bill."""
     try:
-        res = await SessionService.rescan_to_remove(db, session_id, req.barcode)
+        res = await SessionService.rescan_to_remove(db, session.id, req.barcode)
         return res
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{session_id}/checkout")
-async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(get_db)):
+async def checkout(req: CheckoutRequest, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Process checkout payment. Allowed ONLY if all items are VERIFIED and no warnings open."""
     try:
         tx = await BillingService.process_checkout(
             db=db,
-            session_id=session_id,
+            session_id=session.id,
             payment_method=req.payment_method,
             upi_id=req.upi_id,
             card_token=req.card_token
@@ -149,24 +205,19 @@ async def checkout(session_id: str, req: CheckoutRequest, db: Session = Depends(
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/{session_id}/receipt", response_model=ReceiptResponse)
-def get_receipt(session_id: str, db: Session = Depends(get_db)):
+def get_receipt(session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Fetch digital receipt for completed session."""
     try:
-        return BillingService.get_receipt(db, session_id)
+        return BillingService.get_receipt(db, session.id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 @router.post("/{session_id}/end-session")
-@router.post("/{session_id}/exit", include_in_schema=False)
-async def end_session(session_id: str, db: Session = Depends(get_db)):
+async def end_session(session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """
     Shopper ends session to leave or cancel.
     Frees the cart immediately (sets cart to IDLE) so other shoppers can occupy it.
     """
-    session = db.query(CartSession).filter(CartSession.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
     cart = session.cart
     if session.status == "ACTIVE":
         session.status = "ABANDONED"
@@ -224,6 +275,7 @@ def _format_session_response(details) -> SessionResponse:
         id=sess.id,
         cart_id=cart.id,
         cart_number=cart.cart_number,
+        session_token=getattr(sess, "session_token", None),
         camera_status=details.get("camera_status", getattr(cart, "camera_status", "OFFLINE")),
         status=sess.status,
         started_at=sess.started_at,

@@ -8,15 +8,17 @@ export function getApiBaseUrl(): string {
     return raw.endsWith('/api/v1') ? raw : `${raw}/api/v1`;
   }
 
-  // Same-origin or local development fallback
-  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-  const proto = isHttps ? 'https' : 'http';
+  // Local development fallback only
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-
   if (host === 'localhost' || host === '127.0.0.1') {
-    return `${proto}://${host}:8000/api/v1`;
+    return 'http://localhost:8000/api/v1';
   }
-  return `${proto}://${host}/api/v1`;
+
+  // In deployed environment, NEVER fall back to same-origin silently.
+  throw new Error(
+    'CONFIGURATION ERROR: VITE_API_URL environment variable was not provided at build time. ' +
+    'Please set VITE_API_URL in your hosting platform (Vercel) to your Render backend URL.'
+  );
 }
 
 export function getWsBaseUrl(): string {
@@ -27,13 +29,14 @@ export function getWsBaseUrl(): string {
     return `${wsProto}://${cleanHost}`;
   }
 
-  const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-  const proto = isHttps ? 'wss' : 'ws';
   const host = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
   if (host === 'localhost' || host === '127.0.0.1') {
-    return `${proto}://${host}:8000`;
+    return 'ws://localhost:8000';
   }
-  return `${proto}://${host}`;
+
+  throw new Error(
+    'CONFIGURATION ERROR: WebSocket backend URL cannot be determined because VITE_API_URL is missing.'
+  );
 }
 
 export interface FriendlyApiError extends Error {
@@ -51,11 +54,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
     ? `${baseUrl.replace(/\/api\/v1$/, '')}/health`
     : `${baseUrl}${endpoint}`;
 
-  const token = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
+  const adminToken = typeof window !== 'undefined' ? localStorage.getItem('smartcart_admin_token') : null;
+  const sessionToken = typeof window !== 'undefined' ? localStorage.getItem('smartcart_session_token') : null;
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   const headers: Record<string, string> = {
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    ...(adminToken ? { 'Authorization': `Bearer ${adminToken}` } : {}),
+    ...(sessionToken ? { 'X-Session-Token': sessionToken } : {}),
     ...(options.headers as Record<string, string> || {}),
   };
 

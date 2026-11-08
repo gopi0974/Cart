@@ -69,8 +69,8 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             audioFeedback.playItemVerified();
             refreshSession();
           } else if (
-            evtType === 'ITEM_MISMATCH' || 
-            evtType === 'UNSCANNED_ITEM_DETECTED' || 
+            evtType === 'ITEM_MISMATCH' ||
+            evtType === 'UNSCANNED_ITEM_DETECTED' ||
             evtType === 'ITEM_REMOVAL_DETECTED' ||
             evtType === 'ITEM_REMOVAL_INITIATED'
           ) {
@@ -268,9 +268,8 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         <div className="flex items-center gap-2">
           <button
             onClick={refreshSession}
-            className={`p-2 rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${
-              isRefreshing ? 'animate-spin text-emerald-600' : ''
-            }`}
+            className={`p-2 rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${isRefreshing ? 'animate-spin text-emerald-600' : ''
+              }`}
             title="Refresh Cart"
           >
             <RefreshCw className="w-4 h-4" />
@@ -434,17 +433,16 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
               return (
                 <div
                   key={item.id}
-                  className={`bg-white dark:bg-[#131B2E] border rounded-2xl p-3.5 shadow-sm transition-all flex items-start gap-3 relative overflow-hidden ${
-                    isItemRemoving
+                  className={`bg-white dark:bg-[#131B2E] border rounded-2xl p-3.5 shadow-sm transition-all flex items-start gap-3 relative overflow-hidden ${isItemRemoving
                       ? 'border-amber-400/90 dark:border-amber-500/80 shadow-amber-500/10 shadow-lg ring-1 ring-amber-400'
                       : isItemRemovedPending
-                      ? 'border-blue-400/90 dark:border-blue-500/80 shadow-blue-500/10 shadow-lg ring-1 ring-blue-400'
-                      : item.status === 'PENDING'
-                      ? 'border-amber-400/80 dark:border-amber-500/70 shadow-amber-500/10 shadow-lg'
-                      : item.status === 'VERIFIED'
-                      ? 'border-emerald-200 dark:border-emerald-900/60'
-                      : 'border-red-300 dark:border-red-900/60'
-                  }`}
+                        ? 'border-blue-400/90 dark:border-blue-500/80 shadow-blue-500/10 shadow-lg ring-1 ring-blue-400'
+                        : item.status === 'PENDING'
+                          ? 'border-amber-400/80 dark:border-amber-500/70 shadow-amber-500/10 shadow-lg'
+                          : item.status === 'VERIFIED'
+                            ? 'border-emerald-200 dark:border-emerald-900/60'
+                            : 'border-red-300 dark:border-red-900/60'
+                    }`}
                 >
                   {/* Product Thumbnail */}
                   <div className="w-14 h-14 bg-slate-100 dark:bg-slate-800 rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center border border-slate-100 dark:border-slate-800">
@@ -474,7 +472,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
 
                     <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono mt-0.5">
                       <span>{item.brand} • Qty: {item.quantity}</span>
-                      
+
                       {/* Remove Button for Verified/Pending Items */}
                       {!isItemRemoving && !isItemRemovedPending && (
                         <button
@@ -627,16 +625,15 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
               hasPendingRemoval
                 ? 'Please complete the item removal before checking out.'
                 : session.camera_status === 'OFFLINE'
-                ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
-                : !session.can_checkout
-                ? 'All items must be verified by camera and warnings cleared before paying'
-                : 'Proceed to Payment'
+                  ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
+                  : !session.can_checkout
+                    ? 'All items must be verified by camera and warnings cleared before paying'
+                    : 'Proceed to Payment'
             }
-            className={`flex-1 font-semibold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-1.5 transition-all text-sm ${
-              !checkoutBlocked
+            className={`flex-1 font-semibold py-3.5 px-4 rounded-2xl shadow-lg flex items-center justify-center gap-1.5 transition-all text-sm ${!checkoutBlocked
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/30 active:scale-95'
                 : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed shadow-none'
-            }`}
+              }`}
           >
             <span>{t.pay} ₹{session.total_amount.toFixed(2)}</span>
             <ChevronRight className="w-4 h-4" />
@@ -648,8 +645,8 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             {hasPendingRemoval
               ? 'Please complete the item removal before checking out.'
               : session.camera_status === 'OFFLINE'
-              ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
-              : "Checkout opens once all items are placed and verified in cart."}
+                ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
+                : "Checkout opens once all items are placed and verified in cart."}
           </p>
         )}
       </div>

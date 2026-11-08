@@ -85,8 +85,8 @@ def get_product(product_id: str, db: Session = Depends(get_db)):
 @router.post("", response_model=ProductResponse)
 def create_product(
     prod_in: ProductCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """Add a new product to supermarket inventory."""
     existing = db.query(Product).filter(Product.barcode == prod_in.barcode).first()
@@ -122,8 +122,8 @@ def create_product(
 def update_product(
     product_id: str,
     prod_in: ProductUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """Update existing product details."""
     p = db.query(Product).filter(Product.id == product_id).first()
@@ -171,8 +171,8 @@ class BulkDeleteRequest(BaseModel):
 @router.delete("/{product_id}")
 def delete_product(
     product_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """
     Soft delete product from active catalog:
@@ -246,8 +246,8 @@ def delete_product(
 @router.post("/{product_id}/restore")
 def restore_product(
     product_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """Restore a previously deleted product back to active catalog."""
     p = db.query(Product).filter(Product.id == product_id).first()
@@ -279,8 +279,8 @@ def restore_product(
 @router.post("/bulk-delete")
 def bulk_delete_products(
     req: BulkDeleteRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """Bulk soft delete products, removing their AI embeddings and logging audit trail."""
     if not req.product_ids:
@@ -351,8 +351,8 @@ def bulk_delete_products(
 @router.post("/bulk-upload", response_model=BulkUploadResponse)
 async def bulk_upload_csv(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin_or_manager)
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
 ):
     """Import inventory catalog via CSV file."""
     if not file.filename.endswith(".csv"):

@@ -30,6 +30,7 @@ export interface CartSession {
   id: string;
   cart_id: string;
   cart_number: string;
+  session_token?: string;
   camera_status?: 'ONLINE' | 'OFFLINE';
   status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
   started_at: string;

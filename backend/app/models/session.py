@@ -1,4 +1,5 @@
 import uuid
+import secrets
 from datetime import datetime
 from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
@@ -10,6 +11,7 @@ class CartSession(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     cart_id = Column(String(36), ForeignKey("carts.id"), nullable=False)
+    session_token = Column(String(64), nullable=True, index=True, default=lambda: secrets.token_urlsafe(32))
     customer_phone = Column(String(20), nullable=True)
     status = Column(String(20), nullable=False, default="ACTIVE")  # ACTIVE, COMPLETED, ABANDONED
     started_at = Column(DateTime, default=datetime.utcnow)

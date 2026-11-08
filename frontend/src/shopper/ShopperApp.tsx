@@ -37,6 +37,7 @@ export const ShopperApp: React.FC = () => {
         })
         .catch(() => {
           localStorage.removeItem('smartcart_session_id');
+          localStorage.removeItem('smartcart_session_token');
         });
     }
   }, []);
@@ -45,6 +46,9 @@ export const ShopperApp: React.FC = () => {
     setActiveSession(session);
     setReceipt(null);
     localStorage.setItem('smartcart_session_id', session.id);
+    if (session.session_token) {
+      localStorage.setItem('smartcart_session_token', session.session_token);
+    }
   };
 
   const handleDisconnect = async () => {
@@ -58,6 +62,7 @@ export const ShopperApp: React.FC = () => {
     setActiveSession(null);
     setReceipt(null);
     localStorage.removeItem('smartcart_session_id');
+    localStorage.removeItem('smartcart_session_token');
   };
 
   const handleCheckoutComplete = async () => {
@@ -67,6 +72,7 @@ export const ShopperApp: React.FC = () => {
       setReceipt(rec);
       setActiveSession(null);
       localStorage.removeItem('smartcart_session_id');
+      localStorage.removeItem('smartcart_session_token');
     } catch (e) {
       console.error('Failed to load receipt:', e);
     }
@@ -76,6 +82,7 @@ export const ShopperApp: React.FC = () => {
     setActiveSession(null);
     setReceipt(null);
     localStorage.removeItem('smartcart_session_id');
+    localStorage.removeItem('smartcart_session_token');
   };
 
   return (

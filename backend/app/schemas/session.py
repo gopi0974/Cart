@@ -40,6 +40,7 @@ class SessionResponse(BaseModel):
     id: str
     cart_id: str
     cart_number: str
+    session_token: Optional[str] = None
     camera_status: str = "ONLINE"
     status: str
     started_at: datetime

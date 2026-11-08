@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import hmac
 import hashlib
+import secrets
 from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.cart import Cart
@@ -82,13 +83,17 @@ class SessionService:
         if existing_session:
             # If same customer is reconnecting, allow resume
             if customer_phone and existing_session.customer_phone == customer_phone:
+                if not getattr(existing_session, 'session_token', None):
+                    existing_session.session_token = secrets.token_urlsafe(32)
+                    db.commit()
                 return existing_session
             # Block second shopper from pairing while first shopper is active
             raise ValueError(f"Cart '{cart.cart_number}' is currently occupied by an active shopper. Only one active session is allowed per cart.")
 
-        # 5. Create new shopping session
+        # 5. Create new shopping session with secure unguessable session token
         session = CartSession(
             cart_id=cart.id,
+            session_token=secrets.token_urlsafe(32),
             customer_phone=customer_phone,
             status="ACTIVE"
         )

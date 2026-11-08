@@ -201,3 +201,4 @@ export const SystemDiagnosticsView: React.FC<Props> = ({ health, status, onRefre
     </div>
   );
 };
+

@@ -39,6 +39,15 @@ def require_admin_or_manager(current_user: User = Depends(get_current_user)) -> 
         )
     return current_user
 
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Ensure authenticated staff has ADMIN privileges."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission denied: Requires Admin role."
+        )
+    return current_user
+
 @router.post("/login", response_model=Token)
 def login(login_data: UserLogin, db: Session = Depends(get_db)):
     """Staff/Admin login endpoint providing JWT access token."""
@@ -85,16 +94,13 @@ def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 @router.get("/staff", response_model=list[UserResponse])
-def list_staff(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """List all staff accounts."""
+def list_staff(current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """List all staff accounts (Admin only)."""
     return db.query(User).all()
 
 @router.post("/staff", response_model=UserResponse)
-def create_staff(user_in: UserCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_staff(user_in: UserCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Create new staff account (Admin only)."""
-    if current_user.role != "ADMIN":
-        raise HTTPException(status_code=403, detail="Only Admins can create staff accounts.")
-    
     existing = db.query(User).filter(User.email == user_in.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="User with this email already exists.")
