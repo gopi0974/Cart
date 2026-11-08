@@ -85,8 +85,21 @@ def _generate_augmentations(img: Image.Image) -> List[Tuple[str, Image.Image]]:
     return variants
 
 @router.post("/simulate-action")
-async def simulate_cart_camera_action(req: SimulateActionRequest, db: Session = Depends(get_db)):
-    """Simulate cart camera detections and physical cart events for testing without hardware."""
+async def simulate_cart_camera_action(
+    req: SimulateActionRequest,
+    current_user: User = Depends(require_admin_or_manager),
+    db: Session = Depends(get_db)
+):
+    """
+    Simulate cart camera detections and physical cart events for testing without hardware.
+    Restricted to Admin and Manager roles.
+    Disabled unless USE_MOCK=true is configured.
+    """
+    if not settings.USE_MOCK:
+        raise HTTPException(
+            status_code=403,
+            detail="Hardware vision simulation is disabled. Set USE_MOCK=true to enable mock camera simulation."
+        )
     cart = db.query(Cart).filter((Cart.id == req.cart_id) | (Cart.cart_number == req.cart_id.upper())).first()
     if not cart:
         raise HTTPException(status_code=404, detail="Cart not found")

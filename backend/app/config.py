@@ -34,10 +34,11 @@ class Settings(BaseModel):
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY", "smartcart-super-secret-key-change-in-production-2026")
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 8  # 8 hours for staff
     
-    # Environment & Demo Mode (default: false in production)
+    # Environment & Flags (default: false in production)
     DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
+    USE_MOCK: bool = os.getenv("USE_MOCK", "false").lower() in ("true", "1", "yes")
     
     # Cart QR HMAC Signing Secret
     QR_SIGNING_SECRET: str = os.getenv("QR_SIGNING_SECRET", "smartcart-qr-hmac-secret-key-production-2026")

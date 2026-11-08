@@ -225,6 +225,23 @@ export const AdminPortal: React.FC = () => {
 
       {/* Main Admin Content Body */}
       <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full overflow-y-auto">
+        {/* Mock Mode Alert Banner */}
+        {healthData?.use_mock && (
+          <div className="mb-4 p-3.5 bg-amber-500/10 border-2 border-amber-500/40 rounded-2xl flex items-center justify-between gap-3 text-amber-900 dark:text-amber-200 shadow-sm animate-pulse">
+            <div className="flex items-center gap-2.5">
+              <span className="px-2 py-0.5 rounded-full bg-amber-500 text-white font-bold text-[10px] tracking-wider uppercase">
+                MOCK MODE ACTIVE
+              </span>
+              <span className="text-xs font-medium">
+                Hardware camera simulation is enabled on this store backend. Mock vision action endpoints are active.
+              </span>
+            </div>
+            <span className="text-[10px] font-mono text-amber-700 dark:text-amber-300 font-semibold shrink-0">
+              USE_MOCK=true
+            </span>
+          </div>
+        )}
+
         {/* Mobile Navigation Header */}
         <div className="lg:hidden mb-4 flex justify-between items-center bg-white dark:bg-[#131B2E] p-3 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
           <div className="flex items-center gap-2">

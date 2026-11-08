@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import time
+import logging
+from collections import defaultdict
+from threading import Lock
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -6,9 +10,43 @@ from app.models.user import User
 from app.schemas.auth import Token, UserLogin, UserCreate, UserResponse
 from app.utils.security import verify_password, hash_password, create_access_token, decode_access_token
 
-import logging
-
 logger = logging.getLogger("smartcart.auth")
+
+class LoginRateLimiter:
+    """Thread-safe sliding-window rate limiter for failed login attempts (5 attempts per 15 min)."""
+    def __init__(self, max_attempts: int = 5, window_seconds: int = 900):
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._failures = defaultdict(list)
+        self._lock = Lock()
+
+    def _cleanup(self, now: float):
+        cutoff = now - self.window_seconds
+        for key in list(self._failures.keys()):
+            self._failures[key] = [t for t in self._failures[key] if t > cutoff]
+            if not self._failures[key]:
+                del self._failures[key]
+
+    def is_rate_limited(self, ip: str, email: str) -> bool:
+        now = time.time()
+        with self._lock:
+            self._cleanup(now)
+            ip_attempts = len(self._failures.get(f"ip:{ip}", []))
+            email_attempts = len(self._failures.get(f"email:{email}", []))
+            return ip_attempts >= self.max_attempts or email_attempts >= self.max_attempts
+
+    def record_failure(self, ip: str, email: str):
+        now = time.time()
+        with self._lock:
+            self._failures[f"ip:{ip}"].append(now)
+            self._failures[f"email:{email}"].append(now)
+
+    def record_success(self, ip: str, email: str):
+        with self._lock:
+            self._failures.pop(f"ip:{ip}", None)
+            self._failures.pop(f"email:{email}", None)
+
+login_rate_limiter = LoginRateLimiter(max_attempts=5, window_seconds=900)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -49,13 +87,25 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 @router.post("/login", response_model=Token)
-def login(login_data: UserLogin, db: Session = Depends(get_db)):
-    """Staff/Admin login endpoint providing JWT access token."""
+def login(login_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+    """Staff/Admin login endpoint providing JWT access token with rate limiting protection."""
     clean_email = (login_data.email or "").strip().lower()
     clean_password = (login_data.password or "").strip()
 
+    forwarded = request.headers.get("x-forwarded-for")
+    client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "127.0.0.1")
+
+    # Enforce rate limiting: 5 failed attempts per 15 minutes per IP or email
+    if login_rate_limiter.is_rate_limited(client_ip, clean_email):
+        logger.warning(f"Login rate limit triggered for IP {client_ip} / email {clean_email}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Please try again after 15 minutes."
+        )
+
     user = db.query(User).filter(User.email.ilike(clean_email)).first()
     if not user:
+        login_rate_limiter.record_failure(client_ip, clean_email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -68,6 +118,7 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
         is_valid = False
 
     if not is_valid:
+        login_rate_limiter.record_failure(client_ip, clean_email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -78,6 +129,9 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Staff account is disabled. Contact store administrator.",
         )
+
+    # Login successful: clear any failure history for this IP/email
+    login_rate_limiter.record_success(client_ip, clean_email)
 
     access_token = create_access_token(data={"sub": user.email, "role": user.role})
     return Token(

@@ -183,6 +183,7 @@ def _get_health_data():
         "embed_ms_avg": metrics["embed_ms_avg"],
         "memory_rss_mb": memory_rss_mb,
         "demo_mode": settings.DEMO_MODE,
+        "use_mock": settings.USE_MOCK,
     }
 
 @app.get("/health")

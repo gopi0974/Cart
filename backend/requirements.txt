@@ -17,4 +17,3 @@ numpy==1.26.4
 opencv-python-headless==4.9.0.80
 onnxruntime==1.17.3
 psutil==5.9.8
-pytest==8.1.1
