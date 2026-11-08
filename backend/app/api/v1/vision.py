@@ -264,7 +264,7 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
 
         for aug_tag, variant_img in augmented_set:
             try:
-                # Real CLIP ViT-B/32 embedding
+                # Real ONNX INT8 CLIP ViT-B/32 embedding
                 vec = get_embedding(variant_img)
                 full_tag = f"{cap.angle_tag}_{aug_tag}"
                 VectorStoreMatcher.store_embedding(
@@ -280,6 +280,13 @@ def save_360_scan_embeddings(product_id: str, req: Complete360ScanRequest, db: S
                     commit=False
                 )
                 stored_vectors_count += 1
+            except RuntimeError as re:
+                logger.error(f"AI model unavailable during 360 scan: {re}")
+                db.rollback()
+                raise HTTPException(
+                    status_code=503,
+                    detail="AI Vision Service Unavailable: ONNX INT8 model is still loading or unavailable."
+                )
             except Exception as e:
                 logger.error(f"Error computing embedding for {product.barcode} ({full_tag}): {e}")
 
@@ -325,8 +332,11 @@ def preview_recognition_test(req: PreviewTestRequest, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="Invalid camera frame received. Please point your webcam at the product.")
 
     try:
-        # Real CLIP ViT-B/32 embedding of the live camera frame
+        # Real ONNX INT8 CLIP ViT-B/32 embedding of the live camera frame
         query_vector = get_embedding(req.image_data_url)
+    except RuntimeError as re:
+        logger.error(f"AI model unavailable during preview test: {re}")
+        raise HTTPException(status_code=503, detail="AI Vision Service Unavailable: ONNX INT8 model is still loading or unavailable.")
     except Exception as e:
         logger.error(f"Failed to extract embedding from preview camera frame: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to process camera frame: {str(e)}")

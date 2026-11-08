@@ -21,8 +21,8 @@ except Exception:
 
 class AIVerificationEngine:
     """
-    Multi-modal verification engine coordinating object/hand localization,
-    visual embeddings, and cosine similarity matching.
+    Multi-modal verification engine coordinating OpenCV frame differencing,
+    ONNX INT8 CLIP ViT-B/32 visual embeddings, and pgvector cosine similarity matching.
     """
 
     @staticmethod
@@ -35,18 +35,30 @@ class AIVerificationEngine:
             if HAS_CV2:
                 nparr = np.frombuffer(raw_bytes, np.uint8)
                 img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img_bgr is None or img_bgr.size == 0:
+                    raise ValueError("Could not decode image from base64 buffer.")
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+                return img_bgr, pil_img
             else:
                 pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
                 img_rgb = np.array(pil_img)
                 return img_rgb, pil_img
+
         elif isinstance(image_data, bytes):
             if HAS_CV2:
                 nparr = np.frombuffer(image_data, np.uint8)
                 img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img_bgr is None or img_bgr.size == 0:
+                    raise ValueError("Could not decode image from raw bytes.")
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+                return img_bgr, pil_img
             else:
                 pil_img = Image.open(io.BytesIO(image_data)).convert("RGB")
                 img_rgb = np.array(pil_img)
                 return img_rgb, pil_img
+
         elif isinstance(image_data, Image.Image):
             pil_img = image_data.convert("RGB")
             img_rgb = np.array(pil_img)
@@ -54,21 +66,19 @@ class AIVerificationEngine:
                 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
                 return img_bgr, pil_img
             return img_rgb, pil_img
+
         elif isinstance(image_data, np.ndarray):
             img_bgr = image_data
+            if img_bgr.size == 0:
+                raise ValueError("Received empty image ndarray.")
+            if HAS_CV2:
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+            else:
+                pil_img = Image.fromarray(img_bgr)
+            return img_bgr, pil_img
         else:
             raise ValueError(f"Unsupported image_data type: {type(image_data)}")
-
-        if img_bgr is None or img_bgr.size == 0:
-            img_bgr = np.zeros((480, 640, 3), dtype=np.uint8)
-
-        if HAS_CV2:
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-        else:
-            pil_img = Image.fromarray(img_bgr)
-        return img_bgr, pil_img
-
 
     def evaluate_item_placement(
         self,
@@ -76,10 +86,11 @@ class AIVerificationEngine:
         claimed_barcode: Optional[str],
         image_data: Any,
         ref_background: Optional[np.ndarray] = None,
-        crop_box: Optional[Tuple[int, int, int, int]] = None
+        crop_box: Optional[Tuple[int, int, int, int]] = None,
+        hand_present: bool = False
     ) -> Dict[str, Any]:
         """
-        Evaluate physical item placement in cart against claimed barcode using real YOLOv8n + CLIP pipeline.
+        Evaluate physical item placement in cart against claimed barcode using ONNX INT8 CLIP pipeline.
         Returns tiered decision:
           - AUTO_APPROVE: High confidence match for claimed barcode (>= CONFIDENCE_HIGH)
           - RESCAN_PROMPT: Uncertain confidence (between CONFIDENCE_MEDIUM and CONFIDENCE_HIGH)
@@ -89,18 +100,12 @@ class AIVerificationEngine:
         """
         img_bgr, pil_full = self._decode_to_cv2(image_data)
 
-        # 1. Locate object bounding box via YOLOv8n or background differencing
+        # 1. Locate placed object via background differencing or provided box
         det_box = crop_box
-        if det_box is None:
-            detection = object_detector.detect(img_bgr)
-            if detection["object_boxes"]:
-                # Pick highest confidence object
-                best_obj = max(detection["object_boxes"], key=lambda b: b["conf"])
-                det_box = tuple(best_obj["box"])
-            elif ref_background is not None:
-                motion_box = object_detector.compute_motion_box(ref_background, img_bgr)
-                if motion_box:
-                    det_box = motion_box
+        if det_box is None and ref_background is not None:
+            motion_box = object_detector.compute_motion_box(ref_background, img_bgr)
+            if motion_box:
+                det_box = motion_box
 
         # 2. Crop detected region or use full frame
         if det_box:
@@ -108,7 +113,7 @@ class AIVerificationEngine:
         else:
             crop_pil = pil_full
 
-        # 3. Generate real CLIP 512-dim visual embedding
+        # 3. Generate real ONNX INT8 CLIP 512-dim visual embedding
         query_vector = feature_extractor.get_embedding(crop_pil)
 
         # 4. Search vector store for top candidates
@@ -121,13 +126,13 @@ class AIVerificationEngine:
 
         # Handle Unscanned Item (No pending barcode)
         if not claimed_barcode:
+            sim_score = top_match["similarity"] if top_match else 0.0
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
                 box=det_box,
-                label=f"UNSCANNED: {top_match['name'] if top_match else 'Unknown'}",
+                label=f"UNSCANNED: {top_match['product_name'] if top_match else 'Unknown'}",
                 status="DANGER"
             )
-            sim_score = top_match["similarity"] if top_match else 0.88
             return {
                 "decision": "UNSCANNED_DETECTED",
                 "status": "WARNING_UNSCANNED",
@@ -222,30 +227,28 @@ class AIVerificationEngine:
         db: Session,
         target_barcode: str,
         image_data: Optional[Any] = None,
-        ref_background: Optional[np.ndarray] = None
+        ref_background: Optional[np.ndarray] = None,
+        hand_present: bool = False
     ) -> Dict[str, Any]:
         """
         Evaluate physical removal of item from cart.
         - Verify that the item was actually removed from the cart (not still inside, not covered by hand).
-        - Use the cart camera to check that the item is no longer visible in the cart.
-        - If the item is still in the cart, show: 'We still see this item in the cart. Please take it out.'
         - If hand is occluding or frame is not stable: prompt to remove hand.
-        - If AI is uncertain: flag it for staff review.
+        - If the item is still in the cart: show: 'We still see this item in the cart. Please take it out.'
         """
         if image_data is None:
             return {
-                "decision": "CONFIRMED_REMOVED",
-                "removed": True,
-                "confidence": 0.95,
+                "decision": "CAMERA_FEED_REQUIRED",
+                "removed": False,
+                "confidence": 0.0,
                 "evidence_url": None,
-                "message": "Item removed. Please rescan its barcode to take it off your bill."
+                "message": "Cart camera feed required to verify item removal."
             }
 
         img_bgr, pil_full = self._decode_to_cv2(image_data)
 
-        # 1. Check for hand occlusion: ensure hand leaves the cart
-        detection = object_detector.detect(img_bgr)
-        if detection.get("hand_detected", False):
+        # 1. Check for hand occlusion
+        if hand_present:
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
                 label="HAND IN CART",
@@ -259,31 +262,30 @@ class AIVerificationEngine:
                 "message": "We see a hand in the cart. Please remove your hand so the camera can verify."
             }
 
-        # 2. Check detected objects in cart against target_barcode
-        object_boxes = detection.get("object_boxes", [])
-        low_thresh = getattr(settings, "CONFIDENCE_MEDIUM", 0.55)
+        # 2. Check if a motion/item box exists against reference
+        motion_box = None
+        if ref_background is not None:
+            motion_box = object_detector.compute_motion_box(ref_background, img_bgr)
 
         still_in_cart = False
-        matching_box = None
         max_sim = 0.0
+        low_thresh = getattr(settings, "CONFIDENCE_MEDIUM", 0.55)
 
-        for obj in object_boxes:
-            box = tuple(obj["box"])
-            crop_pil = object_detector.crop_object(img_bgr, box)
+        if motion_box:
+            crop_pil = object_detector.crop_object(img_bgr, motion_box)
             try:
                 crop_vec = feature_extractor.get_embedding(crop_pil)
                 is_match, sim = VectorStoreMatcher.verify_claimed_barcode(db, target_barcode, crop_vec)
                 if (is_match or sim >= low_thresh) and sim > max_sim:
                     max_sim = sim
                     still_in_cart = True
-                    matching_box = box
             except Exception as e:
                 logger.warning(f"Error checking object crop during removal evaluation: {e}")
 
         if still_in_cart and max_sim >= low_thresh:
             evidence_url = object_detector.save_evidence_snapshot(
                 image_bgr=img_bgr,
-                box=matching_box,
+                box=motion_box,
                 label=f"STILL IN CART ({max_sim*100:.1f}%)",
                 status="DANGER"
             )

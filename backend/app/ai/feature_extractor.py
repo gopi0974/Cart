@@ -2,155 +2,216 @@ import os
 import io
 import base64
 import logging
-from typing import List, Any, Union
+import threading
+from typing import List, Any, Union, Optional
 import numpy as np
 from PIL import Image
 
 logger = logging.getLogger("smartcart.ai.feature_extractor")
 
-MODEL_NAME = "openai/clip-vit-base-patch32"
-MODEL_VERSION = "v1.0.0-clip"
+MODEL_NAME = "openai/clip-vit-base-patch32-int8"
+MODEL_VERSION = "v1.1.0-onnx-int8"
 VECTOR_DIM = 512
-
-# Optional PyTorch & Transformers import with graceful fallback
-try:
-    import torch
-    from transformers import CLIPProcessor, CLIPVisionModelWithProjection
-    HAS_TORCH_CLIP = True
-except Exception as e:
-    torch = None
-    CLIPProcessor = None
-    CLIPVisionModelWithProjection = None
-    HAS_TORCH_CLIP = False
-    logger.info(f"PyTorch/Transformers not installed in this environment ({e}). Using perceptual visual feature extractor.")
 
 # Determine local models storage path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LOCAL_MODEL_DIR = os.path.join(BASE_DIR, "models_storage", "clip_vision")
-FALLBACK_MODEL_DIR = os.path.join(BASE_DIR, "models_storage", "clip-vit-base-patch32")
+ONNX_MODEL_PATH = os.path.join(BASE_DIR, "models_storage", "clip_vision_int8.onnx")
 
-_processor = None
-_model = None
+# Global ONNX Inference Session and initialization flag
+_onnx_session = None
+_model_loading: bool = False
+_model_loaded: bool = False
+_model_error: Optional[str] = None
+_lock = threading.Lock()
 
-def _load_model():
-    """Load pretrained CLIP ViT-B/32 vision model from local cache for offline execution if torch is available."""
-    global _processor, _model
-    if not HAS_TORCH_CLIP:
-        return None, None
-    if _model is not None and _processor is not None:
-        return _processor, _model
+# CLIP ViT-B/32 normalization constants
+CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
-    model_dir = None
-    if os.path.exists(LOCAL_MODEL_DIR) and os.listdir(LOCAL_MODEL_DIR):
-        model_dir = LOCAL_MODEL_DIR
-    elif os.path.exists(FALLBACK_MODEL_DIR) and os.listdir(FALLBACK_MODEL_DIR):
-        model_dir = FALLBACK_MODEL_DIR
+def is_model_ready() -> bool:
+    """Return True if ONNX INT8 CLIP model is loaded and ready for inference."""
+    return _model_loaded and _onnx_session is not None
 
-    try:
-        if model_dir:
-            logger.info(f"Loading real CLIP ViT-B/32 from local offline cache: {model_dir}")
-            try:
-                _processor = CLIPProcessor.from_pretrained(model_dir, local_files_only=True)
-                _model = CLIPVisionModelWithProjection.from_pretrained(model_dir, local_files_only=True)
-            except Exception as e:
-                logger.warning(f"Failed loading with local_files_only from {model_dir}: {e}. Retrying standard load...")
-                _processor = CLIPProcessor.from_pretrained(model_dir)
-                _model = CLIPVisionModelWithProjection.from_pretrained(model_dir)
-        else:
-            logger.info(f"Downloading real CLIP ViT-B/32 ({MODEL_NAME}) and saving locally for offline use...")
-            _processor = CLIPProcessor.from_pretrained(MODEL_NAME)
-            _model = CLIPVisionModelWithProjection.from_pretrained(MODEL_NAME)
-            os.makedirs(LOCAL_MODEL_DIR, exist_ok=True)
-            _processor.save_pretrained(LOCAL_MODEL_DIR)
-            _model.save_pretrained(LOCAL_MODEL_DIR)
+def get_model_load_status() -> dict:
+    """Return current model loading status and diagnostics."""
+    return {
+        "model_loaded": _model_loaded,
+        "model_name": MODEL_NAME,
+        "model_version": MODEL_VERSION,
+        "vector_dimension": VECTOR_DIM,
+        "model_path": ONNX_MODEL_PATH,
+        "model_file_exists": os.path.exists(ONNX_MODEL_PATH),
+        "error": _model_error
+    }
 
-        _model.eval()
-        logger.info("CLIP ViT-B/32 vision embedding model loaded and ready.")
-        return _processor, _model
-    except Exception as e:
-        logger.warning(f"Could not initialize CLIP model: {e}. Falling back to perceptual visual feature extractor.")
-        return None, None
+def load_onnx_model():
+    """Load ONNX Runtime inference session for INT8 CLIP vision encoder."""
+    global _onnx_session, _model_loaded, _model_loading, _model_error
 
-def _preprocess_image_input(image_input: Any) -> Image.Image:
-    """Standardize any image representation into an RGB PIL Image."""
+    with _lock:
+        if _model_loaded and _onnx_session is not None:
+            return _onnx_session
+
+        _model_loading = True
+
+        if not os.path.exists(ONNX_MODEL_PATH):
+            err_msg = (
+                f"Model file not found at {ONNX_MODEL_PATH}. "
+                "Run `python download_model.py` at build time to fetch clip_vision_int8.onnx."
+            )
+            logger.warning(err_msg)
+            _model_error = err_msg
+            _model_loading = False
+            _model_loaded = False
+            return None
+
+        try:
+            import onnxruntime as ort
+
+            # Tune session options for low memory and fast single/shared CPU execution
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = 1
+            opts.inter_op_num_threads = 1
+            opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+            logger.info(f"Loading INT8 CLIP ViT-B/32 ONNX session from {ONNX_MODEL_PATH}...")
+            session = ort.InferenceSession(
+                ONNX_MODEL_PATH,
+                sess_options=opts,
+                providers=["CPUExecutionProvider"]
+            )
+            _onnx_session = session
+            _model_loaded = True
+            _model_loading = False
+            _model_error = None
+            logger.info("ONNX INT8 CLIP ViT-B/32 model successfully loaded and ready.")
+            return _onnx_session
+        except Exception as e:
+            err_msg = f"Failed to initialize ONNX Runtime session: {e}"
+            logger.error(err_msg)
+            _onnx_session = None
+            _model_loaded = False
+            _model_loading = False
+            _model_error = str(e)
+            return None
+
+def start_background_model_loader():
+    """
+    Start asynchronous background thread to load the ONNX model at boot.
+    Allows Uvicorn to bind immediately to 0.0.0.0:$PORT so the health check passes immediately.
+    """
+    if _model_loaded or _model_loading:
+        return
+    thread = threading.Thread(target=load_onnx_model, name="ONNXModelLoader", daemon=True)
+    thread.start()
+
+def _preprocess_image_for_clip(image_input: Any) -> np.ndarray:
+    """
+    Standard CLIP ViT-B/32 image preprocessor using pure PIL + NumPy.
+    1. Convert input to RGB PIL Image.
+    2. Resize shortest edge to 224 with bicubic interpolation.
+    3. Center crop 224x224.
+    4. Rescale to [0, 1] and normalize with CLIP mean and std.
+    5. Transpose to CHW (1, 3, 224, 224) float32 tensor.
+    """
+    # 1. Standardize to PIL Image
     if isinstance(image_input, Image.Image):
-        return image_input.convert("RGB")
-
-    if isinstance(image_input, np.ndarray):
+        pil_img = image_input.convert("RGB")
+    elif isinstance(image_input, np.ndarray):
         if len(image_input.shape) == 2:
-            return Image.fromarray(image_input).convert("RGB")
+            pil_img = Image.fromarray(image_input).convert("RGB")
         elif len(image_input.shape) == 3:
-            # OpenCV BGR to RGB
+            # OpenCV BGR -> RGB
             if image_input.shape[2] == 3:
                 rgb_arr = image_input[:, :, ::-1]
-                return Image.fromarray(rgb_arr).convert("RGB")
-            elif image_input.shape[2] == 4:
-                return Image.fromarray(image_input).convert("RGB")
-        return Image.fromarray(image_input).convert("RGB")
-
-    if isinstance(image_input, bytes):
-        return Image.open(io.BytesIO(image_input)).convert("RGB")
-
-    if isinstance(image_input, str):
-        # 1. Check if it's a file path on disk
+                pil_img = Image.fromarray(rgb_arr).convert("RGB")
+            else:
+                pil_img = Image.fromarray(image_input).convert("RGB")
+        else:
+            raise ValueError(f"Invalid numpy array shape: {image_input.shape}")
+    elif isinstance(image_input, bytes):
+        pil_img = Image.open(io.BytesIO(image_input)).convert("RGB")
+    elif isinstance(image_input, str):
         if os.path.exists(image_input) and os.path.isfile(image_input):
-            return Image.open(image_input).convert("RGB")
+            pil_img = Image.open(image_input).convert("RGB")
+        else:
+            raw_b64 = image_input
+            if image_input.startswith("data:image"):
+                parts = image_input.split(",", 1)
+                if len(parts) == 2:
+                    raw_b64 = parts[1]
+            try:
+                image_bytes = base64.b64decode(raw_b64)
+                pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            except Exception as e:
+                raise ValueError(f"Failed to decode base64 image string: {e}")
+    else:
+        raise TypeError(f"Unsupported image input type: {type(image_input)}")
 
-        # 2. Check if it's a data URL (e.g. data:image/jpeg;base64,...)
-        raw_b64 = image_input
-        if image_input.startswith("data:image"):
-            parts = image_input.split(",", 1)
-            if len(parts) == 2:
-                raw_b64 = parts[1]
+    if pil_img.width < 10 or pil_img.height < 10:
+        raise ValueError(f"Image too small: {pil_img.width}x{pil_img.height}")
 
-        # 3. Decode base64
-        try:
-            image_bytes = base64.b64decode(raw_b64)
-            return Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except Exception as e:
-            raise ValueError(f"Failed to decode base64 image string: {e}")
+    # 2. Resize shortest dimension to 224 (Bicubic)
+    w, h = pil_img.size
+    if w < h:
+        new_w = 224
+        new_h = int(round(h * (224.0 / w)))
+    else:
+        new_h = 224
+        new_w = int(round(w * (224.0 / h)))
 
-    raise TypeError(f"Unsupported image input type: {type(image_input)}")
+    resized = pil_img.resize((new_w, new_h), resample=Image.BICUBIC)
+
+    # 3. Center Crop 224x224
+    left = (new_w - 224) // 2
+    top = (new_h - 224) // 2
+    right = left + 224
+    bottom = top + 224
+    cropped = resized.crop((left, top, right, bottom))
+
+    # 4. Normalize & Transpose
+    arr = np.array(cropped, dtype=np.float32) / 255.0
+    normalized = (arr - CLIP_MEAN) / CLIP_STD
+    chw = np.transpose(normalized, (2, 0, 1))
+    batched = np.expand_dims(chw, axis=0).astype(np.float32)
+
+    return batched
 
 def get_embedding(image: Any) -> List[float]:
     """
-    Unified embedding function used everywhere (360 scan enrollment AND cart-camera recognition).
-    Extracts a 512-dimensional L2-normalized vector using CLIP ViT-B/32 or high-resolution perceptual features.
+    Unified CLIP ViT-B/32 embedding extraction function.
+    Extracts a 512-dimensional L2-normalized vector using ONNX INT8 vision model.
+    NO silent fallback to fake vectors: raises RuntimeError if model is unavailable.
     """
-    pil_image = _preprocess_image_input(image)
+    session = load_onnx_model()
+    if session is None:
+        raise RuntimeError(
+            "AI Vision Model Unavailable: ONNX INT8 CLIP model is not loaded. "
+            "Please ensure `download_model.py` ran at build time."
+        )
 
-    # Validate image dimensions
-    if pil_image.width < 10 or pil_image.height < 10:
-        raise ValueError(f"Image too small for embedding extraction: {pil_image.width}x{pil_image.height}")
+    # Preprocess image into (1, 3, 224, 224) float32 tensor
+    tensor = _preprocess_image_for_clip(image)
 
-    if HAS_TORCH_CLIP:
-        try:
-            proc, model = _load_model()
-            if proc is not None and model is not None:
-                with torch.no_grad():
-                    inputs = proc(images=pil_image, return_tensors="pt")
-                    outputs = model(**inputs)
-                    image_embeds = outputs.image_embeds
-                    norm = image_embeds.norm(p=2, dim=-1, keepdim=True)
-                    if norm > 0:
-                        image_embeds = image_embeds / norm
-                    return image_embeds.cpu().numpy()[0].tolist()
-        except Exception as e:
-            logger.warning(f"PyTorch CLIP extraction failed ({e}), using perceptual vector.")
+    # Run ONNX inference
+    input_name = session.get_inputs()[0].name
+    outputs = session.run(None, {input_name: tensor})
 
-    # High-fidelity 512-dimensional perceptual visual feature vector using PIL + NumPy
-    resized = pil_image.resize((32, 32))
-    arr = np.array(resized, dtype=np.float32) / 255.0
-    reshaped = arr.reshape(-1)
-    # Average pooling across 6-element chunks (3072 / 6 = 512 dimensions)
-    vec = reshaped[:3072].reshape(512, 6).mean(axis=1)
-    norm = np.linalg.norm(vec)
+    # Output is (1, 512) image embedding
+    raw_vector = np.array(outputs[0][0], dtype=np.float32)
+
+    # L2 Normalization for Cosine Similarity
+    norm = np.linalg.norm(raw_vector)
     if norm > 0:
-        vec = vec / norm
-    return vec.tolist()
+        normalized_vector = raw_vector / norm
+    else:
+        normalized_vector = raw_vector
+
+    return normalized_vector.tolist()
 
 class VisualFeatureExtractor:
-    """Wrapper class maintaining backward compatibility while using the unified get_embedding model."""
+    """Wrapper maintaining backward compatibility while enforcing strict ONNX INT8 inference."""
     def __init__(self, embedding_dim: int = VECTOR_DIM):
         self.embedding_dim = embedding_dim
         self.model_name = MODEL_NAME
@@ -158,19 +219,5 @@ class VisualFeatureExtractor:
 
     def extract_embedding(self, image_input: Any) -> List[float]:
         return get_embedding(image_input)
-
-    get_embedding = extract_embedding
-
-    @staticmethod
-    def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
-        """Compute cosine similarity between two normalized vectors."""
-        a = np.array(vec_a, dtype=np.float32)
-        b = np.array(vec_b, dtype=np.float32)
-        dot = float(np.dot(a, b))
-        norm_a = float(np.linalg.norm(a))
-        norm_b = float(np.linalg.norm(b))
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return float(dot / (norm_a * norm_b))
 
 feature_extractor = VisualFeatureExtractor()

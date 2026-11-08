@@ -33,12 +33,6 @@ export const AdminLogin: React.FC<Props> = ({ onLoginSuccess }) => {
     }
   };
 
-  const fillQuickCreds = (e: string, p: string) => {
-    setEmail(e);
-    setPassword(p);
-    setError(null);
-  };
-
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="bg-[#131B2E] border border-slate-800 max-w-md w-full rounded-3xl p-8 shadow-2xl space-y-6">
@@ -113,30 +107,8 @@ export const AdminLogin: React.FC<Props> = ({ onLoginSuccess }) => {
             <ArrowRight className="w-4 h-4" />
           </button>
         </form>
-
-        {/* Quick Demo Credentials */}
-        <div className="pt-4 border-t border-slate-800 text-center space-y-2">
-          <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider block">
-            Demo Credentials (1-Click Fill)
-          </span>
-          <div className="flex flex-wrap gap-2 justify-center">
-            <button
-              type="button"
-              onClick={() => fillQuickCreds('admin@smartcart.ai', 'Admin@123')}
-              className="text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors"
-            >
-              Admin: admin@smartcart.ai
-            </button>
-            <button
-              type="button"
-              onClick={() => fillQuickCreds('admin@supermart.com', 'admin123')}
-              className="text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-700 transition-colors"
-            >
-              Admin: admin@supermart.com
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   );
 };
+

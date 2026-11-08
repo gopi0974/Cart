@@ -1,4 +1,6 @@
+import os
 import json
+import logging
 import hashlib
 import hmac
 from sqlalchemy.orm import Session
@@ -9,41 +11,71 @@ from app.models.product import Product, ProductImage, ProductEmbedding
 from app.models.transaction import ModelVersion
 from app.utils.security import hash_password, verify_password
 
+logger = logging.getLogger("smartcart.seed")
+
 def generate_cart_signature(cart_number: str, qr_token: str) -> str:
     """Generate deterministic HMAC signature for cart connect link."""
     msg = f"{cart_number}:{qr_token}".encode("utf-8")
     return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
+def clean_fake_vectors(db: Session):
+    """Purge all placeholder/dummy vectors from database and reset products to needs re-enrollment."""
+    try:
+        # Delete embeddings with placeholder or dinov2 model tags
+        deleted_count = db.query(ProductEmbedding).filter(
+            (ProductEmbedding.model_version.in_(["v1.0.0-dinov2", "placeholder"])) |
+            (ProductEmbedding.embedding_json.like("%0.05, 0.05, 0.05%"))
+        ).delete(synchronize_session=False)
+
+        if deleted_count > 0:
+            db.commit()
+            logger.info(f"Purged {deleted_count} fake/placeholder vectors from ProductEmbedding table.")
+    except Exception as e:
+        logger.warning(f"Could not purge fake vectors: {e}")
+        db.rollback()
+
 def seed_database(db: Session):
-    """Seed production database: default admin accounts, 3 test carts, sample products, and AI model registry."""
-    # 1. Seed & Ensure Admin Accounts
-    default_admins = [
-        ("admin@smartcart.ai", "Admin@123", "Sarah Jenkins (Store Admin)"),
-        ("admin@supermart.com", "admin123", "Store SuperAdmin"),
-    ]
-    for email, pwd, full_name in default_admins:
-        user = db.query(User).filter(User.email.ilike(email)).first()
-        if not user:
-            user = User(
-                email=email,
-                password_hash=hash_password(pwd),
-                full_name=full_name,
+    """
+    Seed production database:
+    1. Initial admin created ONLY from ADMIN_EMAIL & ADMIN_PASSWORD environment variables.
+    2. Carts seeded only if Cart table is empty.
+    3. Products seeded only if Product table is empty (with zero fake vectors).
+    4. Purges all historical fake/placeholder vectors.
+    """
+    # Clean out any previously stored fake vectors
+    clean_fake_vectors(db)
+
+    # 1. Seed Initial Admin Account from Environment Variables
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+
+    if admin_email and admin_password:
+        clean_email = admin_email.strip().lower()
+        existing_user = db.query(User).filter(User.email.ilike(clean_email)).first()
+        if not existing_user:
+            new_admin = User(
+                email=clean_email,
+                password_hash=hash_password(admin_password.strip()),
+                full_name="Store Administrator",
                 role="ADMIN",
                 is_active=True
             )
-            db.add(user)
+            db.add(new_admin)
+            db.commit()
+            logger.info(f"Initial administrator account '{clean_email}' provisioned from environment variables.")
         else:
-            user.role = "ADMIN"
-            user.is_active = True
-            try:
-                valid = verify_password(pwd, user.password_hash)
-            except Exception:
-                valid = False
-            if not valid:
-                user.password_hash = hash_password(pwd)
-    db.commit()
+            # Do NOT overwrite existing password! Maintain credential integrity.
+            if not existing_user.is_active:
+                existing_user.is_active = True
+                db.commit()
+    else:
+        if db.query(User).count() == 0:
+            logger.warning(
+                "No ADMIN_EMAIL / ADMIN_PASSWORD environment variables found, and no users exist in database. "
+                "Set ADMIN_EMAIL and ADMIN_PASSWORD in Render/environment to bootstrap admin access."
+            )
 
-    # 2. Seed 3 Test Carts (CART-001, CART-002, CART-003)
+    # 2. Seed 3 Test Carts (CART-001, CART-002, CART-003) only if table is empty
     if db.query(Cart).count() == 0:
         test_carts = [
             ("CART-001", "CART001_SECRET_TOKEN_2026"),
@@ -66,15 +98,15 @@ def seed_database(db: Session):
                     signed_connect_url=signed_url,
                     status="IDLE",
                     battery_level=100,
-                    camera_status="ONLINE"
+                    camera_status="OFFLINE"  # Start OFFLINE until real camera connects
                 )
             )
         db.add_all(carts)
         db.commit()
+        logger.info("Seeded 3 initial smart cart records with OFFLINE camera status.")
 
-    # 3. Seed Products
+    # 3. Seed Products only if catalog is completely empty
     if db.query(Product).count() == 0:
-
         sample_products = [
             {
                 "barcode": "8901262010053",
@@ -198,47 +230,10 @@ def seed_database(db: Session):
             }
         ]
 
-        # Seed products and default multi-angle 360 placeholders
-        angles = ["FRONT", "BACK", "LEFT", "RIGHT", "TOP", "BOTTOM", "LABEL_CLOSEUP"]
+        # Seed products with NO fake embeddings - requires real 360 scan enrollment
         for p_data in sample_products:
             prod = Product(**p_data)
             db.add(prod)
-            db.flush()
-
-            # Add images for angles
-            for ang in angles:
-                img = ProductImage(
-                    product_id=prod.id,
-                    image_url=prod.primary_image_url,
-                    angle_tag=ang,
-                    is_360_scan=True
-                )
-                db.add(img)
-
-                # Seed mock visual embedding (512-dim normalized vector placeholder)
-                emb_vector = [0.05] * 512
-                emb = ProductEmbedding(
-                    product_id=prod.id,
-                    barcode=prod.barcode,
-                    angle_tag=ang,
-                    embedding_json=json.dumps(emb_vector),
-                    embedding_vector=emb_vector,
-                    model_version="v1.0.0-dinov2"
-                )
-                db.add(emb)
 
         db.commit()
-
-    # 4. Seed Model Version
-    if db.query(ModelVersion).count() == 0:
-        model_v = ModelVersion(
-            version_tag="v1.0.0-dinov2",
-            accuracy=0.984,
-            false_positive_rate=0.008,
-            false_negative_rate=0.008,
-            confidence_threshold=0.85,
-            is_active=True,
-            notes="Foundation model combining YOLOv8n cart entrance tracking with DINOv2 visual signatures."
-        )
-        db.add(model_v)
-        db.commit()
+        logger.info(f"Seeded {len(sample_products)} clean catalog products (embeddings pending 360 scan).")

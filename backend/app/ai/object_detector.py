@@ -15,82 +15,14 @@ except Exception:
     cv2 = None
     HAS_CV2 = False
 
-try:
-    from ultralytics import YOLO
-    HAS_YOLO = True
-except Exception:
-    YOLO = None
-    HAS_YOLO = False
-
 class ObjectDetector:
     """
-    Real-time vision localization using YOLOv8n and background motion differencing.
-    Locates hand/person occlusion (COCO class 0) to ensure image stabilization before judging,
-    and isolates placed objects for visual embedding matching.
+    Real-time vision localization using OpenCV background differencing and foreground bounding boxes.
+    Hand and face presence are tracked via MediaPipe in the browser and passed via flags.
+    Zero PyTorch or Ultralytics dependencies required on backend.
     """
     def __init__(self):
-        self.model = None
-        self.model_path = os.path.join(settings.MODELS_DIR, "yolov8n.pt")
-        if HAS_YOLO:
-            try:
-                if not os.path.exists(self.model_path):
-                    logger.info("YOLOv8n weights not found in models_storage. Downloading yolov8n.pt...")
-                    model = YOLO("yolov8n.pt")
-                    if os.path.exists("yolov8n.pt"):
-                        import shutil
-                        shutil.move("yolov8n.pt", self.model_path)
-                    self.model = model
-                else:
-                    self.model = YOLO(self.model_path)
-                logger.info(f"YOLOv8n object detector loaded successfully from {self.model_path}")
-            except Exception as e:
-                logger.warning(f"Could not load YOLO model: {e}. Using motion differencing.")
-                self.model = None
-
-    def detect(self, image_bgr: np.ndarray) -> Dict[str, Any]:
-        """
-        Run YOLOv8n inference on image if available.
-        Returns detected hands/persons and object bounding boxes.
-        """
-        if self.model is not None:
-            try:
-                results = self.model(image_bgr, verbose=False)
-                boxes = results[0].boxes
-
-                hand_detected = False
-                hand_boxes = []
-                object_boxes = []
-
-                for b in boxes:
-                    cls_id = int(b.cls[0])
-                    conf = float(b.conf[0])
-                    xyxy = [int(v) for v in b.xyxy[0].tolist()]
-
-                    # Class 0 in COCO is person (hands, arms, shopper reaching in)
-                    if cls_id == 0 and conf > 0.35:
-                        hand_detected = True
-                        hand_boxes.append({"box": xyxy, "conf": conf, "label": "person_hand"})
-                    elif conf > 0.20:
-                        cls_name = self.model.names.get(cls_id, "object")
-                        object_boxes.append({"box": xyxy, "conf": conf, "label": cls_name})
-
-                return {
-                    "hand_detected": hand_detected,
-                    "hand_boxes": hand_boxes,
-                    "object_boxes": object_boxes,
-                    "total_detections": len(boxes)
-                }
-            except Exception as e:
-                logger.warning(f"YOLO detection exception: {e}")
-
-        # Fallback when YOLO is not installed
-        h, w = image_bgr.shape[:2] if hasattr(image_bgr, "shape") else (480, 640)
-        return {
-            "hand_detected": False,
-            "hand_boxes": [],
-            "object_boxes": [{"box": [0, 0, w, h], "conf": 0.85, "label": "object"}],
-            "total_detections": 1
-        }
+        pass
 
     def compute_motion_box(
         self,
@@ -99,14 +31,13 @@ class ObjectDetector:
         min_area: int = 1200
     ) -> Optional[Tuple[int, int, int, int]]:
         """
-        Compute bounding box of pixel change against reference cart background.
-        Used to pinpoint grocery items that COCO YOLO does not natively recognize.
+        Compute bounding box of pixel difference against reference cart background.
+        Used to pinpoint grocery items placed into or removed from the cart.
         """
         if ref_bgr is None or curr_bgr is None or not HAS_CV2:
             return None
 
         try:
-            # Ensure matching shapes
             if ref_bgr.shape != curr_bgr.shape:
                 ref_resized = cv2.resize(ref_bgr, (curr_bgr.shape[1], curr_bgr.shape[0]))
             else:
@@ -132,7 +63,6 @@ class ObjectDetector:
             if not valid_boxes:
                 return None
 
-            # Merge bounding boxes
             min_x = min(b[0] for b in valid_boxes)
             min_y = min(b[1] for b in valid_boxes)
             max_x = max(b[2] for b in valid_boxes)
@@ -203,7 +133,6 @@ class ObjectDetector:
                 )
             cv2.imwrite(filepath, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
         else:
-            # Fallback pure PIL
             if isinstance(image_bgr, np.ndarray):
                 pil_img = Image.fromarray(image_bgr)
             elif isinstance(image_bgr, Image.Image):

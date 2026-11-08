@@ -10,12 +10,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR.parent / ".env")
 
-DEFAULT_DATABASE_URL = "postgresql://postgres:Cart0974Gopi@db.hpuktolsnetlwotihkap.supabase.co:5432/postgres?sslmode=require"
-
-def _normalize_db_url(url: Optional[str]) -> str:
-    """Normalize SQLAlchemy database URL for PostgreSQL/Supabase/Neon/Render."""
+def _normalize_db_url(url: Optional[str]) -> Optional[str]:
+    """Normalize SQLAlchemy database URL for PostgreSQL / Supabase / Neon / Render."""
     if not url or not str(url).strip():
-        return DEFAULT_DATABASE_URL
+        return None
     clean_url = str(url).strip().strip("'\"")
     if clean_url.startswith("postgres://"):
         clean_url = clean_url.replace("postgres://", "postgresql://", 1)
@@ -28,6 +26,10 @@ class Settings(BaseModel):
     PROJECT_NAME: str = os.getenv("PROJECT_NAME", "SmartCart AI - Autonomous Retail Backend")
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
+    
+    # Initial Admin Bootstrap (Environment Variables Only)
+    ADMIN_EMAIL: Optional[str] = os.getenv("ADMIN_EMAIL")
+    ADMIN_PASSWORD: Optional[str] = os.getenv("ADMIN_PASSWORD")
     
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY", "smartcart-super-secret-key-change-in-production-2026")
@@ -42,14 +44,15 @@ class Settings(BaseModel):
     API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")
     
-    # Database (Hosted PostgreSQL on Supabase/Neon, or local SQLite)
-    DATABASE_URL: str = _normalize_db_url(raw_db_url)
+    # Database (PostgreSQL with Supabase connection pooler / pgvector)
+    DATABASE_URL: Optional[str] = _normalize_db_url(raw_db_url)
     
     # Storage Paths
     UPLOADS_DIR: Path = BASE_DIR / "uploads"
     EVIDENCE_DIR: Path = BASE_DIR / "uploads" / "evidence"
     CATALOG_DIR: Path = BASE_DIR / "uploads" / "catalog"
     MODELS_DIR: Path = BASE_DIR / "models_storage"
+    CLIP_MODEL_PATH: Path = BASE_DIR / "models_storage" / "clip_vision_int8.onnx"
     
     # AI / Vision Thresholds
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))

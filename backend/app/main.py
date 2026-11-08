@@ -1,15 +1,23 @@
+import os
+import uuid
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.database import init_db, SessionLocal
+from app.database import init_db, SessionLocal, check_db_health
 from app.utils.seed_data import seed_database
 from app.websocket.manager import ws_manager
 from app.websocket.device_handler import handle_device_websocket
+from app.ai.feature_extractor import (
+    start_background_model_loader,
+    is_model_ready,
+    MODEL_NAME,
+    VECTOR_DIM
+)
 
 # API Routers
 from app.api.v1.auth import router as auth_router
@@ -23,36 +31,39 @@ logger = logging.getLogger("smartcart")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize database tables and populate catalog if empty
-    logger.info("Initializing database connection...")
-    watchdog_task = None
-    try:
-        init_db()
-        db = SessionLocal()
+    logger.info("Initializing SmartCart AI backend...")
+
+    # 1. Start ONNX INT8 CLIP model loading in background thread (port opens immediately)
+    start_background_model_loader()
+
+    # 2. Initialize database schemas and verify connection
+    db_healthy = check_db_health()
+    if db_healthy:
         try:
-            try:
-                seed_database(db)
-                logger.info("Database schemas and seed records verified.")
-            except Exception as se:
-                logger.warning(f"Database seeding note: {se}")
+            init_db()
+            if SessionLocal:
+                db = SessionLocal()
+                try:
+                    seed_database(db)
+                    try:
+                        from app.ai.vector_store import VectorStoreMatcher
+                        VectorStoreMatcher.sync_to_disk(db)
+                    except Exception as ve:
+                        logger.warning(f"Vector disk cache sync skipped: {ve}")
+                finally:
+                    db.close()
+        except Exception as e:
+            logger.error(f"Database initialization error: {e}")
+    else:
+        logger.warning("Database unreachable at boot. Health check will report database_ok=false.")
 
-            try:
-                from app.ai.vector_store import VectorStoreMatcher
-                VectorStoreMatcher.sync_to_disk(db)
-                logger.info("Database initialized, catalog verified, and persistent vector index synced.")
-            except Exception as ve:
-                logger.warning(f"Vector index sync skipped: {ve}")
+    # 3. Start background camera watchdog task (10s offline timeout)
+    import asyncio
+    from app.services.device_watchdog import run_camera_watchdog
+    watchdog_task = asyncio.create_task(run_camera_watchdog())
 
-        finally:
-            db.close()
-
-        # Start background camera watchdog task (monitors hardware heartbeats & 10s offline timeout)
-        import asyncio
-        from app.services.device_watchdog import run_camera_watchdog
-        watchdog_task = asyncio.create_task(run_camera_watchdog())
-    except Exception as e:
-        logger.error(f"Startup Database/Watchdog Warning: {e}. App will continue serving requests.")
     yield
+
     if watchdog_task:
         watchdog_task.cancel()
     logger.info("Shutting down SmartCart AI backend...")
@@ -64,14 +75,24 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Enable CORS for local dev frontends
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Robust CORS Configuration: Allow frontend origins and local development
+cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+if not cors_origins or "*" in cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^https://.*\.vercel\.app$|^https://.*\.onrender\.com$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Mount static uploads directory for images & snapshots
 app.mount("/uploads", StaticFiles(directory=str(settings.UPLOADS_DIR)), name="uploads")
@@ -83,6 +104,84 @@ app.include_router(products_router, prefix=settings.API_V1_STR)
 app.include_router(admin_router, prefix=settings.API_V1_STR)
 app.include_router(vision_router, prefix=settings.API_V1_STR)
 
+def _get_health_data():
+    """Compute real system health metrics across database, AI model, and filesystem."""
+    db_ok = check_db_health()
+    model_ok = is_model_ready()
+
+    # Verify storage writeability
+    storage_ok = False
+    try:
+        test_file = settings.EVIDENCE_DIR / f".probe_{uuid.uuid4().hex[:6]}"
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        storage_ok = True
+    except Exception:
+        storage_ok = False
+
+    # Count real stored vectors and enrolled products from database if db is reachable
+    vectors_count = 0
+    products_enrolled = 0
+    if db_ok and SessionLocal:
+        try:
+            db = SessionLocal()
+            try:
+                from app.models.product import ProductEmbedding, Product
+                vectors_count = db.query(ProductEmbedding).count()
+                # Count distinct products that have registered embeddings
+                from sqlalchemy import func
+                products_enrolled = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
+            finally:
+                db.close()
+        except Exception:
+            pass
+
+    # Read real resident memory (RSS in MB)
+    memory_rss_mb = 0.0
+    try:
+        import psutil
+        memory_rss_mb = round(psutil.Process().memory_info().rss / (1024 * 1024), 1)
+    except Exception:
+        pass
+
+    overall_status = "HEALTHY"
+    if not db_ok:
+        overall_status = "UNHEALTHY"
+    elif not model_ok:
+        overall_status = "STARTING"
+    elif not storage_ok:
+        overall_status = "DEGRADED"
+
+    return {
+        "status": overall_status,
+        "model_loaded": model_ok,
+        "model_name": MODEL_NAME,
+        "vector_dimension": VECTOR_DIM,
+        "database_ok": db_ok,
+        "storage_ok": storage_ok,
+        "vectors_count": vectors_count,
+        "products_enrolled": products_enrolled,
+        "memory_rss_mb": memory_rss_mb,
+    }
+
+@app.get("/health")
+def health_check(response: Response):
+    """
+    Comprehensive system health check:
+    Reports live status, model state, database connectivity, and vector inventory.
+    Returns HTTP 200 when healthy/starting, HTTP 503 when critical DB service is down.
+    """
+    data = _get_health_data()
+    if not data["database_ok"]:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return data
+
+@app.get(f"{settings.API_V1_STR}/health")
+def api_health_check(response: Response):
+    """API v1 health route alias."""
+    return health_check(response)
+
 # Real-Time WebSocket Endpoints
 @app.websocket("/ws/cart/{cart_id}")
 async def websocket_cart_endpoint(websocket: WebSocket, cart_id: str):
@@ -90,9 +189,7 @@ async def websocket_cart_endpoint(websocket: WebSocket, cart_id: str):
     await ws_manager.connect_cart(websocket, cart_id)
     try:
         while True:
-            # Keep connection alive & handle incoming pings
             data = await websocket.receive_text()
-            # Echo or handle client pings
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
@@ -120,8 +217,7 @@ async def websocket_admin_endpoint(websocket: WebSocket):
 async def websocket_device_endpoint(websocket: WebSocket, token: Optional[str] = None):
     """
     Dedicated authenticated hardware / webcam streaming channel.
-    Authenticates via device token, derives cart context server-side,
-    and supports ESP32-CAM and Laptop Webcam frame streams.
+    Authenticates via device token, derives cart context server-side.
     """
     await handle_device_websocket(websocket, token=token)
 
@@ -131,9 +227,10 @@ def root():
         "system": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "status": "ONLINE",
-        "docs_url": "/docs"
+        "docs_url": "/docs",
+        "health_url": "/health"
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)

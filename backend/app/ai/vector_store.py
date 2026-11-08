@@ -115,7 +115,7 @@ class VectorStoreMatcher:
     ) -> List[Dict[str, Any]]:
         """Search all registered product embeddings and return top-k candidates with similarity score."""
         # 1. Native PostgreSQL pgvector cosine distance search
-        if engine.name == "postgresql" and hasattr(ProductEmbedding, "embedding_vector"):
+        if engine is not None and getattr(engine, "name", "") == "postgresql" and hasattr(ProductEmbedding, "embedding_vector"):
             try:
                 nearest = (
                     db.query(ProductEmbedding, ProductEmbedding.embedding_vector.cosine_distance(query_vector).label("distance"))

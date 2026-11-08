@@ -46,60 +46,34 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
     clean_password = (login_data.password or "").strip()
 
     user = db.query(User).filter(User.email.ilike(clean_email)).first()
-    
-    # Auto-provision default admin if database is completely fresh or newly booted
-    if not user and clean_email in ["admin@smartcart.ai", "admin@supermart.com"]:
-        if clean_password in ["Admin@123", "admin123", "Admin123"]:
-            user = User(
-                email=clean_email,
-                password_hash=hash_password(clean_password),
-                full_name="Sarah Jenkins (Store Admin)" if "smartcart" in clean_email else "Store SuperAdmin",
-                role="ADMIN",
-                is_active=True
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
-    
-    is_valid = False
+
     try:
         is_valid = verify_password(clean_password, user.password_hash)
     except Exception as e:
         logger.warning(f"Password verification exception for {user.email}: {e}")
         is_valid = False
 
-    # Demo admin resilience: accept standard demo passwords (Admin@123 or admin123) and self-heal hash
-    if not is_valid and clean_email in ["admin@smartcart.ai", "admin@supermart.com"]:
-        if clean_password in ["Admin@123", "admin123", "Admin123"]:
-            is_valid = True
-            try:
-                user.password_hash = hash_password(clean_password)
-                user.is_active = True
-                db.commit()
-            except Exception:
-                pass
-
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
-    
+
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Staff account is disabled. Contact store administrator.",
         )
-    
+
     access_token = create_access_token(data={"sub": user.email, "role": user.role})
     return Token(
         access_token=access_token,
+        token_type="bearer",
         role=user.role,
         full_name=user.full_name,
         email=user.email

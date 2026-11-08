@@ -41,23 +41,22 @@ async def process_camera_frame(
     cart_id: str,
     cart_number: str,
     image_data: Any,
-    websocket: WebSocket
+    websocket: WebSocket,
+    hand_present: bool = False
 ):
     """
     Process incoming camera frame from cart device (Laptop webcam or ESP32-CAM).
     Derives cart context solely from authenticated token.
-    Uses YOLOv8n to locate hands and objects, waits for hand withdrawal and frame stabilization (~1s),
-    and executes tiered CLIP cosine verification against claimed or unscanned items.
+    Tracks hand presence sent from client MediaPipe, waits for hand withdrawal and frame stabilization (~1s),
+    and executes tiered ONNX INT8 CLIP cosine verification against claimed or unscanned items.
     """
     try:
         img_bgr, _ = verification_engine._decode_to_cv2(image_data)
         tracker = get_tracker(cart_id)
         now = time.time()
 
-        # 1. Detect hands and persons via YOLOv8n (COCO class 0)
-        detection = object_detector.detect(img_bgr)
-
-        if detection["hand_detected"]:
+        # 1. Hand Occlusion Gate: Wait for hand to withdraw before judging
+        if hand_present:
             tracker.hand_in_frame = True
             tracker.stable_frame_count = 0
             await websocket.send_json({
@@ -67,9 +66,8 @@ async def process_camera_frame(
             })
             return
 
-        # 2. Hand is not currently in frame - check stabilization
+        # 2. Hand just exited - begin stabilization period
         if tracker.hand_in_frame:
-            # Hand just exited
             tracker.hand_in_frame = False
             tracker.hand_left_time = now
             tracker.stable_frame_count = 1
@@ -381,8 +379,9 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
 
                 elif event_type == "frame":
                     frame_data = payload.get("data") or payload.get("image")
+                    hand_present = bool(payload.get("hand_present", False))
                     if frame_data:
-                        await process_camera_frame(db, cart_id, cart_number, frame_data, websocket)
+                        await process_camera_frame(db, cart_id, cart_number, frame_data, websocket, hand_present=hand_present)
 
                 elif event_type == "motion":
                     state = payload.get("state")

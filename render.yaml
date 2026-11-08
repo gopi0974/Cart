@@ -3,19 +3,25 @@ services:
     name: smartcart-backend
     runtime: python
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python download_model.py
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     plan: free
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.8
       - key: DATABASE_URL
-        value: postgresql://postgres:Cart0974Gopi@db.hpuktolsnetlwotihkap.supabase.co:5432/postgres?sslmode=require
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: QR_SIGNING_SECRET
         generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
       - key: BASE_URL
         sync: false
       - key: CORS_ORIGINS
-        value: "*"
+        sync: false
+
