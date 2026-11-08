@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 import hmac
 import hashlib
 import secrets
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
@@ -121,13 +121,13 @@ class SessionService:
 
     @staticmethod
     def get_session_details(db: Session, session_id: str) -> Dict[str, Any]:
-        """Fetch complete real-time session state, items, and active warnings."""
-        session = db.query(CartSession).filter(CartSession.id == session_id).first()
+        """Fetch complete real-time session state, items, and active warnings (N+1 eliminated via joinedload)."""
+        session = db.query(CartSession).options(joinedload(CartSession.cart)).filter(CartSession.id == session_id).first()
         if not session:
             raise ValueError("Session not found")
 
         cart = session.cart
-        items = db.query(CartItem).filter(
+        items = db.query(CartItem).options(joinedload(CartItem.product)).filter(
             CartItem.session_id == session.id,
             CartItem.status != "REMOVED"
         ).order_by(CartItem.scanned_at.desc()).all()

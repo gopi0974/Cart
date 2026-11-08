@@ -22,11 +22,13 @@ if settings.DATABASE_URL:
     }
 
     if not is_sqlite:
+        # Optimized connection pool configuration for Supabase session pooler
         engine_kwargs.update({
             "pool_size": 5,
-            "max_overflow": 10,
+            "max_overflow": 5,
             "pool_recycle": 300,
             "pool_pre_ping": True,
+            "pool_timeout": 20,
         })
 
     try:

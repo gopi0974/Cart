@@ -10,10 +10,10 @@ class CartSession(Base):
     __tablename__ = "cart_sessions"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    cart_id = Column(String(36), ForeignKey("carts.id"), nullable=False)
+    cart_id = Column(String(36), ForeignKey("carts.id"), nullable=False, index=True)
     session_token = Column(String(64), nullable=True, index=True, default=lambda: secrets.token_urlsafe(32))
     customer_phone = Column(String(20), nullable=True)
-    status = Column(String(20), nullable=False, default="ACTIVE")  # ACTIVE, COMPLETED, ABANDONED
+    status = Column(String(20), nullable=False, default="ACTIVE", index=True)  # ACTIVE, COMPLETED, ABANDONED
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
     
@@ -33,8 +33,8 @@ class CartItem(Base):
     __tablename__ = "cart_items"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    session_id = Column(String(36), ForeignKey("cart_sessions.id"), nullable=False)
-    product_id = Column(String(36), ForeignKey("products.id"), nullable=False)
+    session_id = Column(String(36), ForeignKey("cart_sessions.id"), nullable=False, index=True)
+    product_id = Column(String(36), ForeignKey("products.id"), nullable=False, index=True)
     quantity = Column(Integer, default=1)
     unit_price = Column(Float, nullable=False)
     
@@ -43,7 +43,7 @@ class CartItem(Base):
     # WARNING_MISMATCH: AI camera detected different item than scanned
     # WARNING_UNSCANNED: Physical item placed without prior scan
     # REMOVED: Item taken out and confirmed removed
-    status = Column(String(30), nullable=False, default="PENDING")
+    status = Column(String(30), nullable=False, default="PENDING", index=True)
     
     scanned_at = Column(DateTime, default=datetime.utcnow)
     verified_at = Column(DateTime, nullable=True)

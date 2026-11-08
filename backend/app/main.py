@@ -1,9 +1,10 @@
 import os
 import uuid
+import time
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import init_db, SessionLocal, check_db_health, get_db
 from app.utils.seed_data import seed_database
+from app.utils.perf import reset_query_count, get_query_count, db_query_counter
 from app.websocket.manager import ws_manager
 from app.websocket.device_handler import handle_device_websocket
 from app.websocket.auth import authenticate_admin_ws, authenticate_cart_ws
@@ -96,6 +98,23 @@ else:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+# Performance Monitoring Middleware (Request Timing & Database Query Count)
+@app.middleware("http")
+async def performance_metrics_middleware(request: Request, call_next):
+    token = reset_query_count()
+    start_time = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        queries = get_query_count()
+        response.headers["X-Response-Time-Ms"] = f"{duration_ms:.2f}"
+        response.headers["X-DB-Queries"] = str(queries)
+        if duration_ms > 150 or request.url.path.startswith("/api/v1/"):
+            logger.info(f"[PERF] {request.method} {request.url.path} -> {response.status_code} ({duration_ms:.2f}ms, {queries} db queries)")
+        return response
+    finally:
+        db_query_counter.reset(token)
 
 # Mount static uploads directory for images & snapshots
 app.mount("/uploads", StaticFiles(directory=str(settings.UPLOADS_DIR)), name="uploads")

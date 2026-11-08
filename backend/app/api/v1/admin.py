@@ -2,7 +2,7 @@ from datetime import datetime, date
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from app.database import get_db
 from app.models.cart import Cart
@@ -32,20 +32,19 @@ def get_overview(db: Session = Depends(get_db)):
     active_carts = db.query(Cart).filter(Cart.status.in_(["ACTIVE", "ALERT"])).count()
     open_incidents = db.query(Alert).filter(Alert.status == "OPEN").count()
     
-    # Revenue today
+    # Revenue today (single aggregate query)
     today_start = datetime.combine(date.today(), datetime.min.time())
-    today_txs = db.query(Transaction).filter(
+    revenue_today = db.query(func.coalesce(func.sum(Transaction.amount), 0.0)).filter(
         Transaction.created_at >= today_start,
         Transaction.status == "SUCCESS"
-    ).all()
-    revenue_today = sum(tx.amount for tx in today_txs)
+    ).scalar() or 0.0
     
     # Active model accuracy
     active_model = db.query(ModelVersion).filter(ModelVersion.is_active == True).first()
     ai_accuracy = round(active_model.accuracy * 100, 1) if active_model else 98.4
 
-    # Latest 5 incidents
-    recent_alerts = db.query(Alert).order_by(Alert.created_at.desc()).limit(5).all()
+    # Latest 5 incidents (eager cart loading eliminates N+1 queries)
+    recent_alerts = db.query(Alert).options(joinedload(Alert.cart)).order_by(Alert.created_at.desc()).limit(5).all()
 
     return {
         "active_carts": active_carts,
@@ -441,13 +440,15 @@ async def update_cart_details(
 @router.get("/alerts", response_model=List[AlertResponse])
 def list_alerts(
     status: Optional[str] = Query(None, description="Filter by OPEN, RESOLVED, DISMISSED"),
+    limit: int = Query(100, ge=1, le=500, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
     db: Session = Depends(get_db)
 ):
-    """Retrieve security incidents and mismatch alerts."""
-    query = db.query(Alert)
+    """Retrieve security incidents and mismatch alerts with eager cart loading."""
+    query = db.query(Alert).options(joinedload(Alert.cart))
     if status and status != "ALL":
         query = query.filter(Alert.status == status)
-    alerts = query.order_by(Alert.created_at.desc()).all()
+    alerts = query.order_by(Alert.created_at.desc()).offset(offset).limit(limit).all()
     
     return [
         AlertResponse(
@@ -693,7 +694,7 @@ def get_session_items(session_id: str, db: Session = Depends(get_db)):
     if not session:
         raise HTTPException(status_code=404, detail="Cart session not found.")
     
-    items = db.query(CartItem).filter(CartItem.session_id == session.id).order_by(CartItem.scanned_at.desc()).all()
+    items = db.query(CartItem).options(joinedload(CartItem.product)).filter(CartItem.session_id == session.id).order_by(CartItem.scanned_at.desc()).all()
     res = []
     for itm in items:
         p = itm.product

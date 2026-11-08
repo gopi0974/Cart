@@ -13,6 +13,7 @@ from app.models.transaction import AuditLog
 from app.models.user import User
 from app.api.v1.auth import require_admin_or_manager
 from app.ai.vector_store import VectorStoreMatcher
+from app.utils.cache import catalog_cache
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, BulkUploadResponse
 
 router = APIRouter(prefix="/products", tags=["Product Catalog"])
@@ -21,21 +22,40 @@ router = APIRouter(prefix="/products", tags=["Product Catalog"])
 def list_products(
     search: Optional[str] = Query(None, description="Search by name, brand, or barcode"),
     category: Optional[str] = Query(None, description="Filter by category"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum products to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db)
 ):
-    """Retrieve catalog products with search and category filtering."""
-    query = db.query(Product).filter(Product.is_active == True)
+    """
+    Retrieve catalog products with search and category filtering.
+    N+1 queries eliminated via batch embedding lookup.
+    Static/default catalog results cached for 30s.
+    """
+    cache_key = f"prod_list:{search}:{category}:{limit}:{offset}"
+    if not search and (not category or category == "All"):
+        cached = catalog_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    query = db.query(Product).filter(Product.is_active == True, Product.is_deleted == False)
     if search:
         s = f"%{search}%"
         query = query.filter((Product.name.ilike(s)) | (Product.brand.ilike(s)) | (Product.barcode.ilike(s)))
     if category and category != "All":
         query = query.filter(Product.category == category)
     
-    products = query.order_by(Product.name.asc()).all()
+    products = query.order_by(Product.name.asc()).offset(offset).limit(limit).all()
     
+    # Batch lookup: fetch all product_ids with registered embeddings in a single query (eliminating N queries)
+    product_ids = [p.id for p in products]
+    embedded_ids = set()
+    if product_ids:
+        rows = db.query(ProductEmbedding.product_id).filter(ProductEmbedding.product_id.in_(product_ids)).distinct().all()
+        embedded_ids = {r[0] for r in rows}
+
     result = []
     for p in products:
-        has_emb = db.query(ProductEmbedding).filter(ProductEmbedding.product_id == p.id).count() > 0
+        has_emb = p.id in embedded_ids
         resp = ProductResponse(
             id=p.id,
             barcode=p.barcode,
@@ -54,6 +74,10 @@ def list_products(
             has_embeddings=has_emb
         )
         result.append(resp)
+
+    if not search and (not category or category == "All"):
+        catalog_cache.set(cache_key, result, ttl=30)
+
     return result
 
 @router.get("/{product_id}", response_model=ProductResponse)

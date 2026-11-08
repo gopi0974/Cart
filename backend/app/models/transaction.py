@@ -13,7 +13,7 @@ class Transaction(Base):
     payment_method = Column(String(50), nullable=False, default="UPI")  # UPI, CARD, SANDBOX
     payment_gateway_ref = Column(String(100), nullable=True)
     amount = Column(Float, nullable=False)
-    status = Column(String(20), nullable=False, default="SUCCESS")  # PENDING, SUCCESS, FAILED
+    status = Column(String(20), nullable=False, default="SUCCESS", index=True)  # PENDING, SUCCESS, FAILED
     receipt_number = Column(String(50), unique=True, index=True, nullable=False)
     receipt_pdf_url = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

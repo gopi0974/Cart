@@ -13,10 +13,13 @@ from alembic import command
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.config import settings
 from app.database import get_db
 from app.models.cart import Cart
 from app.models.session import CartSession
 from app.migrations import check_schema_health, get_schema_info
+import hmac
+import hashlib
 
 
 @pytest.fixture
@@ -77,10 +80,10 @@ def test_schema_migration_from_old_schema_to_head_and_shopper_pair(temp_db_setup
         assert not check_schema_health(connection=conn)
         info = get_schema_info(connection=conn)
         assert info["current_revision"] == "d54e41411396"
-        assert info["head_revision"] == "e528b12f6891"
+        assert info["head_revision"] is not None
         assert not info["is_up_to_date"]
 
-    # Step 3: Run migrations up to head (migration e528b12f6891)
+    # Step 3: Run migrations up to head
     command.upgrade(alembic_cfg, "head")
 
     # Step 4: Inspect NEW schema
@@ -95,8 +98,7 @@ def test_schema_migration_from_old_schema_to_head_and_shopper_pair(temp_db_setup
     with engine.connect() as conn:
         assert check_schema_health(connection=conn)
         info = get_schema_info(connection=conn)
-        assert info["current_revision"] == "e528b12f6891"
-        assert info["head_revision"] == "e528b12f6891"
+        assert info["current_revision"] == info["head_revision"]
         assert info["is_up_to_date"]
 
     # Step 6: Seed a physical cart in this migrated database
@@ -126,9 +128,14 @@ def test_schema_migration_from_old_schema_to_head_and_shopper_pair(temp_db_setup
     client = TestClient(app)
 
     try:
+        # Compute valid HMAC signature
+        msg = "CART-MIG-01:QR-TEST-MIG-01".encode("utf-8")
+        sig = hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
+
         pair_payload = {
             "qr_token": "QR-TEST-MIG-01",
-            "cart_number": "CART-MIG-01"
+            "cart_number": "CART-MIG-01",
+            "signature": sig
         }
         response = client.post("/api/v1/shopper/pair", json=pair_payload)
         assert response.status_code == 200, f"Pairing failed with status {response.status_code}: {response.text}"
