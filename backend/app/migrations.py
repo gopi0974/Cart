@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import sqlalchemy as sa
@@ -16,6 +17,11 @@ BASELINE_REVISION: str = "d54e41411396"
 
 # Track last migration error for /health diagnostics (ALWAYS sanitized)
 _last_migration_error: Optional[str] = None
+
+# Cache schema health checks to prevent Alembic inspection overhead and log noise on /health probes
+_cached_schema_info: Optional[Dict[str, Any]] = None
+_cached_schema_time: float = 0.0
+SCHEMA_CACHE_TTL_SECONDS: float = 300.0  # Cache for up to 5 minutes
 
 
 def get_alembic_config(connection=None, custom_url=None) -> Config:
@@ -141,14 +147,16 @@ def run_db_migrations(target: str = "head", connection=None, custom_url=None) ->
         command.upgrade(alembic_cfg, target)
         logger.info(f"Database migrations successfully applied to '{target}'.")
         _last_migration_error = None
+        refresh_schema_cache(connection=connection, custom_url=custom_url)
         return True
     except Exception as e:
         _last_migration_error = sanitize_secrets(str(e))
         logger.error(f"Failed to apply database migrations to '{target}': {_last_migration_error}")
+        refresh_schema_cache(connection=connection, custom_url=custom_url)
         return False
 
 
-def get_schema_info(connection=None, custom_url=None) -> Dict[str, Any]:
+def _compute_schema_info_uncached(connection=None, custom_url=None) -> Dict[str, Any]:
     """
     Inspect the database and Alembic scripts to determine current and head revisions,
     is_up_to_date flag, and sanitized migration_error if any.
@@ -199,9 +207,38 @@ def get_schema_info(connection=None, custom_url=None) -> Dict[str, Any]:
         }
 
 
-def check_schema_health(connection=None, custom_url=None) -> bool:
+def refresh_schema_cache(connection=None, custom_url=None) -> Dict[str, Any]:
+    """Manually force-refreshes the cached schema info."""
+    global _cached_schema_info, _cached_schema_time
+    info = _compute_schema_info_uncached(connection=connection, custom_url=custom_url)
+    _cached_schema_info = info
+    _cached_schema_time = time.time()
+    return info
+
+
+def get_schema_info(connection=None, custom_url=None, force_refresh: bool = False) -> Dict[str, Any]:
+    """
+    Returns current schema status. Uses in-memory cached results up to 5 minutes
+    to avoid opening Alembic migration contexts on every health poll.
+    """
+    global _cached_schema_info, _cached_schema_time
+    now = time.time()
+
+    # If connection or custom_url provided, compute directly
+    if connection is not None or custom_url is not None or force_refresh:
+        return refresh_schema_cache(connection=connection, custom_url=custom_url)
+
+    # Return cached if still fresh (< 300s)
+    if _cached_schema_info is not None and (now - _cached_schema_time) < SCHEMA_CACHE_TTL_SECONDS:
+        return _cached_schema_info
+
+    return refresh_schema_cache()
+
+
+def check_schema_health(connection=None, custom_url=None, force_refresh: bool = False) -> bool:
     """
     Returns True only when the database is at the latest Alembic migration (head).
+    Cached for up to 5 minutes to prevent Alembic context log spam.
     """
-    info = get_schema_info(connection=connection, custom_url=custom_url)
+    info = get_schema_info(connection=connection, custom_url=custom_url, force_refresh=force_refresh)
     return bool(info.get("is_up_to_date", False))

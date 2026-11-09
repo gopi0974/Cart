@@ -70,11 +70,15 @@ def test_db():
 
 @pytest.fixture(scope="function")
 def client(test_db, monkeypatch):
-    monkeypatch.setattr("app.database.check_db_health", lambda: True)
-    monkeypatch.setattr("app.main.check_db_health", lambda: True)
+    monkeypatch.setattr("app.database.check_db_health", lambda *a, **k: True)
+    monkeypatch.setattr("app.main.check_db_health", lambda *a, **k: True)
     monkeypatch.setattr("app.main.init_db", lambda: None)
     monkeypatch.setattr("app.main.seed_database", lambda db: None)
     monkeypatch.setattr("app.main.start_background_model_loader", lambda: None)
+    monkeypatch.setattr("app.migrations.refresh_schema_cache", lambda *a, **k: {"is_up_to_date": True})
+    monkeypatch.setattr("app.migrations.get_schema_info", lambda *a, **k: {"is_up_to_date": True, "current_revision": "head", "head_revision": "head"})
+    monkeypatch.setattr("app.migrations.check_schema_health", lambda *a, **k: True)
+    monkeypatch.setattr("app.services.scan_worker.cleanup_orphaned_jobs_on_startup", lambda: None)
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -139,7 +143,8 @@ def test_complete_360_scan_returns_job_id_immediately(client, test_db):
         assert job.stage == "SAVING_FRAMES"
         assert job.frame_paths_json is not None
 
-        frames = json.loads(job.frame_paths_json)
+        parsed = json.loads(job.frame_paths_json)
+        frames = parsed.get("frames", parsed) if isinstance(parsed, dict) else parsed
         assert len(frames) == 3
 
 
@@ -338,6 +343,105 @@ def test_preview_test_quality_recommendation(client, test_db):
             data = resp.json()
             assert "scan_quality_recommendation" in data
             assert data["scan_quality_recommendation"] == "Scan quality is low. Please rescan angles FRONT and LABEL_CLOSEUP."
+
+
+def test_init_360_scan_upload(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    resp = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/init-upload",
+        json={
+            "files": [
+                {"angle_tag": "FRONT", "filename": "FRONT_0.jpg", "poor_crop": False},
+                {"angle_tag": "BACK", "filename": "BACK_0.jpg", "poor_crop": False},
+            ]
+        },
+        headers=headers
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "job_id" in data
+    assert "direct_upload" in data
+    assert data["product_id"] == "product-uuid-1"
+
+
+def test_direct_upload_complete_360_scan(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
+        resp = client.post(
+            "/api/v1/vision/products/product-uuid-1/360-scan/complete",
+            json={
+                "job_id": "direct-job-123",
+                "frames": [
+                    {"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "poor_crop": False},
+                    {"angle_tag": "BACK", "frame_ref": "supabase://bucket/f2.jpg", "poor_crop": False},
+                ]
+            },
+            headers=headers
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "PENDING"
+        assert data["job_id"] == "direct-job-123"
+        assert data["total_frames"] == 2
+        mock_enqueue.assert_called_once_with("direct-job-123")
+
+
+def test_delete_scan_job(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    job = ScanJob(
+        id="job-to-delete",
+        product_id="product-uuid-1",
+        status="CANCELLED",
+        stage="CANCELLED",
+        total=2,
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    resp = client.delete("/api/v1/vision/jobs/job-to-delete", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "DELETED"
+
+    # Confirm deleted from DB
+    deleted = test_db.query(ScanJob).filter(ScanJob.id == "job-to-delete").first()
+    assert deleted is None
+
+
+def test_cleanup_orphaned_jobs_on_startup(test_db, monkeypatch):
+    from app.services.scan_worker import cleanup_orphaned_jobs_on_startup
+
+    # Seed orphaned jobs
+    job1 = ScanJob(id="orphan-1", product_id="product-uuid-1", status="PENDING", stage="QUEUED", frame_paths_json="[]")
+    job2 = ScanJob(id="orphan-2", product_id="product-uuid-1", status="PROCESSING", stage="PROCESSING_FRAMES", frame_paths_json="[]")
+    test_db.add_all([job1, job2])
+    test_db.commit()
+
+    monkeypatch.setattr("app.services.scan_worker.SessionLocal", lambda: test_db)
+    cleanup_orphaned_jobs_on_startup()
+
+    test_db.expire_all()
+    j1 = test_db.query(ScanJob).filter(ScanJob.id == "orphan-1").first()
+    j2 = test_db.query(ScanJob).filter(ScanJob.id == "orphan-2").first()
+
+    assert j1.status == "FAILED"
+    assert "ERR_SERVER_RESTART" in j1.error
+    assert j2.status == "FAILED"
+    assert "ERR_SERVER_RESTART" in j2.error
+
+
+def test_public_health_does_not_call_alembic(client):
+    with patch("alembic.runtime.migration.MigrationContext.configure") as mock_mig:
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        # Verify Alembic migration context was NOT opened during public /health request
+        mock_mig.assert_not_called()
+
 
 
 

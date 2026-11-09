@@ -544,12 +544,36 @@ export const api = {
     );
   },
 
-  async complete360Scan(productId: string, captures: { angle_tag: string; image_data_url: string }[]) {
-    return request<{ status: string; job_id: string; product_id: string; total_frames: number; message: string }>(
+  async init360ScanUpload(productId: string, files: { angle_tag: string; filename: string; poor_crop?: boolean }[]) {
+    return request<{
+      job_id: string;
+      product_id: string;
+      direct_upload: boolean;
+      upload_items: {
+        angle_tag: string;
+        filename: string;
+        upload_url: string;
+        frame_ref: string;
+        poor_crop: boolean;
+      }[];
+    }>(`/vision/products/${productId}/360-scan/init-upload`, {
+      method: 'POST',
+      body: JSON.stringify({ files }),
+    });
+  },
+
+  async complete360Scan(
+    productId: string,
+    payload:
+      | { angle_tag: string; image_data_url: string; original_image_data_url?: string; poor_crop?: boolean }[]
+      | { job_id: string; frames: { angle_tag: string; frame_ref: string; poor_crop?: boolean }[] }
+  ) {
+    const body = Array.isArray(payload) ? { captures: payload } : payload;
+    return request<ScanJobResponse>(
       `/vision/products/${productId}/360-scan/complete`,
       {
         method: 'POST',
-        body: JSON.stringify({ captures }),
+        body: JSON.stringify(body),
       }
     );
   },
@@ -574,6 +598,15 @@ export const api = {
       `/vision/jobs/${jobId}/cancel`,
       {
         method: 'POST',
+      }
+    );
+  },
+
+  async deleteScanJob(jobId: string) {
+    return request<{ status: string; job_id: string; message: string }>(
+      `/vision/jobs/${jobId}`,
+      {
+        method: 'DELETE',
       }
     );
   },

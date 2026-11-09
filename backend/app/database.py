@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Generator
 from fastapi import HTTPException, status
 from sqlalchemy import create_engine, text
@@ -42,20 +43,36 @@ if settings.DATABASE_URL:
 else:
     logger.warning("DATABASE_URL is not set. Database is offline.")
 
-def check_db_health() -> bool:
-    """Verify live database connectivity via active pre-ping."""
-    global database_ok
+_last_db_check_time: float = 0.0
+_last_db_check_result: bool = False
+
+def check_db_health(max_age_seconds: float = 0.0) -> bool:
+    """
+    Verify live database connectivity via active pre-ping SELECT 1.
+    If max_age_seconds > 0, returns cached result if within threshold to avoid excessive queries.
+    """
+    global database_ok, _last_db_check_time, _last_db_check_result
+    now = time.time()
+    if max_age_seconds > 0.0 and (now - _last_db_check_time) < max_age_seconds:
+        return _last_db_check_result
+
     if engine is None:
         database_ok = False
+        _last_db_check_result = False
+        _last_db_check_time = now
         return False
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         database_ok = True
+        _last_db_check_result = True
+        _last_db_check_time = now
         return True
     except Exception as e:
         logger.error(f"Database health check failed: {e}")
         database_ok = False
+        _last_db_check_result = False
+        _last_db_check_time = now
         return False
 
 def get_db() -> Generator[Session, None, None]:

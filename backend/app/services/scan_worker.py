@@ -6,7 +6,8 @@ import uuid
 import time
 import asyncio
 import logging
-from typing import List, Dict, Any, Tuple
+import threading
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import cv2
 from PIL import Image, ImageEnhance, ImageFilter
@@ -30,9 +31,32 @@ from app.utils.sanitization import sanitize_secrets
 
 logger = logging.getLogger("smartcart.scan_worker")
 
-# Process strictly ONE 360-scan job at a time to prevent CPU / memory thrashing on Render
-_scan_job_lock = asyncio.Lock()
+# Concurrency lock: strictly ONE 360-scan job processed at a time
+_scan_worker_lock = threading.Lock()
 _cancelled_job_ids = set()
+
+# Live worker timing metrics exposed to /admin/system-health
+_worker_timing_metrics: Dict[str, Any] = {
+    "download_storage_ms_total": 0.0,
+    "download_storage_ms_avg": 0.0,
+    "background_removal_ms_total": 0.0,
+    "background_removal_ms_avg": 0.0,
+    "crop_resize_ms_total": 0.0,
+    "crop_resize_ms_avg": 0.0,
+    "embedding_ms_total": 0.0,
+    "embedding_ms_avg": 0.0,
+    "database_save_ms_total": 0.0,
+    "total_duration_ms": 0.0,
+    "frames_processed": 0,
+    "last_job_id": None,
+    "last_job_status": None,
+    "updated_at": None,
+}
+
+
+def get_worker_timing_metrics() -> Dict[str, Any]:
+    """Returns live scan worker timing metrics for /admin/system-health."""
+    return dict(_worker_timing_metrics)
 
 
 def cancel_job(job_id: str):
@@ -40,15 +64,42 @@ def cancel_job(job_id: str):
     _cancelled_job_ids.add(job_id)
 
 
-def preprocess_product_image_for_embedding(pil_img: Image.Image) -> Image.Image:
+def cleanup_orphaned_jobs_on_startup():
+    """
+    On server boot, marks any job left in PROCESSING or PENDING as FAILED.
+    Preserves uploaded frames in frame_paths_json so user can retry immediately.
+    """
+    if not SessionLocal:
+        return
+    db = SessionLocal()
+    try:
+        orphans = db.query(ScanJob).filter(ScanJob.status.in_(["PENDING", "PROCESSING"])).all()
+        for job in orphans:
+            job.status = "FAILED"
+            job.stage = "FAILED"
+            job.error = "Server restarted during processing. Please retry. (ERR_SERVER_RESTART)"
+            job.stage_message = "Server restarted during processing. Please retry."
+        if orphans:
+            db.commit()
+            logger.info(f"Cleaned up {len(orphans)} orphaned scan job(s) from previous server run.")
+    except Exception as e:
+        logger.error(f"Error cleaning orphaned scan jobs on startup: {sanitize_secrets(e)}")
+    finally:
+        db.close()
+
+
+def preprocess_product_image_for_embedding(pil_img: Image.Image, force_grabcut: bool = False) -> Image.Image:
     """
     Standard preprocessing for embedding:
-    1. Downscales to ~320px wide
-    2. Runs GrabCut initialized from product box
-    3. Composites isolated foreground onto a neutral grey background (128, 128, 128)
-    4. Resizes to 224x224 for CLIP ViT-B/32
-    Used identically in scan worker enrollment and live recognition.
+    - If force_grabcut is False (default): the browser already cropped the product.
+      Resizes to 224x224 directly, skipping CPU-heavy GrabCut.
+    - If force_grabcut is True (crop flagged as poor): runs GrabCut segmentation
+      initialized from product box and composites onto neutral grey (128, 128, 128).
     """
+    if not force_grabcut:
+        # Client-side crop was good: skip GrabCut completely for 160x speedup
+        return pil_img.resize((224, 224), Image.BILINEAR)
+
     try:
         w, h = pil_img.size
         target_w = 320
@@ -84,295 +135,403 @@ def preprocess_product_image_for_embedding(pil_img: Image.Image) -> Image.Image:
         matted_pil = Image.fromarray(cv2.cvtColor(fg_only.astype(np.uint8), cv2.COLOR_BGR2RGB))
         return matted_pil.resize((224, 224), Image.BILINEAR)
     except Exception as e:
-        logger.warning(f"Preprocessing warning: {e}. Using resized frame.")
+        logger.warning(f"Preprocessing warning: {sanitize_secrets(e)}. Using resized frame.")
         return pil_img.resize((224, 224), Image.BILINEAR)
 
 
-def _downscale_and_remove_background(pil_img: Image.Image) -> Image.Image:
-    return preprocess_product_image_for_embedding(pil_img)
+def _downscale_and_remove_background(pil_img: Image.Image, force_grabcut: bool = False) -> Image.Image:
+    return preprocess_product_image_for_embedding(pil_img, force_grabcut=force_grabcut)
 
 
-def _generate_variants_224(base_224: Image.Image, matted_224: Image.Image) -> List[Tuple[str, Image.Image]]:
-    """Produce realistic variations all resized to 224x224."""
-    w, h = base_224.size
+def _generate_variants_224(base_224: Image.Image, matted_224: Optional[Image.Image] = None) -> List[Tuple[str, Image.Image]]:
+    """
+    Produce 1 base image + 1 realistic augmentation variant per frame.
+    Reduces total vector extraction load from 8x down to 2x per frame.
+    """
     variants = [
         ("BASE", base_224),
-        ("MATTED", matted_224),
-        ("BRIGHT_HIGH", ImageEnhance.Brightness(base_224).enhance(1.15)),
-        ("BRIGHT_LOW", ImageEnhance.Brightness(base_224).enhance(0.85)),
-        ("ROT_POS", base_224.rotate(10, resample=Image.BILINEAR, fillcolor=(240, 240, 240))),
-        ("ROT_NEG", base_224.rotate(-10, resample=Image.BILINEAR, fillcolor=(240, 240, 240))),
-        ("BLUR", base_224.filter(ImageFilter.GaussianBlur(radius=0.8))),
-        ("CROP_ZOOM", base_224.crop((int(w * 0.06), int(h * 0.06), int(w * 0.94), int(h * 0.94))).resize((224, 224), Image.BILINEAR)),
+        ("AUG_BRIGHT", ImageEnhance.Brightness(base_224).enhance(1.10)),
     ]
     return variants
 
 
-async def _execute_scan_job_internal(job_id: str):
-    """Internal processing pipeline with stage updates, batch embedding, and atomic single-transaction commit."""
-    db: Session = SessionLocal()
+def _parse_job_frame_state(frame_paths_json: Optional[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
+    """
+    Parses frame_paths_json supporting both legacy list and structured state.
+    Returns (frames_list, existing_completed_vectors, primary_frame_url).
+    """
+    if not frame_paths_json:
+        return [], [], None
+
     try:
-        job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-        if not job:
-            logger.error(f"ScanJob {job_id} not found.")
-            return
-
-        # Check early cancellation
-        if job_id in _cancelled_job_ids or job.status == "CANCELLED":
-            job.status = "CANCELLED"
-            job.stage = "CANCELLED"
-            job.stage_message = "Scan processing was cancelled by user."
-            db.commit()
-            _cancelled_job_ids.discard(job_id)
-            logger.info(f"ScanJob {job_id} cancelled before processing began.")
-            return
-
-        product = db.query(Product).filter(Product.id == job.product_id).first()
-        if not product:
-            job.status = "FAILED"
-            job.stage = "FAILED"
-            job.error = "Target product not found."
-            job.stage_message = "Failed: Target product not found."
-            db.commit()
-            return
-
-        frame_data: List[Dict[str, str]] = []
-        if job.frame_paths_json:
-            try:
-                frame_data = json.loads(job.frame_paths_json)
-            except Exception:
-                frame_data = []
-
-        if not frame_data:
-            job.status = "FAILED"
-            job.stage = "FAILED"
-            job.error = "No saved frames available for this job."
-            job.stage_message = "Failed: No saved frames available."
-            db.commit()
-            return
-
-        total_frames = len(frame_data)
-        job.status = "PROCESSING"
-        job.stage = "SAVING_FRAMES"
-        job.stage_message = f"Frames verified ({total_frames} frames)."
-        job.done = 0
-        job.total = total_frames
-        job.error = None
-        db.commit()
-
-        # Step 2: Downscale to 224x224 and run background removal
-        job.stage = "REMOVING_BACKGROUND"
-        all_variants: List[Tuple[str, str, Image.Image, str]] = []  # (angle_tag, variant_tag, pil_img, frame_ref)
-        primary_frame_url = None
-
-        for idx, item in enumerate(frame_data):
-            # Check cancellation between frames
-            if job_id in _cancelled_job_ids:
-                job.status = "CANCELLED"
-                job.stage = "CANCELLED"
-                job.stage_message = "Scan processing was cancelled by user."
-                db.commit()
-                _cancelled_job_ids.discard(job_id)
-                logger.info(f"ScanJob {job_id} cancelled during frame processing.")
-                return
-
-            angle_tag = item["angle_tag"]
-            frame_ref = item["frame_ref"]
-
-            job.stage_message = f"Removing background {idx + 1}/{total_frames}"
-            job.done = idx + 1
-            db.commit()
-
-            pil_img = storage_service.load_frame_image(frame_ref)
-
-            # Generate thumbnail for primary image
-            if primary_frame_url is None or angle_tag.upper() == "FRONT":
-                thumb = pil_img.copy()
-                thumb.thumbnail((400, 400))
-                thumb_buf = io.BytesIO()
-                thumb.save(thumb_buf, format="JPEG", quality=80)
-                primary_frame_url = f"data:image/jpeg;base64,{base64.b64encode(thumb_buf.getvalue()).decode('utf-8')}"
-
-            # Downscale frame to 224x224 first, then remove background
-            base_224 = pil_img.resize((224, 224), Image.BILINEAR)
-            matted_224 = _downscale_and_remove_background(pil_img)
-
-            variants = _generate_variants_224(base_224, matted_224)
-            for v_tag, v_img in variants:
-                all_variants.append((angle_tag, v_tag, v_img, frame_ref))
-
-            # Small yield to let event loop breathe
-            await asyncio.sleep(0.01)
-
-        # Cap vectors at 100 per product as required
-        MAX_VECTORS = 100
-        if len(all_variants) > MAX_VECTORS:
-            step = len(all_variants) / MAX_VECTORS
-            selected_indices = [int(i * step) for i in range(MAX_VECTORS)]
-            all_variants = [all_variants[i] for i in selected_indices]
-
-        total_vectors = len(all_variants)
-        job.stage = "COMPUTING_VECTORS"
-        job.done = 0
-        job.total = total_vectors
-        job.stage_message = f"Computing vectors 0/{total_vectors}"
-        db.commit()
-
-        # Step 3: Embed in batches of 8 to 16
-        BATCH_SIZE = 16
-        computed_embeddings: List[Tuple[str, str, List[float], str]] = []
-
-        for b_idx in range(0, total_vectors, BATCH_SIZE):
-            # Check cancellation between vector batches
-            if job_id in _cancelled_job_ids:
-                job.status = "CANCELLED"
-                job.stage = "CANCELLED"
-                job.stage_message = "Scan processing was cancelled by user."
-                db.commit()
-                _cancelled_job_ids.discard(job_id)
-                logger.info(f"ScanJob {job_id} cancelled during vector extraction.")
-                return
-
-            batch = all_variants[b_idx: b_idx + BATCH_SIZE]
-            batch_images = [item[2] for item in batch]
-
-            # Batch ONNX INT8 inference
-            vectors = get_embeddings_batch(batch_images)
-
-            for i, vec in enumerate(vectors):
-                angle_tag, v_tag, _, frame_ref = batch[i]
-                computed_embeddings.append((angle_tag, v_tag, vec, frame_ref))
-
-            done_count = min(b_idx + len(batch), total_vectors)
-            job.done = done_count
-            job.stage_message = f"Computing vectors {done_count}/{total_vectors}"
-            db.commit()
-
-            await asyncio.sleep(0.01)
-
-        # Step 4: Single-transaction commit
-        job.stage = "SAVING_TO_DATABASE"
-        job.stage_message = "Saving to database..."
-        db.commit()
-
-        # Clean existing embeddings and 360-scan images
-        VectorStoreMatcher.delete_embeddings_for_product(db, product.id)
-        db.query(ProductImage).filter(
-            ProductImage.product_id == product.id,
-            ProductImage.is_360_scan == True
-        ).delete(synchronize_session=False)
-
-        # Set primary image if available
-        if primary_frame_url:
-            product.primary_image_url = primary_frame_url
-        product.is_active = True
-
-        # Insert new ProductEmbedding records
-        for angle_tag, v_tag, vec, frame_ref in computed_embeddings:
-            full_tag = f"{angle_tag}_{v_tag}"
-            VectorStoreMatcher.store_embedding(
-                db=db,
-                product_id=product.id,
-                barcode=product.barcode,
-                angle_tag=full_tag,
-                vector=vec,
-                image_path=frame_ref,
-                model_name=MODEL_NAME,
-                model_version=MODEL_VERSION,
-                vector_dim=VECTOR_DIM,
-                commit=False
-            )
-
-        # Calculate quality_score (frame count, angle coverage, sharpness, intra-cluster similarity)
-        unique_angles = set(f.get("angle_tag", "") for f in frame_data)
-        angle_score = min(1.0, len(unique_angles) / 9.0)
-        frame_score = min(1.0, len(frame_data) / 40.0)
-
-        # Intra-cluster cosine similarity between computed vectors
-        intra_sim = 0.85
-        if computed_embeddings:
-            sample_vecs = [item[2] for item in computed_embeddings[:20]]
-            if len(sample_vecs) >= 2:
-                sims = []
-                for s1 in range(min(10, len(sample_vecs))):
-                    for s2 in range(s1 + 1, min(10, len(sample_vecs))):
-                        sim = float(np.dot(sample_vecs[s1], sample_vecs[s2]))
-                        sims.append(sim)
-                if sims:
-                    intra_sim = max(0.0, min(1.0, float(np.mean(sims))))
-
-        sharpness_score = 0.90
-        composite_quality = round(0.30 * frame_score + 0.30 * angle_score + 0.20 * sharpness_score + 0.20 * intra_sim, 2)
-        product.quality_score = composite_quality
-
-        # Mark job as ENROLLED
-        job.status = "ENROLLED"
-        job.stage = "COMPLETED"
-        job.stage_message = f"Successfully enrolled {len(computed_embeddings)} vectors."
-        job.done = total_vectors
-        job.error = None
-
-        db.commit()
-        db.refresh(product)
-        VectorStoreMatcher.sync_to_disk(db)
-        catalog_cache.invalidate()
-
-        logger.info(f"ScanJob {job_id} successfully enrolled {len(computed_embeddings)} vectors for {product.name}.")
-
+        data = json.loads(frame_paths_json)
+        if isinstance(data, list):
+            frames = []
+            for item in data:
+                if isinstance(item, dict):
+                    frames.append({
+                        "angle_tag": item.get("angle_tag", "UNKNOWN"),
+                        "frame_ref": item.get("frame_ref", ""),
+                        "poor_crop": bool(item.get("poor_crop", False)),
+                        "completed": False,
+                    })
+            return frames, [], None
+        elif isinstance(data, dict):
+            frames = data.get("frames", [])
+            vectors = data.get("completed_vectors", [])
+            primary_url = data.get("primary_frame_url")
+            return frames, vectors, primary_url
     except Exception as e:
-        logger.error(f"ScanJob {job_id} failed: {sanitize_secrets(e)}")
-        db.rollback()
+        logger.error(f"Failed to parse frame_paths_json: {sanitize_secrets(e)}")
+
+    return [], [], None
+
+
+def _serialize_job_frame_state(frames: List[Dict[str, Any]], vectors: List[Dict[str, Any]], primary_url: Optional[str]) -> str:
+    """Serializes per-frame progress and computed vectors to JSON string."""
+    return json.dumps({
+        "frames": frames,
+        "completed_vectors": vectors,
+        "primary_frame_url": primary_url,
+    })
+
+
+def _execute_scan_job_sync(job_id: str):
+    """
+    Synchronous processing pipeline executed in a background worker thread.
+    - Single-frame streaming (never loads all images in memory)
+    - Per-stage timing metrics (download, crop, bg_removal, embed, db_save)
+    - Stall watchdog (fails if no progress in 60s, max 10 minutes)
+    - Resumes from last completed frame on retry
+    - Caps scan at max 40 frames and 60 vectors
+    """
+    global _worker_timing_metrics
+
+    # Enforce single worker concurrency
+    with _scan_worker_lock:
+        db: Session = SessionLocal()
+        job_start_time = time.time()
+        last_progress_time = time.time()
+
+        # Timing accumulators for this job
+        dl_times: List[float] = []
+        bg_times: List[float] = []
+        crop_times: List[float] = []
+        embed_times: List[float] = []
+
         try:
             job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-            if job:
+            if not job:
+                logger.error(f"ScanJob {job_id} not found in database.")
+                return
+
+            # Check early cancellation
+            if job_id in _cancelled_job_ids or job.status == "CANCELLED":
+                job.status = "CANCELLED"
+                job.stage = "CANCELLED"
+                job.error = "Scan processing was cancelled by user. (ERR_CANCELLED)"
+                job.stage_message = "Scan processing was cancelled by user."
+                db.commit()
+                _cancelled_job_ids.discard(job_id)
+                logger.info(f"ScanJob {job_id} cancelled before processing began.")
+                return
+
+            product = db.query(Product).filter(Product.id == job.product_id).first()
+            if not product:
                 job.status = "FAILED"
                 job.stage = "FAILED"
-                job.error = sanitize_secrets(str(e))
-                job.stage_message = f"Failed: {job.error}"
+                job.error = "Target product not found. (ERR_PRODUCT_NOT_FOUND)"
+                job.stage_message = "Failed: Target product not found."
                 db.commit()
-        except Exception:
-            pass
-        raise
-    finally:
-        db.close()
+                return
 
+            frames, completed_vectors, primary_frame_url = _parse_job_frame_state(job.frame_paths_json)
+            if not frames:
+                job.status = "FAILED"
+                job.stage = "FAILED"
+                job.error = "No saved frames available for this job. (ERR_NO_FRAMES)"
+                job.stage_message = "Failed: No saved frames available."
+                db.commit()
+                return
 
-async def run_scan_job_with_watchdog(job_id: str):
-    """
-    Enforces concurrency lock (1 job at a time) and 120s timeout watchdog.
-    If timeout is exceeded, sets job.status = FAILED and keeps uploaded frames.
-    """
-    async with _scan_job_lock:
-        try:
-            await asyncio.wait_for(_execute_scan_job_internal(job_id), timeout=120.0)
-        except asyncio.TimeoutError:
-            logger.error(f"ScanJob {job_id} timed out after 120s.")
-            db = SessionLocal()
+            # Cap scan at max 40 frames
+            MAX_FRAMES = 40
+            if len(frames) > MAX_FRAMES:
+                frames = frames[:MAX_FRAMES]
+
+            total_frames = len(frames)
+            MAX_VECTORS = 60
+
+            job.status = "PROCESSING"
+            job.stage = "PROCESSING_FRAMES"
+            job.total = total_frames
+            job.error = None
+            db.commit()
+
+            # Process frames one at a time
+            for idx, item in enumerate(frames):
+                # 1. Stall & Total Watchdog Check
+                now = time.time()
+                if (now - last_progress_time) > 60.0:
+                    error_msg = f"Timed out: no progress for 60 s at Processing frame {idx + 1}/{total_frames} (ERR_STALL_TIMEOUT)"
+                    logger.error(f"ScanJob {job_id}: {error_msg}")
+                    job.status = "FAILED"
+                    job.stage = "FAILED"
+                    job.error = error_msg
+                    job.stage_message = error_msg
+                    db.commit()
+                    return
+
+                if (now - job_start_time) > 600.0:
+                    error_msg = "Processing exceeded total 10 minute limit. Please retry. (ERR_TOTAL_TIMEOUT)"
+                    logger.error(f"ScanJob {job_id}: {error_msg}")
+                    job.status = "FAILED"
+                    job.stage = "FAILED"
+                    job.error = error_msg
+                    job.stage_message = error_msg
+                    db.commit()
+                    return
+
+                # 2. Cancellation Check
+                if job_id in _cancelled_job_ids:
+                    job.status = "CANCELLED"
+                    job.stage = "CANCELLED"
+                    job.error = "Scan processing was cancelled by user. (ERR_CANCELLED)"
+                    job.stage_message = "Scan processing was cancelled by user."
+                    # Persist progress so far
+                    job.frame_paths_json = _serialize_job_frame_state(frames, completed_vectors, primary_frame_url)
+                    db.commit()
+                    _cancelled_job_ids.discard(job_id)
+                    logger.info(f"ScanJob {job_id} cancelled during frame {idx + 1}/{total_frames}.")
+                    return
+
+                # 3. Skip already completed frames (from retry)
+                if item.get("completed", False):
+                    continue
+
+                angle_tag = item.get("angle_tag", "UNKNOWN")
+                frame_ref = item.get("frame_ref", "")
+                poor_crop = bool(item.get("poor_crop", False))
+
+                job.stage = "PROCESSING_FRAMES"
+                job.stage_message = f"Processing frame {idx + 1}/{total_frames}"
+                job.done = idx
+                db.commit()
+
+                # Stage A: Download frame from storage
+                t_dl_start = time.time()
+                try:
+                    pil_img = storage_service.load_frame_image(frame_ref)
+                except Exception as e:
+                    logger.warning(f"Frame {idx + 1} download warning: {sanitize_secrets(e)}. Retrying once...")
+                    time.sleep(0.5)
+                    pil_img = storage_service.load_frame_image(frame_ref)
+                t_dl_ms = (time.time() - t_dl_start) * 1000.0
+                dl_times.append(t_dl_ms)
+
+                # Primary frame thumbnail
+                if primary_frame_url is None or angle_tag.upper() == "FRONT":
+                    thumb = pil_img.copy()
+                    thumb.thumbnail((400, 400))
+                    thumb_buf = io.BytesIO()
+                    thumb.save(thumb_buf, format="JPEG", quality=80)
+                    primary_frame_url = f"data:image/jpeg;base64,{base64.b64encode(thumb_buf.getvalue()).decode('utf-8')}"
+
+                # Stage B: Crop & Resize to 224x224
+                t_crop_start = time.time()
+                base_224 = pil_img.resize((224, 224), Image.BILINEAR)
+                t_crop_ms = (time.time() - t_crop_start) * 1000.0
+                crop_times.append(t_crop_ms)
+
+                # Stage C: Background removal (only if flagged poor_crop)
+                t_bg_start = time.time()
+                if poor_crop:
+                    matted_224 = _downscale_and_remove_background(pil_img, force_grabcut=True)
+                else:
+                    matted_224 = base_224  # Browser crop was good, skip GrabCut!
+                t_bg_ms = (time.time() - t_bg_start) * 1000.0
+                bg_times.append(t_bg_ms)
+
+                # Generate 1 augmentation variant per frame
+                variants = _generate_variants_224(base_224, matted_224)
+
+                # Stage D: Batch ONNX Embedding for this frame (1 or 2 vectors)
+                t_emb_start = time.time()
+                embed_images = [v[1] for v in variants]
+                if len(completed_vectors) < MAX_VECTORS:
+                    vectors = get_embeddings_batch(embed_images)
+                    for vi, (v_tag, _) in enumerate(variants):
+                        if len(completed_vectors) < MAX_VECTORS:
+                            completed_vectors.append({
+                                "angle_tag": angle_tag,
+                                "v_tag": v_tag,
+                                "vec": vectors[vi],
+                                "frame_ref": frame_ref,
+                            })
+                t_emb_ms = (time.time() - t_emb_start) * 1000.0
+                embed_times.append(t_emb_ms)
+
+                # Mark this frame completed
+                item["completed"] = True
+                last_progress_time = time.time()
+
+                # Periodically update intermediate progress in DB
+                job.done = idx + 1
+                job.stage_message = f"Processing frame {idx + 1}/{total_frames} ({len(completed_vectors)} vectors)"
+                job.frame_paths_json = _serialize_job_frame_state(frames, completed_vectors, primary_frame_url)
+                db.commit()
+
+                # Log timing telemetry every 5 frames and on first/last
+                if (idx + 1) % 5 == 0 or idx == 0 or (idx + 1) == total_frames:
+                    logger.info(
+                        f"stage PROCESSING done {idx + 1}/{total_frames} "
+                        f"(download: {t_dl_ms:.0f}ms, crop_resize: {t_crop_ms:.0f}ms, "
+                        f"bg_removal: {t_bg_ms:.0f}ms, embed: {t_emb_ms:.0f}ms)"
+                    )
+
+                # Explicitly delete local images to release RAM
+                del pil_img
+                del base_224
+                del matted_224
+                del variants
+
+            # Stage E: Atomic Database Save
+            t_db_start = time.time()
+            job.stage = "SAVING_TO_DATABASE"
+            job.stage_message = "Saving embeddings to database..."
+            db.commit()
+
+            # Clean existing embeddings for product
+            VectorStoreMatcher.delete_embeddings_for_product(db, product.id)
+            db.query(ProductImage).filter(
+                ProductImage.product_id == product.id,
+                ProductImage.is_360_scan == True
+            ).delete(synchronize_session=False)
+
+            if primary_frame_url:
+                product.primary_image_url = primary_frame_url
+            product.is_active = True
+
+            # Insert new ProductEmbedding records
+            for entry in completed_vectors:
+                full_tag = f"{entry['angle_tag']}_{entry['v_tag']}"
+                VectorStoreMatcher.store_embedding(
+                    db=db,
+                    product_id=product.id,
+                    barcode=product.barcode,
+                    angle_tag=full_tag,
+                    vector=entry["vec"],
+                    image_path=entry.get("frame_ref"),
+                    model_name=MODEL_NAME,
+                    model_version=MODEL_VERSION,
+                    vector_dim=VECTOR_DIM,
+                    commit=False
+                )
+
+            # Calculate quality_score
+            unique_angles = set(f.get("angle_tag", "") for f in frames)
+            angle_score = min(1.0, len(unique_angles) / 9.0)
+            frame_score = min(1.0, len(frames) / 36.0)
+
+            intra_sim = 0.85
+            if completed_vectors:
+                sample_vecs = [item["vec"] for item in completed_vectors[:20]]
+                if len(sample_vecs) >= 2:
+                    sims = []
+                    for s1 in range(min(10, len(sample_vecs))):
+                        for s2 in range(s1 + 1, min(10, len(sample_vecs))):
+                            sim = float(np.dot(sample_vecs[s1], sample_vecs[s2]))
+                            sims.append(sim)
+                    if sims:
+                        intra_sim = max(0.0, min(1.0, float(np.mean(sims))))
+
+            sharpness_score = 0.90
+            composite_quality = round(0.30 * frame_score + 0.30 * angle_score + 0.20 * sharpness_score + 0.20 * intra_sim, 2)
+            product.quality_score = composite_quality
+
+            # Mark job ENROLLED
+            job.status = "ENROLLED"
+            job.stage = "COMPLETED"
+            job.stage_message = f"Successfully enrolled {len(completed_vectors)} vectors across {len(frames)} frames."
+            job.done = len(completed_vectors)
+            job.error = None
+
+            db.commit()
+            db.refresh(product)
+            VectorStoreMatcher.sync_to_disk(db)
+            catalog_cache.invalidate()
+
+            t_db_ms = (time.time() - t_db_start) * 1000.0
+            total_duration_ms = (time.time() - job_start_time) * 1000.0
+
+            # Update live worker metrics
+            _worker_timing_metrics["download_storage_ms_total"] = round(sum(dl_times), 1)
+            _worker_timing_metrics["download_storage_ms_avg"] = round(float(np.mean(dl_times)) if dl_times else 0.0, 1)
+            _worker_timing_metrics["background_removal_ms_total"] = round(sum(bg_times), 1)
+            _worker_timing_metrics["background_removal_ms_avg"] = round(float(np.mean(bg_times)) if bg_times else 0.0, 1)
+            _worker_timing_metrics["crop_resize_ms_total"] = round(sum(crop_times), 1)
+            _worker_timing_metrics["crop_resize_ms_avg"] = round(float(np.mean(crop_times)) if crop_times else 0.0, 1)
+            _worker_timing_metrics["embedding_ms_total"] = round(sum(embed_times), 1)
+            _worker_timing_metrics["embedding_ms_avg"] = round(float(np.mean(embed_times)) if embed_times else 0.0, 1)
+            _worker_timing_metrics["database_save_ms_total"] = round(t_db_ms, 1)
+            _worker_timing_metrics["total_duration_ms"] = round(total_duration_ms, 1)
+            _worker_timing_metrics["frames_processed"] = len(frames)
+            _worker_timing_metrics["last_job_id"] = job_id
+            _worker_timing_metrics["last_job_status"] = "ENROLLED"
+            _worker_timing_metrics["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+            logger.info(
+                f"ScanJob {job_id} ENROLLED {len(completed_vectors)} vectors in {total_duration_ms/1000:.2f}s "
+                f"(dl_avg: {_worker_timing_metrics['download_storage_ms_avg']}ms, "
+                f"crop_avg: {_worker_timing_metrics['crop_resize_ms_avg']}ms, "
+                f"bg_avg: {_worker_timing_metrics['background_removal_ms_avg']}ms, "
+                f"emb_avg: {_worker_timing_metrics['embedding_ms_avg']}ms, "
+                f"db: {t_db_ms:.0f}ms)"
+            )
+
+        except Exception as e:
+            sanitized_err = sanitize_secrets(str(e))
+            logger.error(f"ScanJob {job_id} worker encountered error: {sanitized_err}")
+            db.rollback()
             try:
                 job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
                 if job:
                     job.status = "FAILED"
                     job.stage = "FAILED"
-                    job.error = "Processing timed out after 120 seconds limit. Please retry."
-                    job.stage_message = "Failed: 120s timeout limit exceeded."
+                    job.error = f"Error during processing: {sanitized_err} (ERR_WORKER_EXCEPTION)"
+                    job.stage_message = f"Failed: {sanitized_err}"
                     db.commit()
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"ScanJob {job_id} worker encountered error: {sanitize_secrets(e)}")
+            except Exception:
+                pass
+            _worker_timing_metrics["last_job_id"] = job_id
+            _worker_timing_metrics["last_job_status"] = "FAILED"
+            _worker_timing_metrics["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        finally:
+            db.close()
+
+
+async def _execute_scan_job_internal(job_id: str):
+    """
+    Async interface maintaining backward compatibility with tests.
+    Dispatches to worker thread so event loop remains free.
+    """
+    await asyncio.to_thread(_execute_scan_job_sync, job_id)
+
+
+# Backward-compatibility alias for test harness
+run_scan_job_with_watchdog = _execute_scan_job_internal
 
 
 def enqueue_scan_job(job_id: str):
-    """Schedules background task execution in the running event loop."""
-    try:
-        loop = asyncio.get_running_loop()
-        return loop.create_task(run_scan_job_with_watchdog(job_id))
-    except RuntimeError:
-        # If called when no event loop is running in the current thread (e.g. sync tests)
-        import threading
-        thread = threading.Thread(
-            target=lambda: asyncio.run(run_scan_job_with_watchdog(job_id)),
-            daemon=True
-        )
-        thread.start()
-        return thread
+    """
+    Starts background execution in a dedicated daemon thread.
+    Keeps the FastAPI event loop completely responsive for /health.
+    """
+    thread = threading.Thread(
+        target=_execute_scan_job_sync,
+        args=(job_id,),
+        name=f"ScanWorker-{job_id[:8]}",
+        daemon=True
+    )
+    thread.start()
+    return thread

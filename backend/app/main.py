@@ -48,6 +48,12 @@ async def lifespan(app: FastAPI):
     if db_healthy:
         try:
             init_db()
+            from app.migrations import refresh_schema_cache
+            refresh_schema_cache()
+
+            from app.services.scan_worker import cleanup_orphaned_jobs_on_startup
+            cleanup_orphaned_jobs_on_startup()
+
             if SessionLocal:
                 db = SessionLocal()
                 try:
@@ -146,9 +152,10 @@ def _get_public_health_data():
     """
     Minimal public health check:
     Returns strictly {status, database_ok, schema_ok, model_loaded}.
-    Never includes secrets, revision IDs, error traces, or diagnostic internals.
+    Uses cheap SELECT 1 (cached for up to 10s) and cached schema health.
+    Never opens Alembic contexts on requests and never includes secrets.
     """
-    db_ok = check_db_health()
+    db_ok = check_db_health(max_age_seconds=10.0)
     model_ok = is_model_ready()
 
     schema_ok = False
@@ -243,6 +250,13 @@ def _get_detailed_health_data():
 
     metrics = get_embedding_metrics()
 
+    worker_metrics = {}
+    try:
+        from app.services.scan_worker import get_worker_timing_metrics
+        worker_metrics = get_worker_timing_metrics()
+    except Exception:
+        pass
+
     return {
         "status": overall_status,
         "database_ok": db_ok,
@@ -258,6 +272,7 @@ def _get_detailed_health_data():
         "products_enrolled": products_enrolled,
         "embed_ms_last": metrics["embed_ms_last"],
         "embed_ms_avg": metrics["embed_ms_avg"],
+        "scan_worker_metrics": worker_metrics,
         "memory_rss_mb": memory_rss_mb,
         "demo_mode": settings.DEMO_MODE,
         "use_mock": settings.USE_MOCK,

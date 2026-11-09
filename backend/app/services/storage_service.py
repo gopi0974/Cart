@@ -30,6 +30,39 @@ class StorageService:
     def is_supabase_configured(self) -> bool:
         return bool(self.supabase_url and self.service_key)
 
+    def create_signed_upload_url(self, job_id: str, filename: str) -> Optional[dict]:
+        """
+        Generates a signed upload URL in Supabase Storage allowing direct client-side upload.
+        Returns dict with upload_url and frame_ref, or None if Supabase is unavailable.
+        """
+        if not self.is_supabase_configured:
+            return None
+
+        storage_path = f"{job_id}/{filename}"
+        sign_endpoint = f"{self.supabase_url}/storage/v1/object/upload/sign/{self.bucket}/{storage_path}"
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "apikey": self.service_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(sign_endpoint, json={"expiresIn": 3600}, headers=headers)
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    relative_url = data.get("url")
+                    if relative_url:
+                        full_upload_url = f"{self.supabase_url}{relative_url}" if relative_url.startswith("/") else relative_url
+                        return {
+                            "upload_url": full_upload_url,
+                            "frame_ref": f"supabase://{self.bucket}/{storage_path}",
+                            "storage_path": storage_path,
+                        }
+        except Exception as e:
+            logger.warning(f"Failed to generate Supabase signed upload URL: {sanitize_secrets(e)}")
+
+        return None
+
     def save_frame(self, job_id: str, filename: str, image_bytes: bytes) -> str:
         """
         Saves frame bytes to Supabase Storage or local directory.

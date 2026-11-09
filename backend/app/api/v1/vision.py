@@ -4,7 +4,7 @@ import uuid
 import json
 import base64
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -46,9 +46,20 @@ class Scan360Capture(BaseModel):
     angle_tag: str  # FRONT, BACK, LEFT, RIGHT, TOP, BOTTOM, LABEL_CLOSEUP, TILT_UP, TILT_DOWN
     image_data_url: str  # Cropped product box frame
     original_image_data_url: Optional[str] = None  # Full uncropped camera frame
+    poor_crop: Optional[bool] = False
 
 class Complete360ScanRequest(BaseModel):
-    captures: List[Scan360Capture]
+    captures: Optional[List[Scan360Capture]] = None
+    job_id: Optional[str] = None
+    frames: Optional[List[Dict[str, Any]]] = None
+
+class InitUploadFileItem(BaseModel):
+    angle_tag: str
+    filename: str
+    poor_crop: Optional[bool] = False
+
+class InitUploadRequest(BaseModel):
+    files: List[InitUploadFileItem]
 
 class PreviewTestRequest(BaseModel):
     image_data_url: str
@@ -207,6 +218,66 @@ async def simulate_cart_camera_action(
     else:
         raise HTTPException(status_code=400, detail=f"Unknown action type: {req.action_type}")
 
+@router.post("/products/{product_id}/360-scan/init-upload")
+def init_360_scan_upload(
+    product_id: str,
+    req: InitUploadRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Initializes direct client-side upload to Supabase Storage:
+    1. Generates a new ScanJob in the database.
+    2. Requests HMAC-signed upload URLs from Supabase Storage for each file.
+    3. If Supabase signed URLs are generated, client uploads JPEGs (max 640px) directly,
+       bypassing the backend server memory/bandwidth entirely.
+    4. If Supabase is offline/unconfigured, falls back to server-side base64 upload.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    job_id = str(uuid.uuid4())
+    upload_items = []
+    direct_available = storage_service.is_supabase_configured
+
+    if direct_available:
+        for f in req.files:
+            signed_data = storage_service.create_signed_upload_url(job_id, f.filename)
+            if signed_data:
+                upload_items.append({
+                    "angle_tag": f.angle_tag,
+                    "filename": f.filename,
+                    "upload_url": signed_data["upload_url"],
+                    "frame_ref": signed_data["frame_ref"],
+                    "poor_crop": bool(f.poor_crop),
+                })
+            else:
+                direct_available = False
+                break
+
+    # Instantiate placeholder job
+    scan_job = ScanJob(
+        id=job_id,
+        product_id=product.id,
+        status="PENDING",
+        stage="AWAITING_UPLOAD",
+        stage_message="Awaiting client upload of frames...",
+        done=0,
+        total=len(req.files),
+        frame_paths_json=None
+    )
+    db.add(scan_job)
+    db.commit()
+
+    return {
+        "job_id": job_id,
+        "product_id": product.id,
+        "direct_upload": direct_available and len(upload_items) == len(req.files),
+        "upload_items": upload_items if direct_available else [],
+    }
+
+
 @router.post("/products/{product_id}/360-scan/complete")
 async def save_360_scan_embeddings(
     product_id: str,
@@ -216,22 +287,72 @@ async def save_360_scan_embeddings(
 ):
     """
     Asynchronous 360-degree camera capture enrollment:
-    1. Saves incoming camera frames to Supabase Storage (or local storage fallback).
-    2. Instantiates a ScanJob in the database with status PENDING.
-    3. Queues the background worker to process frames without blocking the client.
-    4. Immediately returns job_id (<200ms) for real-time polling by the UI.
+    Accepts either:
+    1. Pre-uploaded frames (direct upload via signed URLs with job_id and frames list).
+    2. Direct camera captures (base64 fallback for offline/local environments).
+    Queues background worker and immediately returns job_id (<200ms).
     """
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # Path A: Direct upload was used (client sent list of stored frame refs)
+    if req.frames:
+        job = None
+        if req.job_id:
+            job = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
+
+        if not job:
+            job = ScanJob(
+                id=req.job_id or str(uuid.uuid4()),
+                product_id=product.id,
+                status="PENDING",
+                stage="QUEUED",
+                stage_message=f"Direct upload verified ({len(req.frames)} frames).",
+                done=0,
+                total=len(req.frames),
+            )
+            db.add(job)
+
+        clean_frames = []
+        for item in req.frames:
+            clean_frames.append({
+                "angle_tag": item.get("angle_tag", "UNKNOWN"),
+                "frame_ref": item.get("frame_ref", ""),
+                "poor_crop": bool(item.get("poor_crop", False)),
+                "completed": False,
+            })
+
+        job.status = "PENDING"
+        job.stage = "QUEUED"
+        job.stage_message = f"Enqueued {len(clean_frames)} frames for processing."
+        job.total = len(clean_frames)
+        job.done = 0
+        job.frame_paths_json = json.dumps({"frames": clean_frames, "completed_vectors": [], "primary_frame_url": None})
+        db.commit()
+
+        from app.services.scan_worker import enqueue_scan_job
+        enqueue_scan_job(job.id)
+
+        return {
+            "status": "PENDING",
+            "job_id": job.id,
+            "product_id": product.id,
+            "total_frames": len(clean_frames),
+            "message": "360-scan frames received. Background processing started."
+        }
+
+    # Path B: Fallback base64 captures
     if not req.captures:
         raise HTTPException(status_code=400, detail="No camera frames provided in 360 scan payload.")
 
-    job_id = str(uuid.uuid4())
+    job_id = req.job_id or str(uuid.uuid4())
     saved_frames = []
 
-    for idx, cap in enumerate(req.captures):
+    # Cap base64 captures to max 40 frames
+    capped_captures = req.captures[:40]
+
+    for idx, cap in enumerate(capped_captures):
         raw_b64 = cap.image_data_url
         if raw_b64.startswith("data:image"):
             parts = raw_b64.split(",", 1)
@@ -243,42 +364,42 @@ async def save_360_scan_embeddings(
             filename = f"{product.barcode}_{cap.angle_tag}_{idx}_{uuid.uuid4().hex[:6]}.jpg"
             frame_ref = storage_service.save_frame(job_id, filename, image_bytes)
 
-            orig_ref = None
-            if cap.original_image_data_url:
-                try:
-                    orig_raw = cap.original_image_data_url
-                    if orig_raw.startswith("data:image"):
-                        parts_o = orig_raw.split(",", 1)
-                        if len(parts_o) == 2:
-                            orig_raw = parts_o[1]
-                    orig_bytes = base64.b64decode(orig_raw)
-                    orig_filename = f"{product.barcode}_{cap.angle_tag}_{idx}_orig_{uuid.uuid4().hex[:6]}.jpg"
-                    orig_ref = storage_service.save_frame(job_id, orig_filename, orig_bytes)
-                except Exception as oe:
-                    logger.warning(f"Error saving original frame: {oe}")
-
             saved_frames.append({
                 "angle_tag": cap.angle_tag,
                 "frame_ref": frame_ref,
-                "original_frame_ref": orig_ref
+                "poor_crop": bool(cap.poor_crop),
+                "completed": False,
             })
         except Exception as e:
-            logger.warning(f"Error saving frame {cap.angle_tag}: {e}")
+            logger.warning(f"Error saving frame {cap.angle_tag}: {sanitize_secrets(e)}")
 
     if not saved_frames:
         raise HTTPException(status_code=400, detail="Failed to decode or store any valid image frames.")
 
-    scan_job = ScanJob(
-        id=job_id,
-        product_id=product.id,
-        status="PENDING",
-        stage="SAVING_FRAMES",
-        stage_message=f"Uploaded {len(saved_frames)} frames. Enqueuing background processing...",
-        done=0,
-        total=len(saved_frames),
-        frame_paths_json=json.dumps(saved_frames)
-    )
-    db.add(scan_job)
+    scan_job = None
+    if req.job_id:
+        scan_job = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
+
+    if not scan_job:
+        scan_job = ScanJob(
+            id=job_id,
+            product_id=product.id,
+            status="PENDING",
+            stage="SAVING_FRAMES",
+            stage_message=f"Uploaded {len(saved_frames)} frames. Enqueuing background processing...",
+            done=0,
+            total=len(saved_frames),
+            frame_paths_json=json.dumps({"frames": saved_frames, "completed_vectors": [], "primary_frame_url": None})
+        )
+        db.add(scan_job)
+    else:
+        scan_job.status = "PENDING"
+        scan_job.stage = "SAVING_FRAMES"
+        scan_job.stage_message = f"Uploaded {len(saved_frames)} frames. Enqueuing background processing..."
+        scan_job.done = 0
+        scan_job.total = len(saved_frames)
+        scan_job.frame_paths_json = json.dumps({"frames": saved_frames, "completed_vectors": [], "primary_frame_url": None})
+
     db.commit()
     db.refresh(scan_job)
 
@@ -400,6 +521,7 @@ def retry_scan_job(
 ):
     """
     Retries a failed or cancelled scan job using previously saved frames without re-uploading.
+    Resumes from the last completed frame.
     """
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     if not job:
@@ -413,9 +535,8 @@ def retry_scan_job(
 
     job.status = "PENDING"
     job.stage = "QUEUED"
-    job.stage_message = "Retry enqueued. Waiting for worker..."
+    job.stage_message = "Retry enqueued. Resuming from last completed frame..."
     job.error = None
-    job.done = 0
     db.commit()
 
     enqueue_scan_job(job.id)
@@ -424,6 +545,34 @@ def retry_scan_job(
         "status": "PENDING",
         "job_id": job.id,
         "message": "Job re-queued successfully."
+    }
+
+
+@router.delete("/jobs/{job_id}")
+def delete_scan_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Deletes a scan job from the database.
+    If the job is currently processing, it is cancelled first.
+    Admin or Manager only.
+    """
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found.")
+
+    from app.services.scan_worker import cancel_job
+    cancel_job(job.id)
+
+    db.delete(job)
+    db.commit()
+
+    return {
+        "status": "DELETED",
+        "job_id": job_id,
+        "message": "Scan job successfully deleted."
     }
 
 @router.post("/products/preview-test")

@@ -121,6 +121,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const phaseRef = useRef<'WAITING_STEADY' | 'COUNTDOWN' | 'CAPTURING' | 'STEP_COMPLETED'>('WAITING_STEADY');
   const isPausedRef = useRef<boolean>(false);
   const currentStepIdxRef = useRef<number>(0);
+  const retakeTargetAngleRef = useRef<string | null>(null);
   const productConfirmedRef = useRef<boolean>(false);
   const detectedBoxRef = useRef<ProductBoundingBox | null>(null);
   const faceDetectedRef = useRef<boolean>(false);
@@ -308,6 +309,37 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     setStepPhase('STEP_COMPLETED');
 
     setTimeout(() => {
+      // If user was retaking a specific angle from gallery:
+      if (retakeTargetAngleRef.current) {
+        retakeTargetAngleRef.current = null;
+        setCaptures((latestCaptures) => {
+          const completedCount = REQUIRED_ANGLES.filter((a) => (latestCaptures[a.tag]?.length || 0) >= 4).length;
+          if (completedCount === REQUIRED_ANGLES.length) {
+            setIsScanning(false);
+            setIsDone(true);
+          } else {
+            const missing = REQUIRED_ANGLES.find((a) => (latestCaptures[a.tag]?.length || 0) < 4);
+            if (missing) {
+              const nextIdx = REQUIRED_ANGLES.findIndex((a) => a.tag === missing.tag);
+              setCurrentStepIdx(nextIdx);
+              currentStepIdxRef.current = nextIdx;
+              setProductConfirmedForStep(false);
+              setStepFrames([]);
+              setStepPhase('WAITING_STEADY');
+              setCountdown(3);
+              lastCapturedGrayRef.current = null;
+              steadyCounterRef.current = 0;
+              stepStartTimeRef.current = Date.now();
+            } else {
+              setIsScanning(false);
+              setIsDone(true);
+            }
+          }
+          return latestCaptures;
+        });
+        return;
+      }
+
       if (currentStepIdxRef.current < REQUIRED_ANGLES.length - 1) {
         const nextIdx = currentStepIdxRef.current + 1;
         setCurrentStepIdx(nextIdx);
@@ -765,15 +797,26 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const handleRetakeInGallery = (tag: string) => {
     const idx = REQUIRED_ANGLES.findIndex((a) => a.tag === tag);
     if (idx !== -1) {
+      retakeTargetAngleRef.current = tag;
       setCurrentStepIdx(idx);
+      currentStepIdxRef.current = idx;
       setProductConfirmedForStep(false);
       setStepFrames([]);
       setStepPhase('WAITING_STEADY');
       setCountdown(3);
+      steadyCounterRef.current = 0;
       lastCapturedGrayRef.current = null;
       stepStartTimeRef.current = Date.now();
       setIsScanning(true);
       setIsDone(false);
+
+      // Reconnect video stream to prevent freeze
+      if (videoRef.current && streamRef.current) {
+        if (videoRef.current.srcObject !== streamRef.current) {
+          videoRef.current.srcObject = streamRef.current;
+        }
+        videoRef.current.play().catch(() => {});
+      }
     }
   };
 
@@ -785,40 +828,160 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     });
   };
 
+  const handleDeleteSingleFrame = (tag: string, index: number) => {
+    setCaptures((prev) => {
+      const list = prev[tag] || [];
+      const updated = list.filter((_, idx) => idx !== index);
+      const copy = { ...prev };
+      if (updated.length === 0) {
+        delete copy[tag];
+        setSelectedGalleryAngle(null);
+      } else {
+        copy[tag] = updated;
+      }
+      return copy;
+    });
+  };
+
+  // Helper to downsample captured frame to ~640px JPEG quality 80%
+  const downsampleTo640Jpeg = (dataUrl: string): Promise<{ blob: Blob; jpegDataUrl: string }> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1.0, 640 / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, w, h);
+        }
+        const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        canvas.toBlob((blob) => {
+          resolve({ blob: blob || new Blob(), jpegDataUrl });
+        }, 'image/jpeg', 0.8);
+      };
+      img.onerror = () => {
+        resolve({ blob: new Blob(), jpegDataUrl: dataUrl });
+      };
+      img.src = dataUrl;
+    });
+  };
+
   // Coverage Rule: Target 40 to 80 good frames across all 9 angles
   const totalCapturedFrames = Object.values(captures).reduce((sum, arr) => sum + arr.length, 0);
   const completedAngles = REQUIRED_ANGLES.filter((a) => (captures[a.tag]?.length || 0) >= 4);
   const completedAnglesCount = completedAngles.length;
   const hasLabelCloseup = (captures['LABEL_CLOSEUP']?.length || 0) >= 4;
-  const meetsCoverageRule = completedAnglesCount === REQUIRED_ANGLES.length && totalCapturedFrames >= 40 && hasLabelCloseup;
+  const meetsCoverageRule = completedAnglesCount === REQUIRED_ANGLES.length && totalCapturedFrames >= 36 && hasLabelCloseup;
 
-  // Submit Real Frames: Uploads all 40-80 cropped and original frames to backend as background job
+  // Submit Real Frames: Uploads smaller ~640px JPEGs (quality 80) directly to Supabase Storage via signed URLs
   const handleSaveEmbeddings = async () => {
     if (!meetsCoverageRule) return;
 
     setIsProcessing(true);
     setJobError(null);
     setJobStage('SAVING_FRAMES');
-    setJobStageMessage('Uploading cropped & original frames to cloud storage...');
+    setJobStageMessage('Optimizing frames to 640px JPEGs (quality 80)...');
     setJobDone(0);
-    setJobTotal(totalCapturedFrames);
 
     try {
-      const payload: { angle_tag: string; image_data_url: string; original_image_data_url?: string }[] = [];
+      // 1. Gather all frames across angles, capped at max 40 frames total
+      const allFrames: { angle_tag: string; dataUrl: string; poor_crop: boolean }[] = [];
       for (const [angle_tag, frameList] of Object.entries(captures)) {
-        for (const frame of frameList) {
-          payload.push({
+        for (const frame of frameList.slice(0, 5)) {
+          allFrames.push({
             angle_tag,
-            image_data_url: frame.dataUrl, // Cropped product box
-            original_image_data_url: frame.originalDataUrl, // Original full frame
+            dataUrl: frame.dataUrl,
+            poor_crop: frame.blurScore < 40,
           });
+          if (allFrames.length >= 40) break;
         }
+        if (allFrames.length >= 40) break;
       }
 
-      const res = await api.complete360Scan(product.id, payload);
-      setActiveJobId(res.job_id);
-      setJobStatus('PENDING');
-      setJobStageMessage('Frames saved. Waiting for background worker...');
+      setJobTotal(allFrames.length);
+
+      // 2. Downsample all frames to ~640px JPEG quality 80%
+      const compressedFrames: { angle_tag: string; blob: Blob; jpegDataUrl: string; filename: string; poor_crop: boolean }[] = [];
+      for (let i = 0; i < allFrames.length; i++) {
+        const f = allFrames[i];
+        const { blob, jpegDataUrl } = await downsampleTo640Jpeg(f.dataUrl);
+        compressedFrames.push({
+          angle_tag: f.angle_tag,
+          blob,
+          jpegDataUrl,
+          filename: `${product.barcode}_${f.angle_tag}_${i}_${Math.random().toString(36).substring(2, 8)}.jpg`,
+          poor_crop: f.poor_crop,
+        });
+      }
+
+      // 3. Request signed upload URLs from backend
+      setJobStageMessage('Requesting signed cloud storage upload URLs...');
+      const initResp = await api.init360ScanUpload(
+        product.id,
+        compressedFrames.map((cf) => ({
+          angle_tag: cf.angle_tag,
+          filename: cf.filename,
+          poor_crop: cf.poor_crop,
+        }))
+      );
+
+      setActiveJobId(initResp.job_id);
+
+      // Path A: Direct upload directly to Supabase Storage
+      if (initResp.direct_upload && initResp.upload_items.length === compressedFrames.length) {
+        setJobStageMessage('Uploading frames directly to Supabase Storage...');
+        const uploadedRefs: { angle_tag: string; frame_ref: string; poor_crop: boolean }[] = [];
+
+        for (let i = 0; i < compressedFrames.length; i++) {
+          const item = initResp.upload_items[i];
+          const cf = compressedFrames[i];
+          setJobStageMessage(`Uploading frame ${i + 1}/${compressedFrames.length} directly to cloud storage...`);
+          setJobDone(i);
+
+          const putRes = await fetch(item.upload_url, {
+            method: 'PUT',
+            body: cf.blob,
+            headers: {
+              'Content-Type': 'image/jpeg',
+            },
+          });
+
+          if (!putRes.ok) {
+            throw new Error(`Direct upload failed for ${item.filename}: HTTP ${putRes.status}`);
+          }
+
+          uploadedRefs.push({
+            angle_tag: item.angle_tag,
+            frame_ref: item.frame_ref,
+            poor_crop: item.poor_crop,
+          });
+        }
+
+        // Notify complete with the uploaded references
+        setJobStageMessage('Frames saved. Starting background recognition worker...');
+        await api.complete360Scan(product.id, {
+          job_id: initResp.job_id,
+          frames: uploadedRefs,
+        });
+        setJobStatus('PENDING');
+        setJobStageMessage('Direct upload complete. Waiting for background worker...');
+      } else {
+        // Path B: Fallback base64 upload
+        setJobStageMessage('Sending frames to backend...');
+        const payload = compressedFrames.map((cf) => ({
+          angle_tag: cf.angle_tag,
+          image_data_url: cf.jpegDataUrl,
+          poor_crop: cf.poor_crop,
+        }));
+        const res = await api.complete360Scan(product.id, payload);
+        setActiveJobId(res.job_id);
+        setJobStatus('PENDING');
+        setJobStageMessage('Frames saved. Waiting for background worker...');
+      }
     } catch (e: any) {
       setJobError(e.message || 'Failed to submit 360-scan frames');
       setJobStatus('FAILED');
@@ -927,12 +1090,15 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   // Retry job without re-uploading frames
   const handleRetryJob = async () => {
-    if (!activeJobId) return;
+    if (!activeJobId) {
+      handleSaveEmbeddings();
+      return;
+    }
     try {
       setJobError(null);
       setJobStatus('PENDING');
       setJobStage('QUEUED');
-      setJobStageMessage('Re-enqueuing job...');
+      setJobStageMessage('Resuming enrollment from last completed frame...');
       await api.retryScanJob(activeJobId);
     } catch (e: any) {
       setJobError(e.message || 'Failed to retry job.');
@@ -1031,9 +1197,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         </div>
       )}
 
-      {!isDone ? (
-        /* Real Viewfinder and Circular Progress Ring */
-        <div className="space-y-6">
+      {/* Real Viewfinder and Circular Progress Ring (Always kept mounted in DOM to prevent video stream freeze) */}
+      <div className={isDone ? 'hidden' : 'space-y-6'}>
           <div className="bg-slate-900 rounded-3xl overflow-hidden border border-slate-800 shadow-2xl relative aspect-square max-w-md mx-auto flex items-center justify-center p-6 text-white select-none">
             {/* Real Webcam Live Feed */}
             <video
@@ -1362,8 +1527,9 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             </div>
           </div>
         </div>
-      ) : (
-        /* Final 360 Review Screen (CROPPED Thumbnails, Coverage Rule Check) */
+
+      {/* Final 360 Review Screen (CROPPED Thumbnails, Coverage Rule Check) */}
+      {isDone && (
         <div className="space-y-6">
           <div className="text-center space-y-1">
             <span className="inline-block p-3 bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 rounded-full mb-1">
@@ -1544,9 +1710,16 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
             <div className="grid grid-cols-3 gap-2.5 max-h-96 overflow-y-auto p-1">
               {captures[selectedGalleryAngle].map((f, i) => (
-                <div key={i} className="space-y-1 bg-slate-900 p-2 rounded-xl border border-slate-800">
-                  <div className="aspect-square bg-black rounded-lg overflow-hidden flex items-center justify-center">
+                <div key={i} className="space-y-1 bg-slate-900 p-2 rounded-xl border border-slate-800 relative group">
+                  <div className="aspect-square bg-black rounded-lg overflow-hidden flex items-center justify-center relative">
                     <img src={f.dataUrl} alt={`Frame ${i + 1}`} className="w-full h-full object-contain" />
+                    <button
+                      onClick={() => handleDeleteSingleFrame(selectedGalleryAngle, i)}
+                      className="absolute top-1 right-1 bg-red-600/90 hover:bg-red-600 text-white p-1 rounded-md opacity-80 hover:opacity-100 transition-opacity"
+                      title="Delete this frame"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
                   </div>
                   <div className="flex justify-between text-[10px] text-slate-400 font-mono">
                     <span>Frame #{i + 1}</span>

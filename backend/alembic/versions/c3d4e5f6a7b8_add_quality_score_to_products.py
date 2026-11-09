@@ -43,3 +43,4 @@ def downgrade() -> None:
         existing_cols = {col["name"] for col in inspector.get_columns("products")}
         if "quality_score" in existing_cols:
             op.drop_column("products", "quality_score")
+
