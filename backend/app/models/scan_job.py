@@ -26,3 +26,4 @@ class ScanJob(Base):
 
     # Relationships
     product = relationship("Product", backref="scan_jobs")
+

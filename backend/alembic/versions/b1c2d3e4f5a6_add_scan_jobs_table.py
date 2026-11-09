@@ -65,3 +65,4 @@ def downgrade() -> None:
     existing_tables = set(inspector.get_table_names())
     if "scan_jobs" in existing_tables:
         op.drop_table("scan_jobs")
+

@@ -69,7 +69,10 @@ def test_db():
 
 
 @pytest.fixture(scope="function")
-def client(test_db):
+def client(test_db, monkeypatch):
+    monkeypatch.setattr("app.database.check_db_health", lambda: True)
+    monkeypatch.setattr("app.main.check_db_health", lambda: True)
+
     def override_get_db():
         db = TestingSessionLocal()
         try:
@@ -172,8 +175,7 @@ def test_downscale_and_background_removal():
     assert result.size == (224, 224)
 
 
-@pytest.mark.asyncio
-async def test_execute_scan_job_internal(test_db):
+def test_execute_scan_job_internal(test_db):
     # Save 2 frames locally via storage_service
     frame_bytes = base64.b64decode(_create_sample_base64_image().split(",", 1)[1])
     ref1 = storage_service.save_frame("job-test-exec", "f1.jpg", frame_bytes)
@@ -197,7 +199,7 @@ async def test_execute_scan_job_internal(test_db):
     dummy_vec = [0.05] * 512
     with patch("app.services.scan_worker.get_embeddings_batch", return_value=[dummy_vec] * 16):
         with patch("app.services.scan_worker.SessionLocal", return_value=test_db):
-            await _execute_scan_job_internal("job-test-exec")
+            asyncio.run(_execute_scan_job_internal("job-test-exec"))
 
     # Refresh job
     test_db.expire_all()
@@ -245,3 +247,4 @@ def test_retry_scan_job(client, test_db):
         assert reloaded.error is None
         # Verify saved frames were preserved for retry
         assert reloaded.frame_paths_json == '[{"angle_tag": "FRONT", "frame_ref": "ref1"}]'
+
