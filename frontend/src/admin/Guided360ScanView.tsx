@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Camera, Check, RefreshCw, Volume2, VolumeX, Sparkles, AlertCircle,
-  ArrowRight, ArrowLeft, X, ShieldCheck, Trash2, Sun, Moon, Eye, AlertTriangle, CheckCircle2, Plus, Zap
+  ArrowLeft, X, Trash2, AlertTriangle, CheckCircle2, Plus, Zap,
+  Play, Pause, SkipForward
 } from 'lucide-react';
 import { Product } from '../types';
 import { api } from '../services/api';
@@ -12,6 +13,12 @@ interface Props {
   onPreviewTest: () => void;
 }
 
+export interface CapturedFrame {
+  dataUrl: string;
+  blurScore: number;
+  timestamp: number;
+}
+
 interface AngleStep {
   tag: string;
   label: string;
@@ -20,27 +27,37 @@ interface AngleStep {
   degree: number;
 }
 
+// 9 Required Angles covering all packaging perspectives
 const REQUIRED_ANGLES: AngleStep[] = [
   { tag: 'FRONT', label: 'Front View', prompt: 'Hold item facing directly at camera', speechText: 'Show the front packaging, hold still', degree: 0 },
-  { tag: 'RIGHT', label: 'Right Side', prompt: 'Rotate slowly to the right side', speechText: 'Rotate slowly to the right', degree: 51 },
-  { tag: 'BACK', label: 'Back Packaging', prompt: 'Show the back packaging', speechText: 'Show the back packaging', degree: 103 },
-  { tag: 'LEFT', label: 'Left Side', prompt: 'Rotate to show the left side', speechText: 'Rotate to show the left side', degree: 154 },
-  { tag: 'TOP', label: 'Top Lid', prompt: 'Tilt up to show the top lid', speechText: 'Tilt up for the top lid', degree: 206 },
-  { tag: 'BOTTOM', label: 'Bottom Base', prompt: 'Tilt down to show the base', speechText: 'Tilt down for the bottom base', degree: 257 },
-  { tag: 'LABEL_CLOSEUP', label: 'Label Close-up', prompt: 'Bring closer to show nutrition & barcode label, hold still', speechText: 'Bring it closer for label close-up, hold still', degree: 308 },
+  { tag: 'RIGHT', label: 'Right Side', prompt: 'Rotate slowly to the right side', speechText: 'Rotate slowly to the right', degree: 40 },
+  { tag: 'BACK', label: 'Back Packaging', prompt: 'Show the back packaging', speechText: 'Show the back packaging', degree: 80 },
+  { tag: 'LEFT', label: 'Left Side', prompt: 'Rotate to show the left side', speechText: 'Rotate to show the left side', degree: 120 },
+  { tag: 'TOP', label: 'Top Lid', prompt: 'Tilt up to show the top lid', speechText: 'Tilt up for the top lid', degree: 160 },
+  { tag: 'BOTTOM', label: 'Bottom Base', prompt: 'Tilt down to show the base', speechText: 'Tilt down for the bottom base', degree: 200 },
+  { tag: 'LABEL_CLOSEUP', label: 'Label Close-up', prompt: 'Bring closer to show nutrition & barcode label, hold still', speechText: 'Bring it closer for label close-up, hold still', degree: 240 },
+  { tag: 'TILT_UP', label: 'Top-Angle 45°', prompt: 'Tilt product 45° upward towards ceiling', speechText: 'Tilt forty-five degrees upward, hold still', degree: 280 },
+  { tag: 'TILT_DOWN', label: 'Bottom-Angle 45°', prompt: 'Tilt product 45° downward towards desk', speechText: 'Tilt forty-five degrees downward, hold still', degree: 320 },
 ];
 
 export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPreviewTest }) => {
   const [currentStepIdx, setCurrentStepIdx] = useState(0);
-  const [captures, setCaptures] = useState<Record<string, { dataUrl: string; blurScore: number }>>({});
+  const [captures, setCaptures] = useState<Record<string, CapturedFrame[]>>({});
+  const [stepFrames, setStepFrames] = useState<CapturedFrame[]>([]);
   const [isScanning, setIsScanning] = useState(true);
+  const [isPaused, setIsPaused] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
-  
+
+  // Guided Step Progress & Timing States
+  const [stepPhase, setStepPhase] = useState<'WAITING_STEADY' | 'COUNTDOWN' | 'CAPTURING' | 'STEP_COMPLETED'>('WAITING_STEADY');
+  const [countdown, setCountdown] = useState<number>(3);
+  const [stepElapsedTime, setStepElapsedTime] = useState<number>(0);
+
   // Real Frame Analysis Telemetry
   const [liveBlurScore, setLiveBlurScore] = useState<number>(0);
   const [liveBrightness, setLiveBrightness] = useState<number>(120);
-  const [cameraFeedback, setCameraFeedback] = useState<string>('Hold item in center outline');
+  const [cameraFeedback, setCameraFeedback] = useState<string>('Hold item steady in center outline');
   const [focusStatus, setFocusStatus] = useState<'BLURRY' | 'STEADY' | 'SHARP'>('BLURRY');
   const [cameraError, setCameraError] = useState<string | null>(null);
 
@@ -63,10 +80,24 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const steadyFramesRef = useRef<number>(0);
   const animFrameRef = useRef<number | null>(null);
 
-  // Explicit helper to immediately stop webcam hardware and release camera tracks
+  // Refs for precise timing, motion detection, and duplicate skipping
+  const stepStartTimeRef = useRef<number>(Date.now());
+  const scanStartTimeRef = useRef<number>(Date.now());
+  const lastCaptureTimeRef = useRef<number>(0);
+  const prevGrayRef = useRef<Float32Array | null>(null);
+  const lastCapturedGrayRef = useRef<Float32Array | null>(null);
+  const steadyCounterRef = useRef<number>(0);
+  const phaseRef = useRef<'WAITING_STEADY' | 'COUNTDOWN' | 'CAPTURING' | 'STEP_COMPLETED'>('WAITING_STEADY');
+  const isPausedRef = useRef<boolean>(false);
+  const currentStepIdxRef = useRef<number>(0);
+
+  phaseRef.current = stepPhase;
+  isPausedRef.current = isPaused;
+  currentStepIdxRef.current = currentStepIdx;
+
+  // Stop camera tracks immediately
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -77,7 +108,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     }
   }, []);
 
-  // Check if this product has an active job running in the background
+  // Check if this product already has an active background job
   useEffect(() => {
     let mounted = true;
     async function checkActive() {
@@ -130,7 +161,6 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
       } catch (err: any) {
         console.error('Camera access failed:', err);
-        // Fallback to basic video constraint
         try {
           const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
           if (!active) {
@@ -174,7 +204,59 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     }
   }, [currentStepIdx, voiceEnabled, isScanning, isDone]);
 
-  // 3. Real-time Frame Analysis (Variance of Laplacian + Brightness + Centering)
+  // Internal helper to capture a full-resolution JPEG frame
+  const captureFrameInternal = useCallback((): CapturedFrame | null => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) return null;
+
+    const captureCanvas = document.createElement('canvas');
+    captureCanvas.width = video.videoWidth || 1280;
+    captureCanvas.height = video.videoHeight || 720;
+    const ctx = captureCanvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.90);
+    return {
+      dataUrl,
+      blurScore: liveBlurScore,
+      timestamp: Date.now(),
+    };
+  }, [liveBlurScore]);
+
+  // Finish a step when minimum good frames (>= 5) and duration (>= 3.0s) are met
+  const finishStep = useCallback((completedFrames: CapturedFrame[]) => {
+    const step = REQUIRED_ANGLES[currentStepIdxRef.current];
+    const durationSec = ((Date.now() - stepStartTimeRef.current) / 1000).toFixed(2);
+    console.log(`[Guided360] Step ${currentStepIdxRef.current + 1}/9 (${step.tag}) completed in ${durationSec}s, captured ${completedFrames.length} frames.`);
+
+    setCaptures((prev) => ({ ...prev, [step.tag]: completedFrames }));
+    setStepPhase('STEP_COMPLETED');
+
+    setTimeout(() => {
+      if (currentStepIdxRef.current < REQUIRED_ANGLES.length - 1) {
+        const nextIdx = currentStepIdxRef.current + 1;
+        setCurrentStepIdx(nextIdx);
+        setStepFrames([]);
+        setStepPhase('WAITING_STEADY');
+        setCountdown(3);
+        lastCapturedGrayRef.current = null;
+        steadyCounterRef.current = 0;
+        stepStartTimeRef.current = Date.now();
+        console.log(`[Guided360] Step ${nextIdx + 1}/9 (${REQUIRED_ANGLES[nextIdx].tag}) started at ${new Date().toISOString()}`);
+      } else {
+        const totalScanSec = ((Date.now() - scanStartTimeRef.current) / 1000).toFixed(2);
+        console.log(`[Guided360] Full 360 scan finished in ${totalScanSec}s across all 9 angles.`);
+        setIsScanning(false);
+        setIsDone(true);
+        if (voiceEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+          window.speechSynthesis.speak(new SpeechSynthesisUtterance('All packaging angles captured. Please review your frames.'));
+        }
+      }
+    }, 700);
+  }, [voiceEnabled]);
+
+  // 3. Real-time Frame Analysis Loop (Sharpness, Steady Motion Detection, Duplicate Filtering)
   useEffect(() => {
     if (!isScanning || isDone) return;
 
@@ -205,6 +287,17 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
         const avgBrightness = Math.round(totalBrightness / (160 * 120));
         setLiveBrightness(avgBrightness);
+
+        // Motion Detection: compute mean pixel difference against previous frame
+        let motionDiff = 0;
+        if (prevGrayRef.current) {
+          let diffSum = 0;
+          for (let i = 0; i < gray.length; i += 2) {
+            diffSum += Math.abs(gray[i] - prevGrayRef.current[i]);
+          }
+          motionDiff = diffSum / (gray.length / 2);
+        }
+        prevGrayRef.current = new Float32Array(gray);
 
         // Center ROI (crop 25% to 75% region where user holds item)
         const startX = 35;
@@ -245,29 +338,107 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
         setLiveBlurScore(blurScore);
 
-        // Frame quality logic
-        if (avgBrightness < 35) {
+        const isSharp = blurScore >= 45;
+        const isSteady = motionDiff < 10.0;
+        const isLightingOk = avgBrightness >= 35;
+
+        // Visual HUD Feedback
+        if (!isLightingOk) {
           setCameraFeedback('Too dark — bring item into better lighting');
           setFocusStatus('BLURRY');
-          steadyFramesRef.current = 0;
-        } else if (blurScore < 25) {
-          setCameraFeedback('Move slower — holding still reduces motion blur');
+        } else if (!isSteady) {
+          setCameraFeedback('Holding unsteady — please hold still');
           setFocusStatus('BLURRY');
-          steadyFramesRef.current = 0;
-        } else if (blurScore < 45) {
-          setCameraFeedback('Bring the item closer to the camera');
+        } else if (!isSharp) {
+          setCameraFeedback('Slightly blurry — adjust distance or hold still');
           setFocusStatus('STEADY');
-          steadyFramesRef.current = 0;
         } else {
-          // Frame is sharp and item is centered!
-          setCameraFeedback('Sharp frame! Hold steady for auto-capture...');
+          setCameraFeedback('Sharp & steady! Capturing...');
           setFocusStatus('SHARP');
-          steadyFramesRef.current += 1;
+        }
 
-          // Auto-capture when held steady for ~6 frames (~400-600ms)
-          if (autoCaptureEnabled && steadyFramesRef.current >= 6) {
-            steadyFramesRef.current = 0;
-            handleCaptureRealFrame(blurScore);
+        // Only advance guided capture if not paused and auto-capture is enabled
+        if (!isPausedRef.current && autoCaptureEnabled) {
+          const currentPhase = phaseRef.current;
+          const now = Date.now();
+          const stepElapsed = now - stepStartTimeRef.current;
+          setStepElapsedTime(Math.round(stepElapsed / 1000));
+
+          // Phase 1: Waiting for Steady & Sharp
+          if (currentPhase === 'WAITING_STEADY') {
+            if (isSharp && isSteady && isLightingOk) {
+              steadyCounterRef.current += 1;
+              if (steadyCounterRef.current >= 4) {
+                // Steady for ~250-300ms, start countdown
+                steadyCounterRef.current = 0;
+                stepStartTimeRef.current = now;
+                setStepPhase('COUNTDOWN');
+                setCountdown(3);
+                console.log(`[Guided360] Step ${currentStepIdxRef.current + 1}/9 steady confirmed. Starting 3s countdown.`);
+              }
+            } else {
+              steadyCounterRef.current = 0;
+            }
+          }
+
+          // Phase 2: Countdown "Hold still... 3, 2, 1" (at least 3 seconds total)
+          else if (currentPhase === 'COUNTDOWN') {
+            if (motionDiff > 25.0) {
+              // Sudden jerky movement cancels countdown
+              setStepPhase('WAITING_STEADY');
+              steadyCounterRef.current = 0;
+              setCountdown(3);
+            } else {
+              if (stepElapsed < 1000) {
+                setCountdown(3);
+              } else if (stepElapsed < 2000) {
+                setCountdown(2);
+              } else if (stepElapsed < 3000) {
+                setCountdown(1);
+              } else {
+                // Countdown complete! Move to capturing 5 to 8 frames
+                setStepPhase('CAPTURING');
+                lastCaptureTimeRef.current = 0;
+              }
+            }
+          }
+
+          // Phase 3: Capturing 5 to 8 frames spaced >= 300ms apart with near-duplicate skip
+          else if (currentPhase === 'CAPTURING') {
+            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk) {
+              // Check for duplicate frame against last captured frame (< 2% diff)
+              let isDuplicate = false;
+              if (lastCapturedGrayRef.current) {
+                let dupSum = 0;
+                for (let i = 0; i < gray.length; i += 4) {
+                  dupSum += Math.abs(gray[i] - lastCapturedGrayRef.current[i]);
+                }
+                const meanDupDiff = dupSum / (gray.length / 4);
+                if (meanDupDiff < 3.0) {
+                  isDuplicate = true; // Duplicate detected
+                }
+              }
+
+              if (!isDuplicate && blurScore >= 35) {
+                const newFrame = captureFrameInternal();
+                if (newFrame) {
+                  lastCaptureTimeRef.current = now;
+                  lastCapturedGrayRef.current = new Float32Array(gray);
+
+                  setStepFrames((prev) => {
+                    const updated = [...prev, newFrame];
+                    const step = REQUIRED_ANGLES[currentStepIdxRef.current];
+                    console.log(`[Guided360] Step ${currentStepIdxRef.current + 1}/9 (${step.tag}) frame ${updated.length}/6 captured at +${((now - stepStartTimeRef.current)/1000).toFixed(2)}s (Sharpness: ${blurScore})`);
+
+                    // Step finishes when 6 frames captured AND duration is >= 3 seconds
+                    if (updated.length >= 6 && (now - stepStartTimeRef.current) >= 3000) {
+                      finishStep(updated);
+                    }
+                    return updated;
+                  });
+                }
+              }
+            }
           }
         }
       }
@@ -283,54 +454,81 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [isScanning, isDone, autoCaptureEnabled, currentStepIdx]);
+  }, [isScanning, isDone, autoCaptureEnabled, captureFrameInternal, finishStep]);
 
-  // 4. Capture REAL High-Resolution Frame from Live Video
-  const handleCaptureRealFrame = useCallback((blurScoreOverride?: number) => {
-    const video = videoRef.current;
-    if (!video || video.readyState < 2) return;
+  // Step Controls: Pause / Resume
+  const handleTogglePause = () => {
+    setIsPaused((prev) => !prev);
+  };
 
+  // Step Controls: Skip Angle
+  const handleSkipAngle = () => {
     const step = REQUIRED_ANGLES[currentStepIdx];
-    if (!step) return;
+    const durationSec = ((Date.now() - stepStartTimeRef.current) / 1000).toFixed(2);
+    console.log(`[Guided360] Step ${currentStepIdx + 1}/9 (${step.tag}) skipped by user after ${durationSec}s.`);
 
-    // Use full natural video dimensions
-    const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = video.videoWidth || 1280;
-    captureCanvas.height = video.videoHeight || 720;
-    const ctx = captureCanvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-    const realImageDataUrl = captureCanvas.toDataURL('image/jpeg', 0.92);
-
-    const score = blurScoreOverride ?? liveBlurScore;
-    setCaptures((prev) => ({
-      ...prev,
-      [step.tag]: { dataUrl: realImageDataUrl, blurScore: score },
-    }));
-
-    // Advance to next angle or finish
     if (currentStepIdx < REQUIRED_ANGLES.length - 1) {
-      setCurrentStepIdx((prev) => prev + 1);
+      const next = currentStepIdx + 1;
+      setCurrentStepIdx(next);
+      setStepFrames([]);
+      setStepPhase('WAITING_STEADY');
+      setCountdown(3);
+      lastCapturedGrayRef.current = null;
+      stepStartTimeRef.current = Date.now();
     } else {
       setIsScanning(false);
       setIsDone(true);
-      if (voiceEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
-        window.speechSynthesis.speak(new SpeechSynthesisUtterance('All packaging angles captured. Please review your real thumbnails.'));
-      }
     }
-  }, [currentStepIdx, liveBlurScore, voiceEnabled]);
+  };
 
-  const handleRetake = (tag: string) => {
+  // Step Controls: Retry Angle
+  const handleRetryAngle = () => {
+    const step = REQUIRED_ANGLES[currentStepIdx];
+    console.log(`[Guided360] Retrying Step ${currentStepIdx + 1}/9 (${step.tag}). Resetting frame list.`);
+    setStepFrames([]);
+    setCaptures((prev) => {
+      const copy = { ...prev };
+      delete copy[step.tag];
+      return copy;
+    });
+    setStepPhase('WAITING_STEADY');
+    setCountdown(3);
+    lastCapturedGrayRef.current = null;
+    stepStartTimeRef.current = Date.now();
+  };
+
+  // Step Controls: Capture Now (immediately snaps a frame)
+  const handleCaptureNow = () => {
+    const newFrame = captureFrameInternal();
+    if (!newFrame) return;
+
+    setStepFrames((prev) => {
+      const updated = [...prev, newFrame];
+      lastCaptureTimeRef.current = Date.now();
+      const step = REQUIRED_ANGLES[currentStepIdx];
+      console.log(`[Guided360] Manual Capture Now on Step ${currentStepIdx + 1}/9 (${step.tag}): total ${updated.length} frames.`);
+      if (updated.length >= 5 && (Date.now() - stepStartTimeRef.current) >= 2000) {
+        finishStep(updated);
+      }
+      return updated;
+    });
+  };
+
+  const handleRetakeInGallery = (tag: string) => {
     const idx = REQUIRED_ANGLES.findIndex((a) => a.tag === tag);
     if (idx !== -1) {
       setCurrentStepIdx(idx);
+      setStepFrames([]);
+      setStepPhase('WAITING_STEADY');
+      setCountdown(3);
+      lastCapturedGrayRef.current = null;
+      stepStartTimeRef.current = Date.now();
       setIsScanning(true);
       setIsDone(false);
     }
   };
 
-  const handleDelete = (tag: string) => {
+  const handleDeleteInGallery = (tag: string) => {
     setCaptures((prev) => {
       const copy = { ...prev };
       delete copy[tag];
@@ -338,11 +536,14 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     });
   };
 
-  const capturedCount = Object.keys(captures).length;
-  const hasLabelCloseup = Boolean(captures['LABEL_CLOSEUP']);
-  const meetsCoverageRule = capturedCount >= 4 && hasLabelCloseup;
+  // Coverage Rule: Target 40 to 80 good frames across all 9 angles
+  const totalCapturedFrames = Object.values(captures).reduce((sum, arr) => sum + arr.length, 0);
+  const completedAngles = REQUIRED_ANGLES.filter((a) => (captures[a.tag]?.length || 0) >= 4);
+  const completedAnglesCount = completedAngles.length;
+  const hasLabelCloseup = (captures['LABEL_CLOSEUP']?.length || 0) >= 4;
+  const meetsCoverageRule = completedAnglesCount === REQUIRED_ANGLES.length && totalCapturedFrames >= 40 && hasLabelCloseup;
 
-  // 5. Submit Real Frames: Uploads to backend, returns job_id immediately
+  // Submit Real Frames: Uploads all 40-80 frames to backend as background job
   const handleSaveEmbeddings = async () => {
     if (!meetsCoverageRule) return;
 
@@ -351,13 +552,18 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     setJobStage('SAVING_FRAMES');
     setJobStageMessage('Uploading frames to cloud storage...');
     setJobDone(0);
-    setJobTotal(Object.keys(captures).length);
+    setJobTotal(totalCapturedFrames);
 
     try {
-      const payload = Object.entries(captures).map(([angle_tag, cap]) => ({
-        angle_tag,
-        image_data_url: cap.dataUrl,
-      }));
+      const payload: { angle_tag: string; image_data_url: string }[] = [];
+      for (const [angle_tag, frameList] of Object.entries(captures)) {
+        for (const frame of frameList) {
+          payload.push({
+            angle_tag,
+            image_data_url: frame.dataUrl,
+          });
+        }
+      }
 
       const res = await api.complete360Scan(product.id, payload);
       setActiveJobId(res.job_id);
@@ -421,7 +627,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         handleDiscardScan();
       }
     } else {
-      if (capturedCount > 0) {
+      if (totalCapturedFrames > 0) {
         setShowDiscardConfirm(true);
       } else {
         handleDiscardScan();
@@ -432,6 +638,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const handleDiscardScan = () => {
     stopCamera();
     setCaptures({});
+    setStepFrames([]);
     setShowDiscardConfirm(false);
     setIsProcessing(false);
     onComplete();
@@ -466,7 +673,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isProcessing, jobStatus, capturedCount]);
+  }, [isProcessing, jobStatus, totalCapturedFrames]);
 
   // Retry job without re-uploading frames
   const handleRetryJob = async () => {
@@ -482,7 +689,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     }
   };
 
-  const progressPercent = Math.round((capturedCount / REQUIRED_ANGLES.length) * 100);
+  const progressPercent = Math.round((completedAnglesCount / REQUIRED_ANGLES.length) * 100);
   const currentStep = REQUIRED_ANGLES[currentStepIdx] || REQUIRED_ANGLES[0];
 
   return (
@@ -501,7 +708,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             </button>
             <div className="flex items-center gap-2">
               <span className="p-2 rounded-xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 font-bold font-mono text-sm">
-                REAL 360°
+                SLOW GUIDED 360°
               </span>
               <h1 className="text-xl font-bold font-display text-slate-900 dark:text-white">
                 Guided 360° Vision Enrollment
@@ -613,10 +820,10 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 />
               </svg>
 
-              {/* Angle Tick Marks Around the Ring */}
+              {/* Angle Tick Marks Around the Ring for 9 Required Angles */}
               <div className="absolute inset-0 pointer-events-none">
                 {REQUIRED_ANGLES.map((ang, idx) => {
-                  const isCaptured = Boolean(captures[ang.tag]);
+                  const isCaptured = (captures[ang.tag]?.length || 0) >= 4;
                   const isCurrent = idx === currentStepIdx;
                   const rad = (ang.degree * Math.PI) / 180;
                   const radius = 128;
@@ -642,24 +849,88 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 })}
               </div>
 
-              {/* Center Guidance Box with Blur-Score Feedback */}
-              <div className={`absolute inset-10 border-2 rounded-3xl flex flex-col items-center justify-center p-4 text-center bg-black/40 backdrop-blur-[2px] transition-all ${
-                focusStatus === 'SHARP'
+              {/* Center Guidance Box with Blur-Score Feedback & Countdown Overlay */}
+              <div className={`absolute inset-10 border-2 rounded-3xl flex flex-col items-center justify-center p-4 text-center bg-black/50 backdrop-blur-[2px] transition-all relative overflow-hidden ${
+                stepPhase === 'STEP_COMPLETED'
+                  ? 'border-emerald-400 bg-emerald-950/60 ring-4 ring-emerald-400/40'
+                  : focusStatus === 'SHARP'
                   ? 'border-emerald-400 ring-2 ring-emerald-400/30'
                   : focusStatus === 'STEADY'
                   ? 'border-amber-400'
                   : 'border-purple-400/70 border-dashed'
               }`}>
-                <Camera className={`w-8 h-8 mb-2 ${focusStatus === 'SHARP' ? 'text-emerald-400 animate-pulse' : 'text-purple-300'}`} />
+                {/* 1. Countdown Phase ("Hold still... 3, 2, 1") */}
+                {stepPhase === 'COUNTDOWN' && (
+                  <div className="absolute inset-0 bg-purple-950/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
+                    <span className="text-xs font-semibold text-purple-200 uppercase tracking-widest">
+                      Hold still...
+                    </span>
+                    <span className="text-5xl font-black font-mono text-white mt-1 drop-shadow-lg scale-110 animate-pulse">
+                      {countdown}
+                    </span>
+                    <span className="text-[10px] text-purple-300 mt-2 font-mono">
+                      Step timer: {stepElapsedTime}s (Min 3s)
+                    </span>
+                  </div>
+                )}
+
+                {/* 2. Capturing Phase (Frames 1-6) */}
+                {stepPhase === 'CAPTURING' && (
+                  <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
+                    <Sparkles className="w-7 h-7 text-amber-300 animate-spin mb-1" />
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Capturing Angles
+                    </span>
+                    <span className="text-xl font-bold font-mono text-emerald-400 mt-1">
+                      {stepFrames.length} / 6 frames
+                    </span>
+                    <span className="text-[10px] text-slate-300 mt-1">
+                      Skipping near-duplicates (≥300ms apart)
+                    </span>
+                  </div>
+                )}
+
+                {/* 3. Step Completed Phase (Green Tick Mark Overlay) */}
+                {stepPhase === 'STEP_COMPLETED' && (
+                  <div className="absolute inset-0 bg-emerald-950/85 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
+                    <CheckCircle2 className="w-14 h-14 text-emerald-400 animate-bounce" />
+                    <span className="text-sm font-bold text-white mt-2">
+                      Angle Captured! ✓
+                    </span>
+                    <span className="text-[10px] font-mono text-emerald-200 mt-0.5">
+                      {stepFrames.length} good frames stored
+                    </span>
+                  </div>
+                )}
+
+                {/* 4. Paused State Overlay */}
+                {isPaused && (
+                  <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-30">
+                    <Pause className="w-10 h-10 text-amber-400 mb-1" />
+                    <span className="text-sm font-bold text-white uppercase tracking-wider">
+                      Scan Paused
+                    </span>
+                    <button
+                      onClick={handleTogglePause}
+                      className="mt-3 px-4 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold flex items-center gap-1.5"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Resume
+                    </button>
+                  </div>
+                )}
+
+                {/* Regular Searching Viewfinder HUD */}
+                <Camera className={`w-8 h-8 mb-1.5 ${focusStatus === 'SHARP' ? 'text-emerald-400 animate-pulse' : 'text-purple-300'}`} />
                 <span className="text-xs font-bold text-white font-display uppercase tracking-wider">
                   {currentStep.label}
                 </span>
-                <span className="text-[11px] text-purple-200 mt-1 leading-snug">
+                <span className="text-[11px] text-purple-200 mt-0.5 leading-snug">
                   "{currentStep.prompt}"
                 </span>
 
                 {/* Real Laplacian Sharpness Feedback Badge */}
-                <div className="mt-3 space-y-1">
+                <div className="mt-2 space-y-1">
                   <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2.5 py-0.5 rounded-full ${
                     focusStatus === 'SHARP'
                       ? 'text-emerald-300 bg-emerald-950/80 border border-emerald-500/50'
@@ -684,47 +955,75 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             {/* Top Prompt HUD */}
             <div className="absolute top-4 left-4 right-4 z-20 flex justify-between items-center text-xs">
               <span className="bg-black/80 backdrop-blur-md px-3 py-1 rounded-full font-mono text-purple-300 border border-purple-500/30">
-                Angle {currentStepIdx + 1} of {REQUIRED_ANGLES.length}
+                Angle {currentStepIdx + 1} of {REQUIRED_ANGLES.length} ({currentStep.label})
               </span>
 
-              <span className={`px-3 py-1 rounded-full text-[11px] font-semibold border flex items-center gap-1 backdrop-blur-md ${
-                liveBrightness >= 35
-                  ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/30'
-                  : 'bg-red-950/80 text-red-400 border-red-500/30 animate-pulse'
-              }`}>
-                {liveBrightness >= 35 ? '🟢 Lighting OK' : '⚠️ Too Dark'}
+              <span className="bg-black/80 backdrop-blur-md px-3 py-1 rounded-full font-mono text-emerald-300 border border-emerald-500/30">
+                Frames: {totalCapturedFrames} / 54 (Target: 40-80)
               </span>
             </div>
           </div>
 
-          {/* Action Deck: Manual Snap & Skip Buttons */}
-          <div className="max-w-md mx-auto flex gap-2">
-            <button
-              onClick={() => handleCaptureRealFrame()}
-              className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3.5 px-4 rounded-2xl shadow-xl shadow-purple-600/30 flex items-center justify-center gap-2 active:scale-95 transition-all text-sm"
-            >
-              <Zap className="w-4 h-4 text-amber-300" />
-              Snap Real Frame ({currentStep.label})
-            </button>
+          {/* Action Deck: Pause, Capture Now, Retry Angle, Skip Angle */}
+          <div className="max-w-md mx-auto space-y-2">
+            <div className="grid grid-cols-4 gap-2">
+              <button
+                onClick={handleTogglePause}
+                className="py-3 px-2 rounded-2xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all"
+                title={isPaused ? 'Resume Scan' : 'Pause Scan'}
+              >
+                {isPaused ? <Play className="w-4 h-4 text-emerald-400" /> : <Pause className="w-4 h-4 text-amber-400" />}
+                <span>{isPaused ? 'Resume' : 'Pause'}</span>
+              </button>
 
-            <button
-              onClick={() => {
-                setIsScanning(false);
-                setIsDone(true);
-              }}
-              className="px-4 py-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            >
-              Review Gallery ({capturedCount})
-            </button>
+              <button
+                onClick={handleCaptureNow}
+                className="py-3 px-2 rounded-2xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all shadow-lg shadow-purple-600/30"
+                title="Capture frame immediately"
+              >
+                <Zap className="w-4 h-4 text-amber-300" />
+                <span>Capture Now</span>
+              </button>
 
-            <button
-              onClick={handleRequestCancel}
-              className="px-3.5 py-3.5 rounded-2xl border border-red-200 dark:border-red-900/40 bg-red-50 hover:bg-red-100 dark:bg-red-950/30 text-xs font-semibold text-red-600 dark:text-red-400 transition-colors active:scale-95 flex items-center gap-1"
-              title="Cancel scan and discard captures"
-            >
-              <X className="w-4 h-4" />
-              <span>Cancel</span>
-            </button>
+              <button
+                onClick={handleRetryAngle}
+                className="py-3 px-2 rounded-2xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all"
+                title="Clear current angle and retry"
+              >
+                <RefreshCw className="w-4 h-4 text-blue-400" />
+                <span>Retry Angle</span>
+              </button>
+
+              <button
+                onClick={handleSkipAngle}
+                className="py-3 px-2 rounded-2xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all"
+                title="Skip to next angle"
+              >
+                <SkipForward className="w-4 h-4 text-slate-400" />
+                <span>Skip Angle</span>
+              </button>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  setIsScanning(false);
+                  setIsDone(true);
+                }}
+                className="flex-1 py-3 px-4 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              >
+                Review Gallery ({totalCapturedFrames} Frames)
+              </button>
+
+              <button
+                onClick={handleRequestCancel}
+                className="px-4 py-3 rounded-2xl border border-red-200 dark:border-red-900/40 bg-red-50 hover:bg-red-100 dark:bg-red-950/30 text-xs font-semibold text-red-600 dark:text-red-400 transition-colors active:scale-95 flex items-center gap-1"
+                title="Cancel scan and discard captures"
+              >
+                <X className="w-4 h-4" />
+                <span>Cancel</span>
+              </button>
+            </div>
           </div>
         </div>
       ) : (
@@ -756,10 +1055,10 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               )}
               <div>
                 <span className="font-bold">
-                  Coverage Rule: {meetsCoverageRule ? 'Requirements Satisfied' : 'Action Required'}
+                  Coverage Rule: {meetsCoverageRule ? 'All Requirements Satisfied ✓' : 'Additional Frames Required'}
                 </span>
                 <p className="text-[11px] opacity-90 mt-0.5">
-                  Rule requires at least 4 angles including 1 label close-up. Currently: <strong>{capturedCount} angles</strong>, Label Close-up: <strong>{hasLabelCloseup ? 'Captured ✓' : 'Missing ✗'}</strong>.
+                  Requires all 9 angles with ≥4 frames each (target 40-80 frames) including Label Close-up. Currently: <strong>{totalCapturedFrames} frames</strong> across <strong>{completedAnglesCount}/9 angles</strong>.
                 </p>
               </div>
             </div>
@@ -775,15 +1074,20 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             </button>
           </div>
 
-          {/* Real Thumbnails Gallery */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Real Thumbnails Gallery for 9 Angles */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {REQUIRED_ANGLES.map((ang) => {
-              const cap = captures[ang.tag];
-              if (!cap) {
+              const frameList = captures[ang.tag] || [];
+              const primaryFrame = frameList[0];
+              const avgSharpness = frameList.length > 0
+                ? Math.round(frameList.reduce((acc, f) => acc + f.blurScore, 0) / frameList.length)
+                : 0;
+
+              if (!primaryFrame) {
                 return (
                   <div
                     key={ang.tag}
-                    onClick={() => handleRetake(ang.tag)}
+                    onClick={() => handleRetakeInGallery(ang.tag)}
                     className="border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl p-4 flex flex-col items-center justify-center text-center cursor-pointer hover:border-purple-500 transition-colors aspect-square"
                   >
                     <Plus className="w-6 h-6 text-slate-400 mb-1" />
@@ -800,31 +1104,34 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 >
                   <div className="aspect-square bg-slate-100 dark:bg-slate-900 rounded-xl overflow-hidden relative">
                     <img
-                      src={cap.dataUrl}
+                      src={primaryFrame.dataUrl}
                       alt={ang.label}
                       className="w-full h-full object-cover"
                     />
-                    {/* Retake & Delete Buttons */}
                     <div className="absolute top-1.5 right-1.5 flex gap-1">
                       <button
-                        onClick={() => handleRetake(ang.tag)}
+                        onClick={() => handleRetakeInGallery(ang.tag)}
                         className="bg-black/70 hover:bg-black text-white p-1.5 rounded-lg transition-colors"
                         title="Retake this angle"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => handleDelete(ang.tag)}
+                        onClick={() => handleDeleteInGallery(ang.tag)}
                         className="bg-black/70 hover:bg-red-600 text-white p-1.5 rounded-lg transition-colors"
                         title="Delete this capture"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
+
+                    <div className="absolute bottom-1.5 left-1.5 bg-black/75 px-2 py-0.5 rounded-md text-[10px] font-mono text-white">
+                      {frameList.length} frames
+                    </div>
                   </div>
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="font-semibold text-slate-800 dark:text-slate-200 truncate">{ang.label}</span>
-                    <span className="text-emerald-500 text-[10px] font-mono font-bold shrink-0">Sharp: {cap.blurScore}</span>
+                    <span className="text-emerald-500 text-[10px] font-mono font-bold shrink-0">Sharp: {avgSharpness}</span>
                   </div>
                 </div>
               );
@@ -836,6 +1143,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             <button
               onClick={() => {
                 setCaptures({});
+                setStepFrames([]);
                 setCurrentStepIdx(0);
                 setIsScanning(true);
                 setIsDone(false);
@@ -867,8 +1175,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               {isProcessing
                 ? 'Processing Real Embeddings Pipeline...'
                 : meetsCoverageRule
-                ? `Confirm & Enroll Real Embeddings (${capturedCount} Real Angles) →`
-                : 'Need at least 4 angles + Label Close-up to Save'}
+                ? `Confirm & Enroll Real Embeddings (${totalCapturedFrames} Frames Across 9 Angles) →`
+                : `Need all 9 angles with ≥4 frames (Currently: ${totalCapturedFrames}/40 frames)`}
             </button>
           </div>
         </div>
