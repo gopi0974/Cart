@@ -22,6 +22,7 @@ class ProductBase(BaseModel):
     tax_rate: float = 5.0
     stock_quantity: int = 100
     primary_image_url: Optional[str] = None
+    quality_score: Optional[float] = None
     is_active: bool = True
 
 class ProductCreate(ProductBase):

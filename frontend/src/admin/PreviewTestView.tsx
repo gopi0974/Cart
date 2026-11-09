@@ -250,6 +250,17 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
 
             {testResult ? (
               <div className="space-y-3">
+                {/* Low Recognition Margin / Rescan Warning */}
+                {testResult.scan_quality_recommendation && (
+                  <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-xl text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2 animate-fade-in">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-semibold">Low Recognition Quality</strong>
+                      <span>{testResult.scan_quality_recommendation}</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Primary Match Status Banner */}
                 {testResult.matched ? (
                   <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 space-y-2 animate-fade-in">

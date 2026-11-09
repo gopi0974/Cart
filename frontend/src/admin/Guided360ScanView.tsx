@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Camera, Check, RefreshCw, Volume2, VolumeX, Sparkles, AlertCircle,
   ArrowLeft, X, Trash2, AlertTriangle, CheckCircle2, Plus, Zap,
-  Play, Pause, SkipForward
+  Play, Pause, SkipForward, Scan, ShieldAlert, Eye
 } from 'lucide-react';
 import { Product } from '../types';
 import { api } from '../services/api';
@@ -13,10 +13,19 @@ interface Props {
   onPreviewTest: () => void;
 }
 
+export interface ProductBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface CapturedFrame {
-  dataUrl: string;
+  dataUrl: string; // Cropped to product bounding box with 5% margin
+  originalDataUrl: string; // Full uncropped high-resolution camera frame
   blurScore: number;
   timestamp: number;
+  box: ProductBoundingBox;
 }
 
 interface AngleStep {
@@ -41,7 +50,14 @@ const REQUIRED_ANGLES: AngleStep[] = [
 ];
 
 export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPreviewTest }) => {
+  // Step 0: Background Reference Calibration States
+  const [bgCalibrated, setBgCalibrated] = useState(false);
+  const [isCalibratingBg, setIsCalibratingBg] = useState(true);
+  const [bgFramesCaptured, setBgFramesCaptured] = useState<number>(0);
+
+  // Guided Steps (1 through 9)
   const [currentStepIdx, setCurrentStepIdx] = useState(0);
+  const [productConfirmedForStep, setProductConfirmedForStep] = useState(false);
   const [captures, setCaptures] = useState<Record<string, CapturedFrame[]>>({});
   const [stepFrames, setStepFrames] = useState<CapturedFrame[]>([]);
   const [isScanning, setIsScanning] = useState(true);
@@ -54,12 +70,17 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [countdown, setCountdown] = useState<number>(3);
   const [stepElapsedTime, setStepElapsedTime] = useState<number>(0);
 
-  // Real Frame Analysis Telemetry
+  // Real Frame Analysis Telemetry & Isolation
   const [liveBlurScore, setLiveBlurScore] = useState<number>(0);
   const [liveBrightness, setLiveBrightness] = useState<number>(120);
-  const [cameraFeedback, setCameraFeedback] = useState<string>('Hold item steady in center outline');
+  const [cameraFeedback, setCameraFeedback] = useState<string>('Step 0: Clear background of all items');
   const [focusStatus, setFocusStatus] = useState<'BLURRY' | 'STEADY' | 'SHARP'>('BLURRY');
   const [cameraError, setCameraError] = useState<string | null>(null);
+
+  // Product Detection & Exclusion Warnings
+  const [faceDetectedWarning, setFaceDetectedWarning] = useState(false);
+  const [productRatio, setProductRatio] = useState<number>(0);
+  const [detectedBox, setDetectedBox] = useState<ProductBoundingBox | null>(null);
 
   // Submission & Pipeline State (Real Background Job)
   const [isProcessing, setIsProcessing] = useState(false);
@@ -73,14 +94,22 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [enrollmentStats, setEnrollmentStats] = useState<any>(null);
   const [isDone, setIsDone] = useState(false);
 
+  // Selected angle for expanded review gallery
+  const [selectedGalleryAngle, setSelectedGalleryAngle] = useState<string | null>(null);
+
   // Cancellation and Exit Confirmation Dialogs
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [showCancelProcessingConfirm, setShowCancelProcessingConfirm] = useState(false);
   const [bgProcessingNotice, setBgProcessingNotice] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
+
+  // Background Reference Storage
+  const bgRefAccumulator = useRef<Float32Array[]>([]);
+  const bgRefAverage = useRef<Float32Array | null>(null);
 
   // Refs for precise timing, motion detection, and duplicate skipping
   const stepStartTimeRef = useRef<number>(Date.now());
@@ -92,10 +121,18 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const phaseRef = useRef<'WAITING_STEADY' | 'COUNTDOWN' | 'CAPTURING' | 'STEP_COMPLETED'>('WAITING_STEADY');
   const isPausedRef = useRef<boolean>(false);
   const currentStepIdxRef = useRef<number>(0);
+  const productConfirmedRef = useRef<boolean>(false);
+  const detectedBoxRef = useRef<ProductBoundingBox | null>(null);
+  const faceDetectedRef = useRef<boolean>(false);
+  const productRatioRef = useRef<number>(0);
 
   phaseRef.current = stepPhase;
   isPausedRef.current = isPaused;
   currentStepIdxRef.current = currentStepIdx;
+  productConfirmedRef.current = productConfirmedForStep;
+  detectedBoxRef.current = detectedBox;
+  faceDetectedRef.current = faceDetectedWarning;
+  productRatioRef.current = productRatio;
 
   // Stop camera tracks immediately
   const stopCamera = useCallback(() => {
@@ -194,6 +231,16 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   // 2. Speak voice directions on step transition
   useEffect(() => {
     if (!voiceEnabled || !isScanning || isDone) return;
+    if (isCalibratingBg) {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance('Step zero: Please show the empty background without hands or product.');
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+      }
+      return;
+    }
+
     const step = REQUIRED_ANGLES[currentStepIdx];
     if (step && typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -202,25 +249,52 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       utterance.pitch = 1.05;
       window.speechSynthesis.speak(utterance);
     }
-  }, [currentStepIdx, voiceEnabled, isScanning, isDone]);
+  }, [currentStepIdx, voiceEnabled, isScanning, isDone, isCalibratingBg]);
 
-  // Internal helper to capture a full-resolution JPEG frame
+  // Capture Crop & Original Frames
   const captureFrameInternal = useCallback((): CapturedFrame | null => {
     const video = videoRef.current;
     if (!video || video.readyState < 2) return null;
 
-    const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = video.videoWidth || 1280;
-    captureCanvas.height = video.videoHeight || 720;
-    const ctx = captureCanvas.getContext('2d');
-    if (!ctx) return null;
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 720;
 
-    ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-    const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.90);
+    // 1. Full uncropped original frame
+    const originalCanvas = document.createElement('canvas');
+    originalCanvas.width = vw;
+    originalCanvas.height = vh;
+    const origCtx = originalCanvas.getContext('2d');
+    if (!origCtx) return null;
+    origCtx.drawImage(video, 0, 0, vw, vh);
+    const originalDataUrl = originalCanvas.toDataURL('image/jpeg', 0.90);
+
+    // 2. Cropped product box with 5% margin
+    const box = detectedBoxRef.current || {
+      x: Math.round(vw * 0.20),
+      y: Math.round(vh * 0.15),
+      width: Math.round(vw * 0.60),
+      height: Math.round(vh * 0.70),
+    };
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = Math.max(50, box.width);
+    cropCanvas.height = Math.max(50, box.height);
+    const cropCtx = cropCanvas.getContext('2d');
+    if (!cropCtx) return null;
+
+    cropCtx.drawImage(
+      video,
+      box.x, box.y, box.width, box.height,
+      0, 0, box.width, box.height
+    );
+    const croppedDataUrl = cropCanvas.toDataURL('image/jpeg', 0.90);
+
     return {
-      dataUrl,
+      dataUrl: croppedDataUrl,
+      originalDataUrl,
       blurScore: liveBlurScore,
       timestamp: Date.now(),
+      box,
     };
   }, [liveBlurScore]);
 
@@ -237,6 +311,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       if (currentStepIdxRef.current < REQUIRED_ANGLES.length - 1) {
         const nextIdx = currentStepIdxRef.current + 1;
         setCurrentStepIdx(nextIdx);
+        setProductConfirmedForStep(false);
         setStepFrames([]);
         setStepPhase('WAITING_STEADY');
         setCountdown(3);
@@ -250,13 +325,20 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         setIsScanning(false);
         setIsDone(true);
         if (voiceEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
-          window.speechSynthesis.speak(new SpeechSynthesisUtterance('All packaging angles captured. Please review your frames.'));
+          window.speechSynthesis.speak(new SpeechSynthesisUtterance('All 9 packaging angles captured with product isolation. Please review your cropped thumbnails.'));
         }
       }
     }, 700);
   }, [voiceEnabled]);
 
-  // 3. Real-time Frame Analysis Loop (Sharpness, Steady Motion Detection, Duplicate Filtering)
+  // Step 0: Manual / Auto Calibration Trigger
+  const handleCalibrateBackground = () => {
+    if (bgRefAccumulator.current.length < 5) {
+      setCameraFeedback('Hold camera completely still while recording empty scene...');
+    }
+  };
+
+  // 3. Real-time Frame Analysis & Product Isolation Loop
   useEffect(() => {
     if (!isScanning || isDone) return;
 
@@ -271,12 +353,16 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       if (!isRunning) return;
 
       const video = videoRef.current;
+      const overlayCanvas = overlayCanvasRef.current;
       if (video && video.readyState >= 2 && ctx) {
+        const vw = video.videoWidth || 1280;
+        const vh = video.videoHeight || 720;
+
         ctx.drawImage(video, 0, 0, 160, 120);
         const imgData = ctx.getImageData(0, 0, 160, 120);
         const data = imgData.data;
 
-        // Grayscale conversion
+        // Grayscale conversion & Brightness calculation
         const gray = new Float32Array(160 * 120);
         let totalBrightness = 0;
         for (let i = 0, j = 0; i < data.length; i += 4, j++) {
@@ -299,29 +385,151 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
         prevGrayRef.current = new Float32Array(gray);
 
-        // Center ROI (crop 25% to 75% region where user holds item)
-        const startX = 35;
-        const endX = 125;
-        const startY = 25;
-        const endY = 95;
+        // --- STEP 0: Background Reference Calibration ---
+        if (isCalibratingBg) {
+          if (motionDiff < 8.0 && avgBrightness >= 35) {
+            if (bgRefAccumulator.current.length < 5) {
+              bgRefAccumulator.current.push(new Float32Array(gray));
+              setBgFramesCaptured(bgRefAccumulator.current.length);
+              setCameraFeedback(`Recording empty background: ${bgRefAccumulator.current.length}/5 frames...`);
+            } else {
+              // Compute average background frame
+              const avgBg = new Float32Array(160 * 120);
+              for (let p = 0; p < 160 * 120; p++) {
+                let sum = 0;
+                for (let f = 0; f < 5; f++) {
+                  sum += bgRefAccumulator.current[f][p];
+                }
+                avgBg[p] = sum / 5.0;
+              }
+              bgRefAverage.current = avgBg;
+              setBgCalibrated(true);
+              setIsCalibratingBg(false);
+              setCameraFeedback('Background calibrated! Place product in center guide box.');
+              console.log('[Guided360] Step 0: Background reference calibrated successfully from 5 empty frames.');
+              if (voiceEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance('Background calibrated. Place product in the guide box.'));
+              }
+            }
+          } else {
+            setCameraFeedback('Step 0: Keep camera steady and clear of all objects...');
+          }
 
+          animFrameRef.current = requestAnimationFrame(analyzeLoop);
+          return;
+        }
+
+        // --- STEPS 1-9: Product Isolation & Person/Face Exclusion ---
+        // Guide Box Region: central 60% of frame (x: 32..128, y: 20..100)
+        const gX1 = 32;
+        const gX2 = 128;
+        const gY1 = 20;
+        const gY2 = 100;
+        const totalGuidePixels = (gX2 - gX1) * (gY2 - gY1);
+
+        let productPixelCount = 0;
+        let skinPixelCount = 0;
+        let minPX = gX2;
+        let maxPX = gX1;
+        let minPY = gY2;
+        let maxPY = gY1;
+
+        const bgRef = bgRefAverage.current;
+
+        for (let y = gY1; y < gY2; y++) {
+          const row = y * 160;
+          for (let x = gX1; x < gX2; x++) {
+            const idx = row + x;
+            const pIdx = idx * 4;
+            const r = data[pIdx];
+            const g = data[pIdx + 1];
+            const b = data[pIdx + 2];
+
+            // Skin / Hand / Face color filtering in YCbCr & RGB space
+            const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128;
+            const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128;
+            const isSkin = (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) ||
+                           (r > 95 && g > 40 && b > 20 && Math.max(r, g, b) - Math.min(r, g, b) > 15 && Math.abs(r - g) > 15 && r > g && r > b);
+
+            if (isSkin) {
+              skinPixelCount++;
+            } else if (bgRef) {
+              const bgDiff = Math.abs(gray[idx] - bgRef[idx]);
+              if (bgDiff > 24) {
+                // Foreground pixel that is NOT background and NOT skin
+                productPixelCount++;
+                if (x < minPX) minPX = x;
+                if (x > maxPX) maxPX = x;
+                if (y < minPY) minPY = y;
+                if (y > maxPY) maxPY = y;
+              }
+            } else {
+              // Fallback before bgRef: use contrast
+              if (Math.abs(gray[idx] - 120) > 30) {
+                productPixelCount++;
+                if (x < minPX) minPX = x;
+                if (x > maxPX) maxPX = x;
+                if (y < minPY) minPY = y;
+                if (y > maxPY) maxPY = y;
+              }
+            }
+          }
+        }
+
+        // Face & Body Intrusion Guard: If skin/face dominates >35% of guide box
+        const skinRatio = skinPixelCount / totalGuidePixels;
+        const isFaceIntrusion = skinRatio > 0.35;
+        setFaceDetectedWarning(isFaceIntrusion);
+
+        // Product ratio inside guide box
+        const currentProdRatio = productPixelCount / totalGuidePixels;
+        setProductRatio(Math.round(currentProdRatio * 100));
+
+        // Bounding Box Calculation with 5% margin
+        let computedBox: ProductBoundingBox | null = null;
+        if (productPixelCount > 50 && maxPX > minPX && maxPY > minPY) {
+          const rawW = maxPX - minPX;
+          const rawH = maxPY - minPY;
+          const marginX = rawW * 0.05;
+          const marginY = rawH * 0.05;
+
+          const normX1 = Math.max(0, (minPX - marginX) / 160);
+          const normY1 = Math.max(0, (minPY - marginY) / 120);
+          const normX2 = Math.min(1.0, (maxPX + marginX) / 160);
+          const normY2 = Math.min(1.0, (maxPY + marginY) / 120);
+
+          computedBox = {
+            x: Math.round(normX1 * vw),
+            y: Math.round(normY1 * vh),
+            width: Math.round((normX2 - normX1) * vw),
+            height: Math.round((normY2 - normY1) * vh),
+          };
+        }
+        setDetectedBox(computedBox);
+
+        // Discrete Laplacian Sharpness on Product Region
         let laplacianSum = 0;
         let count = 0;
         const laplacianVals: number[] = [];
+        const lX1 = Math.max(minPX, gX1 + 10);
+        const lX2 = Math.min(maxPX, gX2 - 10);
+        const lY1 = Math.max(minPY, gY1 + 10);
+        const lY2 = Math.min(maxPY, gY2 - 10);
 
-        // Discrete Laplacian: 4 * center - up - down - left - right
-        for (let y = startY; y < endY; y += 2) {
-          const row = y * 160;
-          for (let x = startX; x < endX; x += 2) {
-            const center = gray[row + x];
-            const up = gray[(y - 1) * 160 + x];
-            const down = gray[(y + 1) * 160 + x];
-            const left = gray[row + x - 1];
-            const right = gray[row + x + 1];
-            const val = 4 * center - up - down - left - right;
-            laplacianVals.push(val);
-            laplacianSum += val;
-            count++;
+        if (lX2 > lX1 && lY2 > lY1) {
+          for (let y = lY1; y < lY2; y += 2) {
+            const row = y * 160;
+            for (let x = lX1; x < lX2; x += 2) {
+              const center = gray[row + x];
+              const up = gray[(y - 1) * 160 + x];
+              const down = gray[(y + 1) * 160 + x];
+              const left = gray[row + x - 1];
+              const right = gray[row + x + 1];
+              const val = 4 * center - up - down - left - right;
+              laplacianVals.push(val);
+              laplacianSum += val;
+              count++;
+            }
           }
         }
 
@@ -335,30 +543,68 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           }
           blurScore = Math.round(varSum / count);
         }
-
         setLiveBlurScore(blurScore);
 
         const isSharp = blurScore >= 45;
         const isSteady = motionDiff < 10.0;
         const isLightingOk = avgBrightness >= 35;
+        const isProductBigEnough = currentProdRatio >= 0.15; // At least ~15% of guide box
+
+        // Draw Canvas Overlay (Green box on product, red/hatched on excluded regions)
+        if (overlayCanvas) {
+          overlayCanvas.width = 160;
+          overlayCanvas.height = 120;
+          const oCtx = overlayCanvas.getContext('2d');
+          if (oCtx) {
+            oCtx.clearRect(0, 0, 160, 120);
+
+            if (isFaceIntrusion) {
+              // Excluded red hatched warning
+              oCtx.fillStyle = 'rgba(239, 68, 68, 0.35)';
+              oCtx.fillRect(gX1, gY1, gX2 - gX1, gY2 - gY1);
+              oCtx.strokeStyle = '#EF4444';
+              oCtx.lineWidth = 2;
+              oCtx.strokeRect(gX1, gY1, gX2 - gX1, gY2 - gY1);
+            } else if (computedBox && isProductBigEnough) {
+              // Scale box back to overlay coordinates
+              const oX = (computedBox.x / vw) * 160;
+              const oY = (computedBox.y / vh) * 120;
+              const oW = (computedBox.width / vw) * 160;
+              const oH = (computedBox.height / vh) * 120;
+
+              oCtx.strokeStyle = '#10B981';
+              oCtx.lineWidth = 2;
+              oCtx.strokeRect(oX, oY, oW, oH);
+
+              oCtx.fillStyle = 'rgba(16, 185, 129, 0.12)';
+              oCtx.fillRect(oX, oY, oW, oH);
+            }
+          }
+        }
 
         // Visual HUD Feedback
-        if (!isLightingOk) {
+        if (isFaceIntrusion) {
+          setCameraFeedback('Show only the product. Keep your face out of the frame');
+          setFocusStatus('BLURRY');
+        } else if (!isLightingOk) {
           setCameraFeedback('Too dark — bring item into better lighting');
+          setFocusStatus('BLURRY');
+        } else if (!isProductBigEnough) {
+          setCameraFeedback('Bring product closer (needs ≥15% of guide box)');
           setFocusStatus('BLURRY');
         } else if (!isSteady) {
           setCameraFeedback('Holding unsteady — please hold still');
           setFocusStatus('BLURRY');
         } else if (!isSharp) {
-          setCameraFeedback('Slightly blurry — adjust distance or hold still');
+          setCameraFeedback('Slightly blurry — hold still');
           setFocusStatus('STEADY');
         } else {
-          setCameraFeedback('Sharp & steady! Capturing...');
+          setCameraFeedback('Product isolated & sharp! Hold steady...');
           setFocusStatus('SHARP');
         }
 
-        // Only advance guided capture if not paused and auto-capture is enabled
-        if (!isPausedRef.current && autoCaptureEnabled) {
+        // Automatic Guided Capture Execution
+        if (!isPausedRef.current && autoCaptureEnabled && productConfirmedRef.current && !isFaceIntrusion && isProductBigEnough) {
           const currentPhase = phaseRef.current;
           const now = Date.now();
           const stepElapsed = now - stepStartTimeRef.current;
@@ -369,7 +615,6 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             if (isSharp && isSteady && isLightingOk) {
               steadyCounterRef.current += 1;
               if (steadyCounterRef.current >= 4) {
-                // Steady for ~250-300ms, start countdown
                 steadyCounterRef.current = 0;
                 stepStartTimeRef.current = now;
                 setStepPhase('COUNTDOWN');
@@ -381,10 +626,9 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             }
           }
 
-          // Phase 2: Countdown "Hold still... 3, 2, 1" (at least 3 seconds total)
+          // Phase 2: Countdown "Hold still... 3, 2, 1" (at least 3 seconds)
           else if (currentPhase === 'COUNTDOWN') {
-            if (motionDiff > 25.0) {
-              // Sudden jerky movement cancels countdown
+            if (motionDiff > 25.0 || isFaceIntrusion) {
               setStepPhase('WAITING_STEADY');
               steadyCounterRef.current = 0;
               setCountdown(3);
@@ -396,7 +640,6 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               } else if (stepElapsed < 3000) {
                 setCountdown(1);
               } else {
-                // Countdown complete! Move to capturing 5 to 8 frames
                 setStepPhase('CAPTURING');
                 lastCaptureTimeRef.current = 0;
               }
@@ -405,8 +648,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
           // Phase 3: Capturing 5 to 8 frames spaced >= 300ms apart with near-duplicate skip
           else if (currentPhase === 'CAPTURING') {
-            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk) {
-              // Check for duplicate frame against last captured frame (< 2% diff)
+            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk && !isFaceIntrusion) {
               let isDuplicate = false;
               if (lastCapturedGrayRef.current) {
                 let dupSum = 0;
@@ -415,7 +657,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 }
                 const meanDupDiff = dupSum / (gray.length / 4);
                 if (meanDupDiff < 3.0) {
-                  isDuplicate = true; // Duplicate detected
+                  isDuplicate = true;
                 }
               }
 
@@ -428,9 +670,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   setStepFrames((prev) => {
                     const updated = [...prev, newFrame];
                     const step = REQUIRED_ANGLES[currentStepIdxRef.current];
-                    console.log(`[Guided360] Step ${currentStepIdxRef.current + 1}/9 (${step.tag}) frame ${updated.length}/6 captured at +${((now - stepStartTimeRef.current)/1000).toFixed(2)}s (Sharpness: ${blurScore})`);
+                    console.log(`[Guided360] Step ${currentStepIdxRef.current + 1}/9 (${step.tag}) frame ${updated.length}/6 cropped at +${((now - stepStartTimeRef.current)/1000).toFixed(2)}s (Sharpness: ${blurScore})`);
 
-                    // Step finishes when 6 frames captured AND duration is >= 3 seconds
                     if (updated.length >= 6 && (now - stepStartTimeRef.current) >= 3000) {
                       finishStep(updated);
                     }
@@ -454,7 +695,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         cancelAnimationFrame(animFrameRef.current);
       }
     };
-  }, [isScanning, isDone, autoCaptureEnabled, captureFrameInternal, finishStep]);
+  }, [isScanning, isDone, autoCaptureEnabled, isCalibratingBg, captureFrameInternal, finishStep]);
 
   // Step Controls: Pause / Resume
   const handleTogglePause = () => {
@@ -470,6 +711,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     if (currentStepIdx < REQUIRED_ANGLES.length - 1) {
       const next = currentStepIdx + 1;
       setCurrentStepIdx(next);
+      setProductConfirmedForStep(false);
       setStepFrames([]);
       setStepPhase('WAITING_STEADY');
       setCountdown(3);
@@ -485,6 +727,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const handleRetryAngle = () => {
     const step = REQUIRED_ANGLES[currentStepIdx];
     console.log(`[Guided360] Retrying Step ${currentStepIdx + 1}/9 (${step.tag}). Resetting frame list.`);
+    setProductConfirmedForStep(false);
     setStepFrames([]);
     setCaptures((prev) => {
       const copy = { ...prev };
@@ -499,6 +742,11 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   // Step Controls: Capture Now (immediately snaps a frame)
   const handleCaptureNow = () => {
+    if (faceDetectedWarning) {
+      alert('Cannot capture while face/hands are detected in the guide box. Show only the product.');
+      return;
+    }
+
     const newFrame = captureFrameInternal();
     if (!newFrame) return;
 
@@ -518,6 +766,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     const idx = REQUIRED_ANGLES.findIndex((a) => a.tag === tag);
     if (idx !== -1) {
       setCurrentStepIdx(idx);
+      setProductConfirmedForStep(false);
       setStepFrames([]);
       setStepPhase('WAITING_STEADY');
       setCountdown(3);
@@ -543,24 +792,25 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const hasLabelCloseup = (captures['LABEL_CLOSEUP']?.length || 0) >= 4;
   const meetsCoverageRule = completedAnglesCount === REQUIRED_ANGLES.length && totalCapturedFrames >= 40 && hasLabelCloseup;
 
-  // Submit Real Frames: Uploads all 40-80 frames to backend as background job
+  // Submit Real Frames: Uploads all 40-80 cropped and original frames to backend as background job
   const handleSaveEmbeddings = async () => {
     if (!meetsCoverageRule) return;
 
     setIsProcessing(true);
     setJobError(null);
     setJobStage('SAVING_FRAMES');
-    setJobStageMessage('Uploading frames to cloud storage...');
+    setJobStageMessage('Uploading cropped & original frames to cloud storage...');
     setJobDone(0);
     setJobTotal(totalCapturedFrames);
 
     try {
-      const payload: { angle_tag: string; image_data_url: string }[] = [];
+      const payload: { angle_tag: string; image_data_url: string; original_image_data_url?: string }[] = [];
       for (const [angle_tag, frameList] of Object.entries(captures)) {
         for (const frame of frameList) {
           payload.push({
             angle_tag,
-            image_data_url: frame.dataUrl,
+            image_data_url: frame.dataUrl, // Cropped product box
+            original_image_data_url: frame.originalDataUrl, // Original full frame
           });
         }
       }
@@ -708,7 +958,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             </button>
             <div className="flex items-center gap-2">
               <span className="p-2 rounded-xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 font-bold font-mono text-sm">
-                SLOW GUIDED 360°
+                ISOLATED 360°
               </span>
               <h1 className="text-xl font-bold font-display text-slate-900 dark:text-white">
                 Guided 360° Vision Enrollment
@@ -794,6 +1044,12 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               className="absolute inset-0 w-full h-full object-cover"
             />
 
+            {/* Live Canvas Overlay (Green product box, Red hatched exclusions) */}
+            <canvas
+              ref={overlayCanvasRef}
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
+            />
+
             {/* Circular Progress Ring Guide Overlay */}
             <div className="relative z-10 w-72 h-72 flex items-center justify-center">
               <svg className="w-full h-full transform -rotate-90 pointer-events-none">
@@ -824,7 +1080,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               <div className="absolute inset-0 pointer-events-none">
                 {REQUIRED_ANGLES.map((ang, idx) => {
                   const isCaptured = (captures[ang.tag]?.length || 0) >= 4;
-                  const isCurrent = idx === currentStepIdx;
+                  const isCurrent = idx === currentStepIdx && !isCalibratingBg;
                   const rad = (ang.degree * Math.PI) / 180;
                   const radius = 128;
                   const x = 144 + radius * Math.cos(rad);
@@ -851,7 +1107,9 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
               {/* Center Guidance Box with Blur-Score Feedback & Countdown Overlay */}
               <div className={`absolute inset-10 border-2 rounded-3xl flex flex-col items-center justify-center p-4 text-center bg-black/50 backdrop-blur-[2px] transition-all relative overflow-hidden ${
-                stepPhase === 'STEP_COMPLETED'
+                faceDetectedWarning
+                  ? 'border-red-500 bg-red-950/70 ring-4 ring-red-500/50'
+                  : stepPhase === 'STEP_COMPLETED'
                   ? 'border-emerald-400 bg-emerald-950/60 ring-4 ring-emerald-400/40'
                   : focusStatus === 'SHARP'
                   ? 'border-emerald-400 ring-2 ring-emerald-400/30'
@@ -859,8 +1117,77 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   ? 'border-amber-400'
                   : 'border-purple-400/70 border-dashed'
               }`}>
+                {/* Step 0: Background Reference Calibration Overlay */}
+                {isCalibratingBg && (
+                  <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30">
+                    <Scan className="w-10 h-10 text-purple-400 animate-pulse mb-1.5" />
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Step 0: Background Calibration
+                    </span>
+                    <p className="text-[11px] text-purple-200 mt-1 leading-snug">
+                      Clear scene completely of product, hands & faces.
+                    </p>
+                    <span className="text-lg font-mono font-bold text-emerald-400 mt-2">
+                      {bgFramesCaptured} / 5 reference frames
+                    </span>
+                    <button
+                      onClick={handleCalibrateBackground}
+                      className="mt-3 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold rounded-xl active:scale-95 transition-all shadow-md"
+                    >
+                      Calibrate Empty Scene
+                    </button>
+                  </div>
+                )}
+
+                {/* Face & Body Warning Banner: "Show only the product. Keep your face out of the frame" */}
+                {faceDetectedWarning && !isCalibratingBg && (
+                  <div className="absolute inset-0 bg-red-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30 animate-pulse">
+                    <ShieldAlert className="w-12 h-12 text-red-400 mb-2" />
+                    <span className="text-xs font-bold text-white uppercase tracking-wider text-red-200">
+                      Person Detected in Guide Box
+                    </span>
+                    <p className="text-xs font-bold text-white mt-1 leading-snug">
+                      "Show only the product. Keep your face out of the frame"
+                    </p>
+                    <span className="text-[10px] text-red-300 mt-1.5 font-mono">
+                      Face / skin intrusion blocked from capture
+                    </span>
+                  </div>
+                )}
+
+                {/* "Is this the product? Yes / Retry" confirmation prompt before starting angle */}
+                {!isCalibratingBg && !productConfirmedForStep && !faceDetectedWarning && (
+                  <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-25 animate-fade-in">
+                    <Scan className="w-8 h-8 text-emerald-400 mb-1" />
+                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                      Is this the product?
+                    </span>
+                    <p className="text-[11px] text-slate-300 mt-1 leading-tight">
+                      Product detected: <strong className="text-emerald-400">{productRatio}%</strong> of guide box.
+                    </p>
+                    <div className="flex gap-2 mt-3">
+                      <button
+                        onClick={() => {
+                          setProductConfirmedForStep(true);
+                          stepStartTimeRef.current = Date.now();
+                        }}
+                        className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-xl active:scale-95 transition-all flex items-center gap-1 shadow-md shadow-emerald-600/30"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        Yes, Start Angle
+                      </button>
+                      <button
+                        onClick={handleRetryAngle}
+                        className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl active:scale-95 transition-all"
+                      >
+                        Retry Box
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* 1. Countdown Phase ("Hold still... 3, 2, 1") */}
-                {stepPhase === 'COUNTDOWN' && (
+                {stepPhase === 'COUNTDOWN' && !isCalibratingBg && (
                   <div className="absolute inset-0 bg-purple-950/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
                     <span className="text-xs font-semibold text-purple-200 uppercase tracking-widest">
                       Hold still...
@@ -875,30 +1202,30 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 )}
 
                 {/* 2. Capturing Phase (Frames 1-6) */}
-                {stepPhase === 'CAPTURING' && (
+                {stepPhase === 'CAPTURING' && !isCalibratingBg && (
                   <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
                     <Sparkles className="w-7 h-7 text-amber-300 animate-spin mb-1" />
                     <span className="text-xs font-bold text-white uppercase tracking-wider">
-                      Capturing Angles
+                      Capturing Isolated Product
                     </span>
                     <span className="text-xl font-bold font-mono text-emerald-400 mt-1">
                       {stepFrames.length} / 6 frames
                     </span>
                     <span className="text-[10px] text-slate-300 mt-1">
-                      Skipping near-duplicates (≥300ms apart)
+                      Cropping to box (+5% margin) • Skipping near-duplicates
                     </span>
                   </div>
                 )}
 
                 {/* 3. Step Completed Phase (Green Tick Mark Overlay) */}
-                {stepPhase === 'STEP_COMPLETED' && (
+                {stepPhase === 'STEP_COMPLETED' && !isCalibratingBg && (
                   <div className="absolute inset-0 bg-emerald-950/85 backdrop-blur-sm flex flex-col items-center justify-center animate-fade-in z-20">
                     <CheckCircle2 className="w-14 h-14 text-emerald-400 animate-bounce" />
                     <span className="text-sm font-bold text-white mt-2">
                       Angle Captured! ✓
                     </span>
                     <span className="text-[10px] font-mono text-emerald-200 mt-0.5">
-                      {stepFrames.length} good frames stored
+                      {stepFrames.length} cropped frames stored
                     </span>
                   </div>
                 )}
@@ -932,13 +1259,17 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 {/* Real Laplacian Sharpness Feedback Badge */}
                 <div className="mt-2 space-y-1">
                   <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2.5 py-0.5 rounded-full ${
-                    focusStatus === 'SHARP'
+                    faceDetectedWarning
+                      ? 'text-red-300 bg-red-950/80 border border-red-500/50'
+                      : focusStatus === 'SHARP'
                       ? 'text-emerald-300 bg-emerald-950/80 border border-emerald-500/50'
                       : focusStatus === 'STEADY'
                       ? 'text-amber-300 bg-amber-950/80 border border-amber-500/50'
                       : 'text-purple-300 bg-purple-950/80 border border-purple-500/50'
                   }`}>
-                    {focusStatus === 'SHARP' ? (
+                    {faceDetectedWarning ? (
+                      <AlertTriangle className="w-3 h-3 text-red-400" />
+                    ) : focusStatus === 'SHARP' ? (
                       <Check className="w-3 h-3 text-emerald-400" />
                     ) : (
                       <AlertTriangle className="w-3 h-3" />
@@ -946,7 +1277,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                     <span>{cameraFeedback}</span>
                   </div>
                   <div className="text-[9px] font-mono text-slate-300">
-                    Sharpness: <strong className={focusStatus === 'SHARP' ? 'text-emerald-400' : 'text-slate-400'}>{liveBlurScore}</strong> (Min 45) • Brightness: {liveBrightness}
+                    Sharpness: <strong className={focusStatus === 'SHARP' ? 'text-emerald-400' : 'text-slate-400'}>{liveBlurScore}</strong> (Min 45) • Product: {productRatio}%
                   </div>
                 </div>
               </div>
@@ -978,7 +1309,12 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
               <button
                 onClick={handleCaptureNow}
-                className="py-3 px-2 rounded-2xl bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all shadow-lg shadow-purple-600/30"
+                disabled={faceDetectedWarning}
+                className={`py-3 px-2 rounded-2xl text-white font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all shadow-lg ${
+                  faceDetectedWarning
+                    ? 'bg-slate-600 opacity-50 cursor-not-allowed shadow-none'
+                    : 'bg-purple-600 hover:bg-purple-700 shadow-purple-600/30'
+                }`}
                 title="Capture frame immediately"
               >
                 <Zap className="w-4 h-4 text-amber-300" />
@@ -1012,7 +1348,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 }}
                 className="flex-1 py-3 px-4 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
               >
-                Review Gallery ({totalCapturedFrames} Frames)
+                Review Cropped Gallery ({totalCapturedFrames} Frames)
               </button>
 
               <button
@@ -1027,17 +1363,17 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           </div>
         </div>
       ) : (
-        /* Final 360 Review Screen (Real Thumbnails, Coverage Rule Check) */
+        /* Final 360 Review Screen (CROPPED Thumbnails, Coverage Rule Check) */
         <div className="space-y-6">
           <div className="text-center space-y-1">
             <span className="inline-block p-3 bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 rounded-full mb-1">
               <Check className="w-6 h-6" />
             </span>
             <h2 className="text-lg font-bold font-display text-slate-900 dark:text-white">
-              360° Real Packaging Review Gallery
+              360° Cropped Product Gallery (Isolated Foreground)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Confirm real webcam captures before background removal and deep visual embedding extraction.
+              Review isolated, cropped product frames before GrabCut background replacement and deep vector embedding.
             </p>
           </div>
 
@@ -1074,7 +1410,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             </button>
           </div>
 
-          {/* Real Thumbnails Gallery for 9 Angles */}
+          {/* Real CROPPED Thumbnails Gallery for 9 Angles */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {REQUIRED_ANGLES.map((ang) => {
               const frameList = captures[ang.tag] || [];
@@ -1102,13 +1438,20 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   key={ang.tag}
                   className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl p-2.5 shadow-sm space-y-2 group relative"
                 >
-                  <div className="aspect-square bg-slate-100 dark:bg-slate-900 rounded-xl overflow-hidden relative">
+                  <div className="aspect-square bg-slate-950 rounded-xl overflow-hidden relative border border-slate-800 flex items-center justify-center">
                     <img
                       src={primaryFrame.dataUrl}
                       alt={ang.label}
-                      className="w-full h-full object-cover"
+                      className="w-full h-full object-contain"
                     />
                     <div className="absolute top-1.5 right-1.5 flex gap-1">
+                      <button
+                        onClick={() => setSelectedGalleryAngle(ang.tag)}
+                        className="bg-black/70 hover:bg-black text-white p-1.5 rounded-lg transition-colors"
+                        title="View all frames in this angle"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
                       <button
                         onClick={() => handleRetakeInGallery(ang.tag)}
                         className="bg-black/70 hover:bg-black text-white p-1.5 rounded-lg transition-colors"
@@ -1125,8 +1468,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                       </button>
                     </div>
 
-                    <div className="absolute bottom-1.5 left-1.5 bg-black/75 px-2 py-0.5 rounded-md text-[10px] font-mono text-white">
-                      {frameList.length} frames
+                    <div className="absolute bottom-1.5 left-1.5 bg-black/80 px-2 py-0.5 rounded-md text-[10px] font-mono text-emerald-400 border border-emerald-500/30">
+                      Cropped • {frameList.length} frames
                     </div>
                   </div>
                   <div className="flex items-center justify-between text-[11px]">
@@ -1145,6 +1488,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 setCaptures({});
                 setStepFrames([]);
                 setCurrentStepIdx(0);
+                setProductConfirmedForStep(false);
                 setIsScanning(true);
                 setIsDone(false);
               }}
@@ -1178,6 +1522,48 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 ? `Confirm & Enroll Real Embeddings (${totalCapturedFrames} Frames Across 9 Angles) →`
                 : `Need all 9 angles with ≥4 frames (Currently: ${totalCapturedFrames}/40 frames)`}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Expanded Angle Frame Gallery Modal */}
+      {selectedGalleryAngle && captures[selectedGalleryAngle] && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-2xl w-full shadow-2xl space-y-4 animate-fade-in">
+            <div className="flex justify-between items-center pb-2 border-b border-slate-200 dark:border-slate-800">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                All Cropped Frames for {selectedGalleryAngle} ({captures[selectedGalleryAngle].length} frames)
+              </h3>
+              <button
+                onClick={() => setSelectedGalleryAngle(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2.5 max-h-96 overflow-y-auto p-1">
+              {captures[selectedGalleryAngle].map((f, i) => (
+                <div key={i} className="space-y-1 bg-slate-900 p-2 rounded-xl border border-slate-800">
+                  <div className="aspect-square bg-black rounded-lg overflow-hidden flex items-center justify-center">
+                    <img src={f.dataUrl} alt={`Frame ${i + 1}`} className="w-full h-full object-contain" />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                    <span>Frame #{i + 1}</span>
+                    <span className="text-emerald-400">Sharp: {f.blurScore}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setSelectedGalleryAngle(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold"
+              >
+                Close Preview
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1275,7 +1661,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
                 <Check className={`w-4 h-4 ${jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED' ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Downscaled & GrabCut background segmentation (224x224)</span>
+                <span>Downscaled ~320px & GrabCut segmentation onto neutral grey (128,128,128)</span>
               </div>
 
               <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
@@ -1293,7 +1679,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
                 <Check className={`w-4 h-4 ${jobStatus === 'ENROLLED' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                <span>Single-transaction atomic commit & index sync</span>
+                <span>Single-transaction atomic commit & quality score calculated</span>
               </div>
             </div>
 

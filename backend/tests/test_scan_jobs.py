@@ -215,6 +215,8 @@ def test_execute_scan_job_internal(test_db):
     # Verify product is now active and embeddings stored
     prod = test_db.query(Product).filter(Product.id == "product-uuid-1").first()
     assert prod.is_active is True
+    assert prod.quality_score is not None
+    assert 0.0 <= prod.quality_score <= 1.0
     embeddings = test_db.query(ProductEmbedding).filter(ProductEmbedding.product_id == prod.id).all()
     assert len(embeddings) > 0
 
@@ -308,5 +310,34 @@ def test_get_product_active_job(client, test_db):
     assert resp2.status_code == 200
     assert resp2.json()["has_active_job"] is True
     assert resp2.json()["job"]["job_id"] == "active-job-uuid"
+
+
+def test_preprocess_product_image_for_embedding():
+    from app.services.scan_worker import preprocess_product_image_for_embedding
+    img = Image.new("RGB", (640, 480), color=(200, 100, 100))
+    res = preprocess_product_image_for_embedding(img)
+    assert res.size == (224, 224)
+
+
+def test_preview_test_quality_recommendation(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    sample_img = _create_sample_base64_image()
+
+    with patch("app.api.v1.vision.get_embedding", return_value=[0.05] * 512):
+        with patch("app.ai.vector_store.VectorStoreMatcher.find_nearest_product", return_value=[
+            {"product_name": "Other Product", "barcode": "999999999", "similarity": 0.88},
+            {"product_name": "Organic Green Tea", "barcode": "8901030009999", "similarity": 0.82}
+        ]):
+            resp = client.post(
+                "/api/v1/vision/products/preview-test",
+                json={"image_data_url": sample_img, "target_barcode": "8901030009999"},
+                headers=headers
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "scan_quality_recommendation" in data
+            assert data["scan_quality_recommendation"] == "Scan quality is low. Please rescan angles FRONT and LABEL_CLOSEUP."
+
 
 

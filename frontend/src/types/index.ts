@@ -58,6 +58,7 @@ export interface Product {
   primary_image_url?: string;
   is_active: boolean;
   has_embeddings: boolean;
+  quality_score?: number;
 }
 
 export interface ReceiptItem {

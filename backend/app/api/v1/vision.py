@@ -43,8 +43,9 @@ class SimulateActionRequest(BaseModel):
     evidence_url: Optional[str] = None
 
 class Scan360Capture(BaseModel):
-    angle_tag: str  # FRONT, BACK, LEFT, RIGHT, TOP, BOTTOM, LABEL_CLOSEUP
-    image_data_url: str
+    angle_tag: str  # FRONT, BACK, LEFT, RIGHT, TOP, BOTTOM, LABEL_CLOSEUP, TILT_UP, TILT_DOWN
+    image_data_url: str  # Cropped product box frame
+    original_image_data_url: Optional[str] = None  # Full uncropped camera frame
 
 class Complete360ScanRequest(BaseModel):
     captures: List[Scan360Capture]
@@ -241,9 +242,25 @@ async def save_360_scan_embeddings(
             image_bytes = base64.b64decode(raw_b64)
             filename = f"{product.barcode}_{cap.angle_tag}_{idx}_{uuid.uuid4().hex[:6]}.jpg"
             frame_ref = storage_service.save_frame(job_id, filename, image_bytes)
+
+            orig_ref = None
+            if cap.original_image_data_url:
+                try:
+                    orig_raw = cap.original_image_data_url
+                    if orig_raw.startswith("data:image"):
+                        parts_o = orig_raw.split(",", 1)
+                        if len(parts_o) == 2:
+                            orig_raw = parts_o[1]
+                    orig_bytes = base64.b64decode(orig_raw)
+                    orig_filename = f"{product.barcode}_{cap.angle_tag}_{idx}_orig_{uuid.uuid4().hex[:6]}.jpg"
+                    orig_ref = storage_service.save_frame(job_id, orig_filename, orig_bytes)
+                except Exception as oe:
+                    logger.warning(f"Error saving original frame: {oe}")
+
             saved_frames.append({
                 "angle_tag": cap.angle_tag,
-                "frame_ref": frame_ref
+                "frame_ref": frame_ref,
+                "original_frame_ref": orig_ref
             })
         except Exception as e:
             logger.warning(f"Error saving frame {cap.angle_tag}: {e}")
@@ -424,8 +441,16 @@ def preview_recognition_test(
         raise HTTPException(status_code=400, detail="Invalid camera frame received. Please point your webcam at the product.")
 
     try:
-        # Real ONNX INT8 CLIP ViT-B/32 embedding of the live camera frame
-        query_vector = get_embedding(req.image_data_url)
+        # Preprocess identically to enrollment (GrabCut on ~320px with neutral grey background 128,128,128)
+        from app.services.scan_worker import preprocess_product_image_for_embedding
+        raw_b64 = req.image_data_url
+        if raw_b64.startswith("data:image"):
+            raw_b64 = raw_b64.split(",", 1)[1]
+        raw_pil = Image.open(io.BytesIO(base64.b64decode(raw_b64))).convert("RGB")
+        preprocessed_img = preprocess_product_image_for_embedding(raw_pil)
+
+        # Real ONNX INT8 CLIP ViT-B/32 embedding of the preprocessed camera frame
+        query_vector = get_embedding(preprocessed_img)
     except RuntimeError as re:
         logger.error(f"AI model unavailable during preview test: {re}")
         raise HTTPException(status_code=503, detail="AI Vision Service Unavailable: ONNX INT8 model is still loading or unavailable.")
@@ -446,11 +471,20 @@ def preview_recognition_test(
         )
 
     top_1 = top_matches[0] if top_matches else None
+    top_2 = top_matches[1] if len(top_matches) > 1 else None
+
     matched = False
     if req.target_barcode and top_1:
         matched = (top_1["barcode"] == req.target_barcode and top_1["similarity"] >= settings.CONFIDENCE_HIGH)
     elif top_1:
         matched = (top_1["similarity"] >= settings.CONFIDENCE_HIGH)
+
+    scan_quality_recommendation = None
+    if req.target_barcode:
+        is_top1 = bool(top_1 and top_1.get("barcode") == req.target_barcode)
+        margin = (top_1["similarity"] - top_2["similarity"]) if (top_1 and top_2) else 1.0
+        if not is_top1 or margin < 0.10:
+            scan_quality_recommendation = "Scan quality is low. Please rescan angles FRONT and LABEL_CLOSEUP."
 
     message = f"Top match: {top_1['product_name']} ({top_1['similarity'] * 100:.1f}%)" if top_1 else "No enrolled products found."
 
@@ -463,5 +497,6 @@ def preview_recognition_test(
         "target_barcode": req.target_barcode,
         "target_confidence": target_similarity,
         "threshold_high": settings.CONFIDENCE_HIGH,
-        "message": message
+        "message": message,
+        "scan_quality_recommendation": scan_quality_recommendation
     }

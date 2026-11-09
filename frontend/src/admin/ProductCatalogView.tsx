@@ -483,10 +483,19 @@ export const ProductCatalogView: React.FC<Props> = ({ onStart360Scan }) => {
                           </button>
                         </div>
                       ) : p.has_embeddings ? (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/50">
-                          <Check className="w-3 h-3" />
-                          Enrolled
-                        </span>
+                        <div className="space-y-0.5">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/50">
+                            <Check className="w-3 h-3" />
+                            Enrolled
+                          </span>
+                          {p.quality_score !== undefined && p.quality_score !== null && (
+                            <div className="text-[10px] font-mono font-bold">
+                              <span className={p.quality_score >= 0.8 ? 'text-emerald-600 dark:text-emerald-400' : p.quality_score >= 0.6 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'}>
+                                Quality: {Math.round(p.quality_score * 100)}%
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/50">
                           Pending 360 Scan

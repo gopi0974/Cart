@@ -29,6 +29,7 @@ class Product(Base):
     primary_image_url = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
     is_deleted = Column(Boolean, default=False)
+    quality_score = Column(Float, nullable=True, default=None)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
