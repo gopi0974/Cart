@@ -249,6 +249,49 @@ def get_embedding(image: Any) -> List[float]:
 
     return normalized_vector.tolist()
 
+def get_embeddings_batch(images: List[Any]) -> List[List[float]]:
+    """
+    Extracts L2-normalized 512-dim CLIP embeddings for a batch of images (e.g., batches of 8-16).
+    Batches tensor inputs to maximize throughput and minimize CPU overhead on Render instances.
+    """
+    if not images:
+        return []
+
+    session = load_onnx_model()
+    if session is None:
+        raise RuntimeError(
+            "AI Vision Model Unavailable: ONNX INT8 CLIP model is not loaded. "
+            "Please ensure `download_model.py` ran at build time."
+        )
+
+    t0 = time.perf_counter()
+
+    try:
+        tensors = [_preprocess_image_for_clip(img) for img in images]
+        batch_tensor = np.concatenate(tensors, axis=0).astype(np.float32)
+
+        input_name = session.get_inputs()[0].name
+        outputs = session.run(None, {input_name: batch_tensor})
+        raw_vectors = np.array(outputs[0], dtype=np.float32)
+
+        # L2-normalize each embedding
+        norms = np.linalg.norm(raw_vectors, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normalized_vectors = (raw_vectors / norms).tolist()
+    except Exception as e:
+        logger.warning(f"Batch ONNX inference failed ({e}), falling back to single-image inference.")
+        normalized_vectors = [get_embedding(img) for img in images]
+
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+    per_item_ms = round(elapsed_ms / len(images), 2)
+    global _embed_ms_last, _embed_count, _embed_total_ms
+    with _lock:
+        _embed_ms_last = per_item_ms
+        _embed_count += len(images)
+        _embed_total_ms += elapsed_ms
+
+    return normalized_vectors
+
 class VisualFeatureExtractor:
     """Wrapper maintaining backward compatibility while enforcing strict ONNX INT8 inference."""
     def __init__(self, embedding_dim: int = VECTOR_DIM):
@@ -258,5 +301,8 @@ class VisualFeatureExtractor:
 
     def extract_embedding(self, image_input: Any) -> List[float]:
         return get_embedding(image_input)
+
+    def extract_embeddings_batch(self, images: List[Any]) -> List[List[float]]:
+        return get_embeddings_batch(images)
 
 feature_extractor = VisualFeatureExtractor()

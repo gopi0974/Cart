@@ -58,6 +58,11 @@ class Settings(BaseModel):
     MODELS_DIR: Path = BASE_DIR / "models_storage"
     CLIP_MODEL_PATH: Path = BASE_DIR / "models_storage" / "clip_vision_int8.onnx"
     
+    # Supabase Object Storage (offloads 360 scan frames to keep Render memory & disk clean)
+    SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
+    SUPABASE_SERVICE_ROLE_KEY: Optional[str] = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    SUPABASE_STORAGE_BUCKET: str = os.getenv("SUPABASE_STORAGE_BUCKET", "smartcart-360-scans")
+    
     # AI / Vision Thresholds
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))
     CONFIDENCE_MEDIUM: float = float(os.getenv("CONFIDENCE_MEDIUM", "0.65"))

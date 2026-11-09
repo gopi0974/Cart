@@ -174,6 +174,19 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
   throw lastError || new Error('Connection failed. Please retry.');
 }
 
+export interface ScanJobResponse {
+  job_id: string;
+  product_id: string;
+  status: 'PENDING' | 'PROCESSING' | 'ENROLLED' | 'FAILED';
+  stage: string;
+  stage_message?: string;
+  done: number;
+  total: number;
+  error?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export const api = {
   // Staff Auth & Access Control
   async login(email: string, password: string): Promise<{ access_token: string; role: string; full_name: string; email: string }> {
@@ -532,10 +545,28 @@ export const api = {
   },
 
   async complete360Scan(productId: string, captures: { angle_tag: string; image_data_url: string }[]) {
-    return request(`/vision/products/${productId}/360-scan/complete`, {
-      method: 'POST',
-      body: JSON.stringify({ captures }),
+    return request<{ status: string; job_id: string; product_id: string; total_frames: number; message: string }>(
+      `/vision/products/${productId}/360-scan/complete`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ captures }),
+      }
+    );
+  },
+
+  async getScanJob(jobId: string) {
+    return request<ScanJobResponse>(`/vision/jobs/${jobId}`, {
+      method: 'GET',
     });
+  },
+
+  async retryScanJob(jobId: string) {
+    return request<{ status: string; job_id: string; message: string }>(
+      `/vision/jobs/${jobId}/retry`,
+      {
+        method: 'POST',
+      }
+    );
   },
 
   async previewTest(imageDataUrl: string, targetBarcode?: string) {

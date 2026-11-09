@@ -44,9 +44,15 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [focusStatus, setFocusStatus] = useState<'BLURRY' | 'STEADY' | 'SHARP'>('BLURRY');
   const [cameraError, setCameraError] = useState<string | null>(null);
 
-  // Submission & Pipeline State
+  // Submission & Pipeline State (Real Background Job)
   const [isProcessing, setIsProcessing] = useState(false);
-  const [processingStep, setProcessingStep] = useState(0);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [jobStatus, setJobStatus] = useState<'PENDING' | 'PROCESSING' | 'ENROLLED' | 'FAILED' | null>(null);
+  const [jobStage, setJobStage] = useState<string>('QUEUED');
+  const [jobStageMessage, setJobStageMessage] = useState<string>('');
+  const [jobDone, setJobDone] = useState<number>(0);
+  const [jobTotal, setJobTotal] = useState<number>(0);
+  const [jobError, setJobError] = useState<string | null>(null);
   const [enrollmentStats, setEnrollmentStats] = useState<any>(null);
   const [isDone, setIsDone] = useState(false);
 
@@ -295,12 +301,16 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const hasLabelCloseup = Boolean(captures['LABEL_CLOSEUP']);
   const meetsCoverageRule = capturedCount >= 4 && hasLabelCloseup;
 
-  // 5. Submit Real Frames: Uploads to backend, removes background, augments, extracts embeddings
+  // 5. Submit Real Frames: Uploads to backend, returns job_id immediately
   const handleSaveEmbeddings = async () => {
     if (!meetsCoverageRule) return;
 
     setIsProcessing(true);
-    setProcessingStep(1);
+    setJobError(null);
+    setJobStage('SAVING_FRAMES');
+    setJobStageMessage('Uploading frames to cloud storage...');
+    setJobDone(0);
+    setJobTotal(Object.keys(captures).length);
 
     try {
       const payload = Object.entries(captures).map(([angle_tag, cap]) => ({
@@ -308,21 +318,72 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         image_data_url: cap.dataUrl,
       }));
 
-      setProcessingStep(2); // Background removal & realistic augmentations
-      const result = await api.complete360Scan(product.id, payload);
-      setEnrollmentStats(result);
-
-      setProcessingStep(3); // Real CLIP ViT-B/32 embedding extraction
-      await new Promise((r) => setTimeout(r, 400));
-      setProcessingStep(4); // Vector DB ingestion & disk sync
-
-      // Finish and move to preview test
-      setTimeout(() => {
-        onPreviewTest();
-      }, 1000);
+      const res = await api.complete360Scan(product.id, payload);
+      setActiveJobId(res.job_id);
+      setJobStatus('PENDING');
+      setJobStageMessage('Frames saved. Waiting for background worker...');
     } catch (e: any) {
-      alert(`Enrollment failed: ${e.message || 'Unknown error'}`);
-      setIsProcessing(false);
+      setJobError(e.message || 'Failed to submit 360-scan frames');
+      setJobStatus('FAILED');
+    }
+  };
+
+  // Real-time polling without fake timers or simulated steps
+  useEffect(() => {
+    if (!isProcessing || !activeJobId) return;
+    if (jobStatus === 'ENROLLED' || jobStatus === 'FAILED') return;
+
+    let isMounted = true;
+    const interval = setInterval(async () => {
+      try {
+        const job = await api.getScanJob(activeJobId);
+        if (!isMounted) return;
+
+        setJobStatus(job.status);
+        setJobStage(job.stage);
+        setJobStageMessage(job.stage_message || '');
+        setJobDone(job.done);
+        setJobTotal(job.total);
+
+        if (job.status === 'ENROLLED') {
+          clearInterval(interval);
+          setEnrollmentStats({
+            real_frames_saved: job.total,
+            total_embeddings_stored: job.done,
+            model_name: 'CLIP ViT-B/32 INT8',
+            vector_dim: 512,
+          });
+          setTimeout(() => {
+            if (isMounted) {
+              onPreviewTest();
+            }
+          }, 1500);
+        } else if (job.status === 'FAILED') {
+          clearInterval(interval);
+          setJobError(job.error || 'Background processing failed. Please retry.');
+        }
+      } catch (err: any) {
+        console.warn('Scan job polling warning:', err);
+      }
+    }, 1000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [isProcessing, activeJobId, jobStatus]);
+
+  // Retry job without re-uploading frames
+  const handleRetryJob = async () => {
+    if (!activeJobId) return;
+    try {
+      setJobError(null);
+      setJobStatus('PENDING');
+      setJobStage('QUEUED');
+      setJobStageMessage('Re-enqueuing job...');
+      await api.retryScanJob(activeJobId);
+    } catch (e: any) {
+      setJobError(e.message || 'Failed to retry job.');
     }
   };
 
@@ -667,58 +728,132 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         </div>
       )}
 
-      {/* Multi-Step Processing Pipeline Modal */}
+      {/* Background Processing Pipeline Modal (Real Telemetry, No Fake Timers) */}
       {isProcessing && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-5 text-center">
-            <div className="w-14 h-14 rounded-2xl bg-purple-600/20 text-purple-600 dark:text-purple-400 mx-auto flex items-center justify-center">
-              <Sparkles className="w-7 h-7 animate-spin" />
+            <div className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center ${
+              jobStatus === 'FAILED'
+                ? 'bg-rose-600/20 text-rose-600 dark:text-rose-400'
+                : jobStatus === 'ENROLLED'
+                ? 'bg-emerald-600/20 text-emerald-600 dark:text-emerald-400'
+                : 'bg-purple-600/20 text-purple-600 dark:text-purple-400'
+            }`}>
+              {jobStatus === 'FAILED' ? (
+                <AlertTriangle className="w-7 h-7" />
+              ) : jobStatus === 'ENROLLED' ? (
+                <CheckCircle2 className="w-7 h-7" />
+              ) : (
+                <Sparkles className="w-7 h-7 animate-spin" />
+              )}
             </div>
 
             <div>
               <h3 className="text-base font-bold font-display text-slate-900 dark:text-white">
-                Generating Real AI Embeddings
+                {jobStatus === 'FAILED'
+                  ? 'Background Processing Failed'
+                  : jobStatus === 'ENROLLED'
+                  ? 'AI Vision Enrollment Complete!'
+                  : 'Processing 360° Vision Enrollment'}
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                Saving real frames & extracting CLIP ViT-B/32 representations for <strong>{product.name}</strong>
+                {jobStageMessage || `Processing 360 captures for ${product.name}...`}
               </p>
             </div>
 
+            {/* Real Progress Bar */}
+            {jobTotal > 0 && jobStatus !== 'FAILED' && (
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                  <span>Progress</span>
+                  <span>{jobDone} / {jobTotal} ({Math.min(100, Math.round((jobDone / Math.max(1, jobTotal)) * 100))}%)</span>
+                </div>
+                <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-300 rounded-full ${
+                      jobStatus === 'ENROLLED' ? 'bg-emerald-500' : 'bg-purple-600'
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.round((jobDone / Math.max(1, jobTotal)) * 100))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Real Stage Telemetry List */}
             <div className="space-y-2 text-left text-xs">
               <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                processingStep >= 1 ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300' : 'opacity-40 border-slate-200 dark:border-slate-800'
+                jobStage === 'SAVING_FRAMES' || jobDone > 0 || jobStage === 'REMOVING_BACKGROUND' || jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
+                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
+                  : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
-                <Check className={`w-4 h-4 ${processingStep >= 1 ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Writing real JPEG frames to image storage</span>
+                <Check className={`w-4 h-4 ${jobDone > 0 ? 'text-purple-600' : 'text-slate-400'}`} />
+                <span>Frames uploaded & saved in Supabase object storage</span>
               </div>
 
               <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                processingStep >= 2 ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300' : 'opacity-40 border-slate-200 dark:border-slate-800'
+                jobStage === 'REMOVING_BACKGROUND' || jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
+                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
+                  : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
-                <Check className={`w-4 h-4 ${processingStep >= 2 ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Background removal (GrabCut) & light augmentations</span>
+                <Check className={`w-4 h-4 ${jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED' ? 'text-purple-600' : 'text-slate-400'}`} />
+                <span>Downscaled & GrabCut background segmentation (224x224)</span>
               </div>
 
               <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                processingStep >= 3 ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300' : 'opacity-40 border-slate-200 dark:border-slate-800'
+                jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
+                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
+                  : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
-                <Check className={`w-4 h-4 ${processingStep >= 3 ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Computing real 512-dim CLIP ViT-B/32 normalized vectors</span>
+                <Check className={`w-4 h-4 ${jobStatus === 'ENROLLED' ? 'text-purple-600' : 'text-slate-400'}`} />
+                <span>Batch ONNX INT8 CLIP ViT-B/32 embedding extraction</span>
               </div>
 
               <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                processingStep >= 4 ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 text-emerald-700 dark:text-emerald-300' : 'opacity-40 border-slate-200 dark:border-slate-800'
+                jobStatus === 'ENROLLED'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 text-emerald-700 dark:text-emerald-300'
+                  : 'opacity-40 border-slate-200 dark:border-slate-800'
               }`}>
-                <Check className={`w-4 h-4 ${processingStep >= 4 ? 'text-emerald-600' : 'text-slate-400'}`} />
-                <span>Persisting to PostgreSQL pgvector & vector disk cache</span>
+                <Check className={`w-4 h-4 ${jobStatus === 'ENROLLED' ? 'text-emerald-600' : 'text-slate-400'}`} />
+                <span>Single-transaction atomic commit & index sync</span>
               </div>
             </div>
 
-            {enrollmentStats && (
+            {/* Error Message & Retry Action */}
+            {jobStatus === 'FAILED' && (
+              <div className="space-y-3">
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-xl text-left text-xs text-rose-700 dark:text-rose-300">
+                  <div className="font-semibold mb-1 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Error Details
+                  </div>
+                  <p className="font-mono text-[11px] break-words">{jobError || 'Unknown processing error.'}</p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleRetryJob}
+                    className="flex-1 py-2.5 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Retry Processing (Reuse Frames)
+                  </button>
+                  <button
+                    onClick={() => setIsProcessing(false)}
+                    className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Success Summary */}
+            {enrollmentStats && jobStatus === 'ENROLLED' && (
               <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-xl text-[11px] font-mono text-slate-600 dark:text-slate-300 text-left">
-                <div>Saved Real Images: <strong>{enrollmentStats.real_frames_saved}</strong></div>
-                <div>Stored Vectors: <strong>{enrollmentStats.total_embeddings_stored}</strong></div>
+                <div>Enrolled Vectors: <strong>{enrollmentStats.total_embeddings_stored}</strong> (capped at 100)</div>
                 <div>Model: <strong>{enrollmentStats.model_name}</strong> ({enrollmentStats.vector_dim}-dim)</div>
+                <div>Status: <strong className="text-emerald-600 dark:text-emerald-400">ACTIVE & READY</strong></div>
               </div>
             )}
           </div>

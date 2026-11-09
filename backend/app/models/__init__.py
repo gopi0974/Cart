@@ -4,6 +4,7 @@ from app.models.product import Product, ProductImage, ProductEmbedding
 from app.models.session import CartSession, CartItem
 from app.models.alert import Alert, ReviewCase
 from app.models.transaction import Transaction, AuditLog, ModelVersion, MaintenanceFlag
+from app.models.scan_job import ScanJob
 
 __all__ = [
     "User",
@@ -18,5 +19,6 @@ __all__ = [
     "Transaction",
     "AuditLog",
     "ModelVersion",
-    "MaintenanceFlag"
+    "MaintenanceFlag",
+    "ScanJob"
 ]

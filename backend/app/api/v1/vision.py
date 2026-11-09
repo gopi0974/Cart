@@ -1,6 +1,7 @@
 import os
 import io
 import uuid
+import json
 import base64
 import logging
 from typing import Optional, List, Tuple
@@ -20,9 +21,11 @@ from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
 from app.models.product import Product, ProductImage
+from app.models.scan_job import ScanJob
 from app.models.user import User
 from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
+from app.services.storage_service import storage_service
 from app.ai.feature_extractor import get_embedding, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
 from app.ai.vector_store import VectorStoreMatcher
 from app.api.v1.auth import get_current_user, require_admin_or_manager
@@ -204,18 +207,18 @@ async def simulate_cart_camera_action(
         raise HTTPException(status_code=400, detail=f"Unknown action type: {req.action_type}")
 
 @router.post("/products/{product_id}/360-scan/complete")
-def save_360_scan_embeddings(
+async def save_360_scan_embeddings(
     product_id: str,
     req: Complete360ScanRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
     """
-    Ingest real 360-degree camera captures:
-    1. Decode real base64 frames and save JPEG files to disk.
-    2. Run background removal and augmentations.
-    3. Generate real CLIP ViT-B/32 512-dim normalized embeddings.
-    4. Persist in pgvector and disk index. Replaces old vectors on re-scan.
+    Asynchronous 360-degree camera capture enrollment:
+    1. Saves incoming camera frames to Supabase Storage (or local storage fallback).
+    2. Instantiates a ScanJob in the database with status PENDING.
+    3. Queues the background worker to process frames without blocking the client.
+    4. Immediately returns job_id (<200ms) for real-time polling by the UI.
     """
     product = db.query(Product).filter(Product.id == product_id).first()
     if not product:
@@ -224,17 +227,10 @@ def save_360_scan_embeddings(
     if not req.captures:
         raise HTTPException(status_code=400, detail="No camera frames provided in 360 scan payload.")
 
-    # Re-scan support: delete existing captures and embeddings
-    VectorStoreMatcher.delete_embeddings_for_product(db, product.id)
-    db.query(ProductImage).filter(ProductImage.product_id == product.id, ProductImage.is_360_scan == True).delete()
+    job_id = str(uuid.uuid4())
+    saved_frames = []
 
-    os.makedirs(settings.CATALOG_DIR, exist_ok=True)
-    saved_images_count = 0
-    stored_vectors_count = 0
-    primary_image_set = False
-
-    for cap in req.captures:
-        # Decode base64 image data URL
+    for idx, cap in enumerate(req.captures):
         raw_b64 = cap.image_data_url
         if raw_b64.startswith("data:image"):
             parts = raw_b64.split(",", 1)
@@ -243,103 +239,103 @@ def save_360_scan_embeddings(
 
         try:
             image_bytes = base64.b64decode(raw_b64)
-            pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            filename = f"{product.barcode}_{cap.angle_tag}_{idx}_{uuid.uuid4().hex[:6]}.jpg"
+            frame_ref = storage_service.save_frame(job_id, filename, image_bytes)
+            saved_frames.append({
+                "angle_tag": cap.angle_tag,
+                "frame_ref": frame_ref
+            })
         except Exception as e:
-            logger.warning(f"Failed to decode frame for angle {cap.angle_tag}: {e}")
-            continue
+            logger.warning(f"Error saving frame {cap.angle_tag}: {e}")
 
-        # Save primary real image to disk
-        filename = f"{product.barcode}_{cap.angle_tag}_{uuid.uuid4().hex[:8]}.jpg"
-        file_path = os.path.join(settings.CATALOG_DIR, filename)
-        pil_img.save(file_path, "JPEG", quality=92)
-        saved_images_count += 1
+    if not saved_frames:
+        raise HTTPException(status_code=400, detail="Failed to decode or store any valid image frames.")
 
-        # Generate optimized persistent data URL for database storage
-        thumb_img = pil_img.copy()
-        thumb_img.thumbnail((400, 400))
-        thumb_buffer = io.BytesIO()
-        thumb_img.save(thumb_buffer, format="JPEG", quality=80)
-        persistent_image_url = f"data:image/jpeg;base64,{base64.b64encode(thumb_buffer.getvalue()).decode('utf-8')}"
-
-        prod_img = ProductImage(
-            product_id=product.id,
-            image_url=persistent_image_url,
-            angle_tag=cap.angle_tag,
-            is_360_scan=True
-        )
-        db.add(prod_img)
-
-        # Set as primary image if Front view or not yet set
-        if not primary_image_set or cap.angle_tag.upper() == "FRONT":
-            product.primary_image_url = persistent_image_url
-            primary_image_set = True
-
-        # Generate background-removed image
-        matted_img = _remove_background(pil_img)
-
-        # Generate light realistic augmentations
-        augmented_set = _generate_augmentations(pil_img)
-        augmented_set.append(("MATTED", matted_img))
-
-        for aug_tag, variant_img in augmented_set:
-            try:
-                # Real ONNX INT8 CLIP ViT-B/32 embedding
-                vec = get_embedding(variant_img)
-                full_tag = f"{cap.angle_tag}_{aug_tag}"
-                VectorStoreMatcher.store_embedding(
-                    db=db,
-                    product_id=product.id,
-                    barcode=product.barcode,
-                    angle_tag=full_tag,
-                    vector=vec,
-                    image_path=file_path,
-                    model_name=MODEL_NAME,
-                    model_version=MODEL_VERSION,
-                    vector_dim=VECTOR_DIM,
-                    commit=False
-                )
-                stored_vectors_count += 1
-            except RuntimeError as re:
-                logger.error(f"AI model unavailable during 360 scan: {re}")
-                db.rollback()
-                raise HTTPException(
-                    status_code=503,
-                    detail="AI Vision Service Unavailable: ONNX INT8 model is still loading or unavailable."
-                )
-            except Exception as e:
-                logger.error(f"Error computing embedding for {product.barcode} ({full_tag}): {e}")
-
+    scan_job = ScanJob(
+        id=job_id,
+        product_id=product.id,
+        status="PENDING",
+        stage="SAVING_FRAMES",
+        stage_message=f"Uploaded {len(saved_frames)} frames. Enqueuing background processing...",
+        done=0,
+        total=len(saved_frames),
+        frame_paths_json=json.dumps(saved_frames)
+    )
+    db.add(scan_job)
     db.commit()
-    db.refresh(product)
-    VectorStoreMatcher.sync_to_disk(db)
-    from app.utils.cache import catalog_cache
-    catalog_cache.invalidate()
+    db.refresh(scan_job)
+
+    # Enqueue background processing
+    from app.services.scan_worker import enqueue_scan_job
+    enqueue_scan_job(scan_job.id)
 
     return {
-        "status": "SUCCESS",
-        "message": f"Successfully enrolled real 360-degree embeddings for '{product.name}'.",
+        "status": "PENDING",
+        "job_id": scan_job.id,
         "product_id": product.id,
-        "barcode": product.barcode,
-        "product_status": "AI Enrolled",
-        "real_frames_saved": saved_images_count,
-        "total_embeddings_stored": stored_vectors_count,
-        "model_name": MODEL_NAME,
-        "vector_dim": VECTOR_DIM,
-        "product": {
-            "id": product.id,
-            "barcode": product.barcode,
-            "name": product.name,
-            "brand": product.brand,
-            "category": product.category,
-            "price": product.price,
-            "discount_price": product.discount_price,
-            "weight_grams": product.weight_grams,
-            "tax_rate": product.tax_rate,
-            "stock_quantity": product.stock_quantity,
-            "primary_image_url": product.primary_image_url,
-            "is_active": product.is_active,
-            "has_embeddings": True
-        }
+        "total_frames": len(saved_frames),
+        "message": "360-scan frames saved successfully. Background processing started."
+    }
+
+
+@router.get("/jobs/{job_id}")
+def get_scan_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Polls real-time state of an ongoing or completed 360-degree scan job.
+    Never returns fake progress or hardcoded steps.
+    """
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found.")
+
+    return {
+        "job_id": job.id,
+        "product_id": job.product_id,
+        "status": job.status,
+        "stage": job.stage,
+        "stage_message": job.stage_message,
+        "done": job.done,
+        "total": job.total,
+        "error": job.error,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None
+    }
+
+
+@router.post("/jobs/{job_id}/retry")
+async def retry_scan_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Retries a failed scan job using previously saved frames without re-uploading.
+    """
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found.")
+
+    if job.status == "PROCESSING":
+        raise HTTPException(status_code=400, detail="Scan job is currently being processed.")
+
+    job.status = "PENDING"
+    job.stage = "QUEUED"
+    job.stage_message = "Retry enqueued. Waiting for worker..."
+    job.error = None
+    job.done = 0
+    db.commit()
+
+    from app.services.scan_worker import enqueue_scan_job
+    enqueue_scan_job(job.id)
+
+    return {
+        "status": "PENDING",
+        "job_id": job.id,
+        "message": "Job re-queued successfully."
     }
 
 @router.post("/products/preview-test")
