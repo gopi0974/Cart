@@ -35,6 +35,9 @@ class SimpleTTLCache:
                     if k.startswith(prefix):
                         del self._cache[k]
 
+    def clear(self):
+        self.invalidate()
+
 
 catalog_cache = SimpleTTLCache(ttl_seconds=45)
 

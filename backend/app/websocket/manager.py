@@ -1,6 +1,7 @@
 import json
 from typing import Dict, List
 from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 
 class ConnectionManager:
     """Manages active WebSockets for Shopper phones, Cart simulators, and Admin portals."""
@@ -12,10 +13,12 @@ class ConnectionManager:
         self.admin_connections: List[WebSocket] = []
 
     async def connect_cart(self, websocket: WebSocket, cart_id: str):
-        await websocket.accept()
+        if websocket.client_state == WebSocketState.CONNECTING:
+            await websocket.accept()
         if cart_id not in self.cart_connections:
             self.cart_connections[cart_id] = []
-        self.cart_connections[cart_id].append(websocket)
+        if websocket not in self.cart_connections[cart_id]:
+            self.cart_connections[cart_id].append(websocket)
 
     def disconnect_cart(self, websocket: WebSocket, cart_id: str):
         if cart_id in self.cart_connections:
@@ -25,8 +28,10 @@ class ConnectionManager:
                 del self.cart_connections[cart_id]
 
     async def connect_admin(self, websocket: WebSocket):
-        await websocket.accept()
-        self.admin_connections.append(websocket)
+        if websocket.client_state == WebSocketState.CONNECTING:
+            await websocket.accept()
+        if websocket not in self.admin_connections:
+            self.admin_connections.append(websocket)
 
     def disconnect_admin(self, websocket: WebSocket):
         if websocket in self.admin_connections:

@@ -1,6 +1,8 @@
 import os
 import uuid
 import time
+import json
+import asyncio
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -129,9 +131,15 @@ app.include_router(vision_router, prefix=settings.API_V1_STR)
 from app.utils.sanitization import sanitize_secrets, SanitizingLogFilter
 from app.api.v1.auth import get_current_user
 
-# Attach secret sanitization filter to root logging handlers
+# Attach secret sanitization filter to root and uvicorn logging handlers
+_sanitizing_filter = SanitizingLogFilter()
 for handler in logging.root.handlers:
-    handler.addFilter(SanitizingLogFilter())
+    handler.addFilter(_sanitizing_filter)
+for log_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
+    _logger = logging.getLogger(log_name)
+    _logger.addFilter(_sanitizing_filter)
+    for h in _logger.handlers:
+        h.addFilter(_sanitizing_filter)
 
 
 def _get_public_health_data():
@@ -300,16 +308,35 @@ async def websocket_cart_endpoint(
 ):
     """
     Cart-specific channel for Shopper Mobile App and Smart Cart Camera Agent.
-    Requires a valid shopper session token or staff JWT.
-    Rejects unauthenticated connections with close code 1008 (Policy Violation) before accepting.
+    Supports token via query parameter, 'x-session-token' header, OR first-message auth:
+    {"type": "auth", "token": "<token>"}.
     """
     auth_token = token or websocket.query_params.get("token") or websocket.headers.get("x-session-token")
-    if not authenticate_cart_ws(cart_id, auth_token, db):
-        logger.warning(f"Rejecting unauthorized /ws/cart/{cart_id} connection.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    if not auth_token:
+        # Await first message authentication
+        await websocket.accept()
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                auth_token = data.get("token")
+        except Exception:
+            auth_token = None
 
-    await ws_manager.connect_cart(websocket, cart_id)
+        if not authenticate_cart_ws(cart_id, auth_token, db):
+            logger.warning(f"Rejecting unauthorized /ws/cart/{cart_id} first-message connection.")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        await websocket.send_json({"type": "auth_ok"})
+        await ws_manager.connect_cart(websocket, cart_id)
+    else:
+        if not authenticate_cart_ws(cart_id, auth_token, db):
+            logger.warning(f"Rejecting unauthorized /ws/cart/{cart_id} connection.")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        await ws_manager.connect_cart(websocket, cart_id)
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -329,17 +356,37 @@ async def websocket_admin_endpoint(
 ):
     """
     Store staff admin portal channel for real-time fleet events and alerts.
-    Requires a valid staff JWT access token.
-    Rejects unauthenticated connections with close code 1008 (Policy Violation) before accepting.
+    Supports token via query parameter OR first-message auth:
+    {"type": "auth", "token": "<jwt>"}.
     """
     auth_token = token or websocket.query_params.get("token")
-    user = authenticate_admin_ws(auth_token, db)
-    if not user:
-        logger.warning("Rejecting unauthorized /ws/admin connection.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
+    if not auth_token:
+        # Await first message authentication
+        await websocket.accept()
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                auth_token = data.get("token")
+        except Exception:
+            auth_token = None
 
-    await ws_manager.connect_admin(websocket)
+        user = authenticate_admin_ws(auth_token, db)
+        if not user:
+            logger.warning("Rejecting unauthorized /ws/admin first-message connection.")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        await websocket.send_json({"type": "auth_ok"})
+        await ws_manager.connect_admin(websocket)
+    else:
+        user = authenticate_admin_ws(auth_token, db)
+        if not user:
+            logger.warning("Rejecting unauthorized /ws/admin connection.")
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+        await ws_manager.connect_admin(websocket)
+
     try:
         while True:
             data = await websocket.receive_text()

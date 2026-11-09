@@ -62,15 +62,21 @@ def audit_insecure_admins_once(db: Session):
     """
     ONE-TIME security audit to neutralize accounts accepting insecure default passwords:
     'Admin@123', 'admin123', 'Admin123', 'admin', 'password'.
-    Uses 'insecure_admin_audited_v1' flag so expensive bcrypt checks run only once.
+    Reconciles 'insecure_admin_audited_v1' and 'insecure_passwords_checked_v1' flags
+    so expensive bcrypt checks run only once and neither alias triggers a second run.
     Safely handles foreign keys (deactivates if related rows exist; deletes otherwise).
     """
-    FLAG_NAME = "insecure_admin_audited_v1"
+    INSECURE_PASSWORD_FLAGS = ["insecure_admin_audited_v1", "insecure_passwords_checked_v1"]
     insecure_passwords = ["Admin@123", "admin123", "Admin123", "admin", "password"]
     try:
-        flag = db.query(MaintenanceFlag).filter(MaintenanceFlag.flag_name == FLAG_NAME).first()
+        flag = db.query(MaintenanceFlag).filter(MaintenanceFlag.flag_name.in_(INSECURE_PASSWORD_FLAGS)).first()
         if flag:
-            logger.info(f"Maintenance flag '{FLAG_NAME}' already applied. Skipping bcrypt audit.")
+            logger.info(f"Maintenance flag '{flag.flag_name}' already applied. Skipping bcrypt audit.")
+            # Ensure both aliases exist for full consistency
+            for alias in INSECURE_PASSWORD_FLAGS:
+                if not db.query(MaintenanceFlag).filter(MaintenanceFlag.flag_name == alias).first():
+                    db.add(MaintenanceFlag(flag_name=alias, details=flag.details))
+            db.commit()
             return
 
         users = db.query(User).all()
@@ -101,12 +107,13 @@ def audit_insecure_admins_once(db: Session):
                     logger.info(f"Deleted user '{u.email}'.")
                 neutralized_count += 1
 
-        db.add(MaintenanceFlag(
-            flag_name=FLAG_NAME,
-            details=f"Audited and neutralized {neutralized_count} insecure user accounts."
-        ))
+        for alias in INSECURE_PASSWORD_FLAGS:
+            db.add(MaintenanceFlag(
+                flag_name=alias,
+                details=f"Audited and neutralized {neutralized_count} insecure user accounts."
+            ))
         db.commit()
-        logger.info(f"Maintenance flag '{FLAG_NAME}' committed. Bcrypt audit will not run on future boots.")
+        logger.info(f"Maintenance flags {INSECURE_PASSWORD_FLAGS} committed. Bcrypt audit will not run on future boots.")
 
     except Exception as e:
         logger.error(f"Error during security audit: {e}")

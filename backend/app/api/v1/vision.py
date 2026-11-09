@@ -312,6 +312,8 @@ def save_360_scan_embeddings(
     db.commit()
     db.refresh(product)
     VectorStoreMatcher.sync_to_disk(db)
+    from app.utils.cache import catalog_cache
+    catalog_cache.invalidate()
 
     return {
         "status": "SUCCESS",

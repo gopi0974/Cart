@@ -124,6 +124,7 @@ def create_product(
     db.add(product)
     db.commit()
     db.refresh(product)
+    catalog_cache.invalidate()
     return ProductResponse(
         id=product.id,
         barcode=product.barcode,
@@ -170,6 +171,7 @@ def update_product(
         setattr(p, field, val)
     db.commit()
     db.refresh(p)
+    catalog_cache.invalidate()
     has_emb = db.query(ProductEmbedding).filter(ProductEmbedding.product_id == p.id).count() > 0
     return ProductResponse(
         id=p.id,
@@ -258,6 +260,7 @@ def delete_product(
     )
     db.add(audit)
     db.commit()
+    catalog_cache.invalidate()
 
     return {
         "status": "SUCCESS",
@@ -298,6 +301,7 @@ def restore_product(
     db.add(audit)
     db.commit()
     db.refresh(p)
+    catalog_cache.invalidate()
     return {"status": "SUCCESS", "message": f"Product '{p.name}' restored successfully."}
 
 @router.post("/bulk-delete")
@@ -365,6 +369,7 @@ def bulk_delete_products(
         deleted_names.append(p.name)
 
     db.commit()
+    catalog_cache.invalidate()
     return {
         "status": "SUCCESS",
         "message": f"Successfully deleted {deleted_count} product(s).",
@@ -442,6 +447,7 @@ async def bulk_upload_csv(
             error_count += 1
 
     db.commit()
+    catalog_cache.invalidate()
     return BulkUploadResponse(
         success_count=success_count,
         error_count=error_count,

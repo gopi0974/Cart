@@ -46,6 +46,10 @@ class LoginRateLimiter:
             self._failures.pop(f"ip:{ip}", None)
             self._failures.pop(f"email:{email}", None)
 
+    def clear(self):
+        with self._lock:
+            self._failures.clear()
+
 login_rate_limiter = LoginRateLimiter(max_attempts=5, window_seconds=900)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -86,14 +90,37 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
         )
     return current_user
 
+def get_client_ip(request: Request) -> str:
+    """
+    Extract the real client IP address:
+    1. Inspects 'X-Forwarded-For' header: in reverse-proxy architectures (Render, Cloudflare, AWS),
+       the connecting client's true IP is the first entry in the comma-separated chain.
+    2. Inspects 'X-Real-IP' as secondary proxy standard.
+    3. Falls back to request.client.host if direct connection.
+    4. Defaults to '127.0.0.1'.
+    """
+    x_forwarded = request.headers.get("x-forwarded-for")
+    if x_forwarded:
+        ips = [ip.strip() for ip in x_forwarded.split(",") if ip.strip()]
+        if ips:
+            return ips[0]
+            
+    x_real_ip = request.headers.get("x-real-ip")
+    if x_real_ip and x_real_ip.strip():
+        return x_real_ip.strip()
+
+    if request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
+
+
 @router.post("/login", response_model=Token)
 def login(login_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     """Staff/Admin login endpoint providing JWT access token with rate limiting protection."""
     clean_email = (login_data.email or "").strip().lower()
     clean_password = (login_data.password or "").strip()
 
-    forwarded = request.headers.get("x-forwarded-for")
-    client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "127.0.0.1")
+    client_ip = get_client_ip(request)
 
     # Enforce rate limiting: 5 failed attempts per 15 minutes per IP or email
     if login_rate_limiter.is_rate_limited(client_ip, clean_email):

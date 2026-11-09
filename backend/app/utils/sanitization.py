@@ -56,3 +56,4 @@ class SanitizingLogFilter(logging.Filter):
             elif isinstance(record.args, tuple):
                 record.args = tuple(sanitize_secrets(v) for v in record.args)
         return True
+
