@@ -72,6 +72,9 @@ def test_db():
 def client(test_db, monkeypatch):
     monkeypatch.setattr("app.database.check_db_health", lambda: True)
     monkeypatch.setattr("app.main.check_db_health", lambda: True)
+    monkeypatch.setattr("app.main.init_db", lambda: None)
+    monkeypatch.setattr("app.main.seed_database", lambda db: None)
+    monkeypatch.setattr("app.main.start_background_model_loader", lambda: None)
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -247,4 +250,63 @@ def test_retry_scan_job(client, test_db):
         assert reloaded.error is None
         # Verify saved frames were preserved for retry
         assert reloaded.frame_paths_json == '[{"angle_tag": "FRONT", "frame_ref": "ref1"}]'
+
+
+def test_cancel_scan_job(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Seed an active processing job
+    job = ScanJob(
+        id="cancel-job-uuid",
+        product_id="product-uuid-1",
+        status="PROCESSING",
+        stage="COMPUTING_VECTORS",
+        stage_message="Computing vectors 5/16",
+        done=5,
+        total=16,
+        frame_paths_json='[{"angle_tag": "FRONT", "frame_ref": "ref1"}]'
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    resp = client.post("/api/v1/vision/jobs/cancel-job-uuid/cancel", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "CANCELLED"
+
+    test_db.expire_all()
+    cancelled_job = test_db.query(ScanJob).filter(ScanJob.id == "cancel-job-uuid").first()
+    assert cancelled_job.status == "CANCELLED"
+    assert cancelled_job.stage == "CANCELLED"
+    # Frames are kept for retry
+    assert cancelled_job.frame_paths_json is not None
+
+
+def test_get_product_active_job(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # 1. Product without any jobs
+    resp1 = client.get("/api/v1/vision/products/product-uuid-1/active-job", headers=headers)
+    assert resp1.status_code == 200
+    assert resp1.json()["has_active_job"] is False
+
+    # 2. Add an active job
+    job = ScanJob(
+        id="active-job-uuid",
+        product_id="product-uuid-1",
+        status="PROCESSING",
+        stage="REMOVING_BACKGROUND",
+        stage_message="Removing background 1/3",
+        done=1,
+        total=3
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    resp2 = client.get("/api/v1/vision/products/product-uuid-1/active-job", headers=headers)
+    assert resp2.status_code == 200
+    assert resp2.json()["has_active_job"] is True
+    assert resp2.json()["job"]["job_id"] == "active-job-uuid"
+
 

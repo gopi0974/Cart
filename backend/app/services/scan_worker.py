@@ -32,6 +32,12 @@ logger = logging.getLogger("smartcart.scan_worker")
 
 # Process strictly ONE 360-scan job at a time to prevent CPU / memory thrashing on Render
 _scan_job_lock = asyncio.Lock()
+_cancelled_job_ids = set()
+
+
+def cancel_job(job_id: str):
+    """Signals an active or queued job to cancel immediately."""
+    _cancelled_job_ids.add(job_id)
 
 
 def _downscale_and_remove_background(pil_img: Image.Image) -> Image.Image:
@@ -86,6 +92,16 @@ async def _execute_scan_job_internal(job_id: str):
             logger.error(f"ScanJob {job_id} not found.")
             return
 
+        # Check early cancellation
+        if job_id in _cancelled_job_ids or job.status == "CANCELLED":
+            job.status = "CANCELLED"
+            job.stage = "CANCELLED"
+            job.stage_message = "Scan processing was cancelled by user."
+            db.commit()
+            _cancelled_job_ids.discard(job_id)
+            logger.info(f"ScanJob {job_id} cancelled before processing began.")
+            return
+
         product = db.query(Product).filter(Product.id == job.product_id).first()
         if not product:
             job.status = "FAILED"
@@ -125,6 +141,16 @@ async def _execute_scan_job_internal(job_id: str):
         primary_frame_url = None
 
         for idx, item in enumerate(frame_data):
+            # Check cancellation between frames
+            if job_id in _cancelled_job_ids:
+                job.status = "CANCELLED"
+                job.stage = "CANCELLED"
+                job.stage_message = "Scan processing was cancelled by user."
+                db.commit()
+                _cancelled_job_ids.discard(job_id)
+                logger.info(f"ScanJob {job_id} cancelled during frame processing.")
+                return
+
             angle_tag = item["angle_tag"]
             frame_ref = item["frame_ref"]
 
@@ -172,6 +198,16 @@ async def _execute_scan_job_internal(job_id: str):
         computed_embeddings: List[Tuple[str, str, List[float], str]] = []
 
         for b_idx in range(0, total_vectors, BATCH_SIZE):
+            # Check cancellation between vector batches
+            if job_id in _cancelled_job_ids:
+                job.status = "CANCELLED"
+                job.stage = "CANCELLED"
+                job.stage_message = "Scan processing was cancelled by user."
+                db.commit()
+                _cancelled_job_ids.discard(job_id)
+                logger.info(f"ScanJob {job_id} cancelled during vector extraction.")
+                return
+
             batch = all_variants[b_idx: b_idx + BATCH_SIZE]
             batch_images = [item[2] for item in batch]
 

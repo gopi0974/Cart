@@ -177,7 +177,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
 export interface ScanJobResponse {
   job_id: string;
   product_id: string;
-  status: 'PENDING' | 'PROCESSING' | 'ENROLLED' | 'FAILED';
+  status: 'PENDING' | 'PROCESSING' | 'ENROLLED' | 'FAILED' | 'CANCELLED';
   stage: string;
   stage_message?: string;
   done: number;
@@ -565,6 +565,24 @@ export const api = {
       `/vision/jobs/${jobId}/retry`,
       {
         method: 'POST',
+      }
+    );
+  },
+
+  async cancelScanJob(jobId: string) {
+    return request<{ status: string; job_id: string; message: string }>(
+      `/vision/jobs/${jobId}/cancel`,
+      {
+        method: 'POST',
+      }
+    );
+  },
+
+  async getProductActiveJob(productId: string) {
+    return request<{ has_active_job: boolean; job: ScanJobResponse | null }>(
+      `/vision/products/${productId}/active-job`,
+      {
+        method: 'GET',
       }
     );
   },

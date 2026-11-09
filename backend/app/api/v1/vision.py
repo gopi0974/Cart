@@ -306,14 +306,83 @@ def get_scan_job_status(
     }
 
 
-@router.post("/jobs/{job_id}/retry")
-async def retry_scan_job(
+@router.post("/jobs/{job_id}/cancel")
+def cancel_scan_job(
     job_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
     """
-    Retries a failed scan job using previously saved frames without re-uploading.
+    Cancels an active or pending scan job.
+    Admin or Manager only.
+    Worker checks cancel flag between batches, stops immediately,
+    sets status CANCELLED, and preserves frames for potential retry.
+    """
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Scan job not found.")
+
+    if job.status in ("ENROLLED", "COMPLETED"):
+        raise HTTPException(status_code=400, detail="Cannot cancel a job that has already completed.")
+
+    from app.services.scan_worker import cancel_job
+    cancel_job(job.id)
+
+    job.status = "CANCELLED"
+    job.stage = "CANCELLED"
+    job.stage_message = "Scan processing was cancelled by user."
+    db.commit()
+
+    return {
+        "status": "CANCELLED",
+        "job_id": job.id,
+        "message": "Scan job cancellation requested."
+    }
+
+
+@router.get("/products/{product_id}/active-job")
+def get_product_active_job(
+    product_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns the latest scan job for a product to enable reopening the progress popup
+    from the product catalog view if closed during execution.
+    """
+    job = db.query(ScanJob).filter(
+        ScanJob.product_id == product_id
+    ).order_by(ScanJob.created_at.desc()).first()
+
+    if not job:
+        return {"has_active_job": False, "job": None}
+
+    is_active = job.status in ("PENDING", "PROCESSING")
+    return {
+        "has_active_job": is_active,
+        "job": {
+            "job_id": job.id,
+            "product_id": job.product_id,
+            "status": job.status,
+            "stage": job.stage,
+            "stage_message": job.stage_message,
+            "done": job.done,
+            "total": job.total,
+            "error": job.error,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None
+        }
+    }
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_scan_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Retries a failed or cancelled scan job using previously saved frames without re-uploading.
     """
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     if not job:
@@ -322,6 +391,9 @@ async def retry_scan_job(
     if job.status == "PROCESSING":
         raise HTTPException(status_code=400, detail="Scan job is currently being processed.")
 
+    from app.services.scan_worker import _cancelled_job_ids, enqueue_scan_job
+    _cancelled_job_ids.discard(job.id)
+
     job.status = "PENDING"
     job.stage = "QUEUED"
     job.stage_message = "Retry enqueued. Waiting for worker..."
@@ -329,7 +401,6 @@ async def retry_scan_job(
     job.done = 0
     db.commit()
 
-    from app.services.scan_worker import enqueue_scan_job
     enqueue_scan_job(job.id)
 
     return {
