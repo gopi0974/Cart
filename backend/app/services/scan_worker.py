@@ -401,7 +401,13 @@ def _execute_scan_job_sync(job_id: str):
             job.stage_message = "Saving embeddings to database..."
             db.commit()
 
-            # Clean existing embeddings for product
+            # Guard: Never delete or alter existing product vectors unless valid new vectors are generated
+            if not completed_vectors:
+                raise RuntimeError(
+                    "No embeddings were generated from the frames. Aborting to protect existing vectors. (ERR_ZERO_VECTORS)"
+                )
+
+            # Clean existing embeddings for product atomically before inserting new ones
             VectorStoreMatcher.delete_embeddings_for_product(db, product.id)
             db.query(ProductImage).filter(
                 ProductImage.product_id == product.id,

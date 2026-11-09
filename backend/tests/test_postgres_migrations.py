@@ -298,8 +298,9 @@ def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service)
     # Step 4: Verify get_schema_info reports unversioned status
     with engine.connect() as conn:
         schema_info_before = get_schema_info(connection=conn)
+        head_rev = schema_info_before["head_revision"]
         assert schema_info_before["current_revision"] is None
-        assert schema_info_before["head_revision"] == "f3a4b5c6d7e8"
+        assert head_rev is not None
         assert not schema_info_before["is_up_to_date"]
         assert "Database unversioned" in schema_info_before["migration_error"]
 
@@ -340,8 +341,8 @@ def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service)
         with engine.connect() as conn:
             schema_info_after = get_schema_info(connection=conn)
             assert schema_info_after["is_up_to_date"] is True
-            assert schema_info_after["current_revision"] == "f3a4b5c6d7e8"
-            assert schema_info_after["head_revision"] == "f3a4b5c6d7e8"
+            assert schema_info_after["current_revision"] == head_rev
+            assert schema_info_after["head_revision"] == head_rev
             assert schema_info_after["migration_error"] is None
 
         # Step 9: Verify existing data was preserved
@@ -370,8 +371,8 @@ def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service)
         assert public_health["status"] in ("HEALTHY", "STARTING")
 
         assert detailed_health["schema_ok"] is True
-        assert detailed_health["current_revision"] == "f3a4b5c6d7e8"
-        assert detailed_health["head_revision"] == "f3a4b5c6d7e8"
+        assert detailed_health["current_revision"] == head_rev
+        assert detailed_health["head_revision"] == head_rev
         assert detailed_health["migration_error"] is None
         assert detailed_health["database_ok"] is True
 

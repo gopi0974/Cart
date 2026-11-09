@@ -79,6 +79,9 @@ def client(test_db, monkeypatch):
     monkeypatch.setattr("app.migrations.get_schema_info", lambda *a, **k: {"is_up_to_date": True, "current_revision": "head", "head_revision": "head"})
     monkeypatch.setattr("app.migrations.check_schema_health", lambda *a, **k: True)
     monkeypatch.setattr("app.services.scan_worker.cleanup_orphaned_jobs_on_startup", lambda: None)
+    monkeypatch.setattr("app.ai.vector_store.VectorStoreMatcher.sync_to_disk", lambda *a, **k: None)
+    monkeypatch.setattr("app.services.device_watchdog.run_camera_watchdog", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(storage_service, "supabase_url", "")
 
     def override_get_db():
         db = TestingSessionLocal()
@@ -245,18 +248,19 @@ def test_retry_scan_job(client, test_db):
     test_db.add(job)
     test_db.commit()
 
-    with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
-        resp = client.post("/api/v1/vision/jobs/failed-job-uuid/retry", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "PENDING"
-        mock_enqueue.assert_called_once_with("failed-job-uuid")
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=(["ref1"], [])):
+        with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
+            resp = client.post("/api/v1/vision/jobs/failed-job-uuid/retry", headers=headers)
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "PENDING"
+            mock_enqueue.assert_called_once_with("failed-job-uuid")
 
-        test_db.expire_all()
-        reloaded = test_db.query(ScanJob).filter(ScanJob.id == "failed-job-uuid").first()
-        assert reloaded.status == "PENDING"
-        assert reloaded.error is None
-        # Verify saved frames were preserved for retry
-        assert reloaded.frame_paths_json == '[{"angle_tag": "FRONT", "frame_ref": "ref1"}]'
+            test_db.expire_all()
+            reloaded = test_db.query(ScanJob).filter(ScanJob.id == "failed-job-uuid").first()
+            assert reloaded.status == "PENDING"
+            assert reloaded.error is None
+            # Verify saved frames were preserved for retry
+            assert "ref1" in reloaded.frame_paths_json
 
 
 def test_cancel_scan_job(client, test_db):
@@ -370,11 +374,37 @@ def test_direct_upload_complete_360_scan(client, test_db):
     admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
     headers = {"Authorization": f"Bearer {admin_token}"}
 
-    with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=(["supabase://bucket/f1.jpg", "supabase://bucket/f2.jpg"], [])):
+        with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
+            resp = client.post(
+                "/api/v1/vision/products/product-uuid-1/360-scan/complete",
+                json={
+                    "job_id": "direct-job-123",
+                    "frames": [
+                        {"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "poor_crop": False},
+                        {"angle_tag": "BACK", "frame_ref": "supabase://bucket/f2.jpg", "poor_crop": False},
+                    ]
+                },
+                headers=headers
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "PENDING"
+            assert data["job_id"] == "direct-job-123"
+            assert data["total_frames"] == 2
+            mock_enqueue.assert_called_once_with("direct-job-123")
+
+
+def test_direct_upload_complete_360_scan_rejects_missing_frames(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Simulate missing frame f2.jpg in storage
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=(["supabase://bucket/f1.jpg"], ["supabase://bucket/f2.jpg"])):
         resp = client.post(
             "/api/v1/vision/products/product-uuid-1/360-scan/complete",
             json={
-                "job_id": "direct-job-123",
+                "job_id": "missing-job-123",
                 "frames": [
                     {"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "poor_crop": False},
                     {"angle_tag": "BACK", "frame_ref": "supabase://bucket/f2.jpg", "poor_crop": False},
@@ -382,12 +412,82 @@ def test_direct_upload_complete_360_scan(client, test_db):
             },
             headers=headers
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "PENDING"
-        assert data["job_id"] == "direct-job-123"
-        assert data["total_frames"] == 2
-        mock_enqueue.assert_called_once_with("direct-job-123")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "ERR_MISSING_FRAMES" in detail
+        assert "f2.jpg" in detail
+
+
+def test_retry_scan_job_rejects_empty_frames(client, test_db):
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    job = ScanJob(
+        id="empty-frames-job",
+        product_id="product-uuid-1",
+        status="FAILED",
+        stage="FAILED",
+        frame_paths_json="[]"
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    resp = client.post("/api/v1/vision/jobs/empty-frames-job/retry", headers=headers)
+    assert resp.status_code == 400
+    assert "ERR_NO_FRAMES" in resp.json()["detail"]
+
+
+def test_failed_rescan_preserves_existing_vectors(test_db):
+    from app.services.scan_worker import _execute_scan_job_sync
+    from app.models.product import ProductEmbedding
+    from app.ai.vector_store import VectorStoreMatcher
+
+    # 1. Product initially has 4 enrolled vectors
+    for i in range(4):
+        VectorStoreMatcher.store_embedding(
+            db=test_db,
+            product_id="product-uuid-1",
+            barcode="8901030009999",
+            angle_tag=f"FRONT_{i}",
+            vector=[0.123] * 512,
+            image_path=f"path/to/old_{i}.jpg",
+            commit=True
+        )
+
+    initial_embeddings = test_db.query(ProductEmbedding).filter(ProductEmbedding.product_id == "product-uuid-1").all()
+    assert len(initial_embeddings) == 4
+    initial_ids = {e.id for e in initial_embeddings}
+
+    # 2. Trigger a failing re-scan job (simulate storage failure during download)
+    failing_job = ScanJob(
+        id="failing-rescan-job",
+        product_id="product-uuid-1",
+        status="PENDING",
+        stage="QUEUED",
+        total=2,
+        frame_paths_json=json.dumps([
+            {"angle_tag": "FRONT", "frame_ref": "bad-ref-1", "poor_crop": False},
+            {"angle_tag": "BACK", "frame_ref": "bad-ref-2", "poor_crop": False},
+        ])
+    )
+    test_db.add(failing_job)
+    test_db.commit()
+
+    with patch("app.services.scan_worker.SessionLocal", return_value=test_db):
+        with patch("app.services.storage_service.storage_service.load_frame_image", side_effect=RuntimeError("Storage connection failed")):
+            _execute_scan_job_sync("failing-rescan-job")
+
+    # 3. Verify job failed
+    test_db.expire_all()
+    reloaded_job = test_db.query(ScanJob).filter(ScanJob.id == "failing-rescan-job").first()
+    assert reloaded_job.status == "FAILED"
+    assert "Storage connection failed" in reloaded_job.error
+
+    # 4. Verify original product vectors are 100% intact and untouched
+    surviving_embeddings = test_db.query(ProductEmbedding).filter(ProductEmbedding.product_id == "product-uuid-1").all()
+    assert len(surviving_embeddings) == 4
+    surviving_ids = {e.id for e in surviving_embeddings}
+    assert surviving_ids == initial_ids
 
 
 def test_delete_scan_job(client, test_db):

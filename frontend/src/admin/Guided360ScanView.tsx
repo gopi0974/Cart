@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Camera, Check, RefreshCw, Volume2, VolumeX, Sparkles, AlertCircle,
   ArrowLeft, X, Trash2, AlertTriangle, CheckCircle2, Plus, Zap,
-  Play, Pause, SkipForward, Scan, ShieldAlert, Eye
+  Play, Pause, SkipForward, Scan, ShieldAlert, Eye, XCircle, Circle, Loader2
 } from 'lucide-react';
 import { Product } from '../types';
 import { api } from '../services/api';
@@ -93,6 +93,12 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [jobError, setJobError] = useState<string | null>(null);
   const [enrollmentStats, setEnrollmentStats] = useState<any>(null);
   const [isDone, setIsDone] = useState(false);
+
+  // Upload verification & retry states
+  const [failedUploads, setFailedUploads] = useState<any[]>([]);
+  const [cachedCompressedFrames, setCachedCompressedFrames] = useState<any[]>([]);
+  const [cachedUploadItems, setCachedUploadItems] = useState<any[]>([]);
+  const [cachedUploadedRefs, setCachedUploadedRefs] = useState<any[]>([]);
 
   // Selected angle for expanded review gallery
   const [selectedGalleryAngle, setSelectedGalleryAngle] = useState<string | null>(null);
@@ -930,11 +936,14 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       );
 
       setActiveJobId(initResp.job_id);
+      setCachedCompressedFrames(compressedFrames);
+      setCachedUploadItems(initResp.upload_items);
 
       // Path A: Direct upload directly to Supabase Storage
       if (initResp.direct_upload && initResp.upload_items.length === compressedFrames.length) {
         setJobStageMessage('Uploading frames directly to Supabase Storage...');
         const uploadedRefs: { angle_tag: string; frame_ref: string; poor_crop: boolean }[] = [];
+        const failed: { index: number; item: any; cf: any; error: string }[] = [];
 
         for (let i = 0; i < compressedFrames.length; i++) {
           const item = initResp.upload_items[i];
@@ -942,27 +951,51 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           setJobStageMessage(`Uploading frame ${i + 1}/${compressedFrames.length} directly to cloud storage...`);
           setJobDone(i);
 
-          const putRes = await fetch(item.upload_url, {
-            method: 'PUT',
-            body: cf.blob,
-            headers: {
-              'Content-Type': 'image/jpeg',
-            },
-          });
+          try {
+            const putRes = await fetch(item.upload_url, {
+              method: 'PUT',
+              body: cf.blob,
+              headers: {
+                'Content-Type': 'image/jpeg',
+              },
+            });
 
-          if (!putRes.ok) {
-            throw new Error(`Direct upload failed for ${item.filename}: HTTP ${putRes.status}`);
+            if (putRes.ok) {
+              uploadedRefs.push({
+                angle_tag: item.angle_tag,
+                frame_ref: item.frame_ref,
+                poor_crop: item.poor_crop,
+              });
+            } else {
+              failed.push({
+                index: i,
+                item,
+                cf,
+                error: `HTTP ${putRes.status}`,
+              });
+            }
+          } catch (err: any) {
+            failed.push({
+              index: i,
+              item,
+              cf,
+              error: err.message || 'Network error',
+            });
           }
-
-          uploadedRefs.push({
-            angle_tag: item.angle_tag,
-            frame_ref: item.frame_ref,
-            poor_crop: item.poor_crop,
-          });
         }
 
-        // Notify complete with the uploaded references
-        setJobStageMessage('Frames saved. Starting background recognition worker...');
+        setCachedUploadedRefs(uploadedRefs);
+
+        if (failed.length > 0) {
+          setFailedUploads(failed);
+          setJobError(`Upload failed for ${failed.length} frame(s). Please retry the failed uploads.`);
+          setJobStatus('FAILED');
+          return;
+        }
+
+        // All uploaded successfully
+        setFailedUploads([]);
+        setJobStageMessage('Frames saved & verified. Starting background recognition worker...');
         await api.complete360Scan(product.id, {
           job_id: initResp.job_id,
           frames: uploadedRefs,
@@ -977,7 +1010,10 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           image_data_url: cf.jpegDataUrl,
           poor_crop: cf.poor_crop,
         }));
-        const res = await api.complete360Scan(product.id, payload);
+        const res = await api.complete360Scan(product.id, {
+          job_id: initResp.job_id,
+          captures: payload,
+        } as any);
         setActiveJobId(res.job_id);
         setJobStatus('PENDING');
         setJobStageMessage('Frames saved. Waiting for background worker...');
@@ -985,6 +1021,122 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     } catch (e: any) {
       setJobError(e.message || 'Failed to submit 360-scan frames');
       setJobStatus('FAILED');
+    }
+  };
+
+  const handleRetryFailedUploads = async () => {
+    if (!failedUploads.length || !activeJobId) return;
+
+    setJobError(null);
+    setJobStatus('PENDING');
+    setJobStage('SAVING_FRAMES');
+    setJobStageMessage(`Retrying ${failedUploads.length} failed upload(s)...`);
+
+    const currentUploaded = [...cachedUploadedRefs];
+    const stillFailed: { index: number; item: any; cf: any; error: string }[] = [];
+
+    for (let i = 0; i < failedUploads.length; i++) {
+      const { index, item, cf } = failedUploads[i];
+      setJobStageMessage(`Retrying upload ${i + 1}/${failedUploads.length}...`);
+
+      try {
+        const putRes = await fetch(item.upload_url, {
+          method: 'PUT',
+          body: cf.blob,
+          headers: {
+            'Content-Type': 'image/jpeg',
+          },
+        });
+
+        if (putRes.ok) {
+          currentUploaded.push({
+            angle_tag: item.angle_tag,
+            frame_ref: item.frame_ref,
+            poor_crop: item.poor_crop,
+          });
+        } else {
+          stillFailed.push({ index, item, cf, error: `HTTP ${putRes.status}` });
+        }
+      } catch (err: any) {
+        stillFailed.push({ index, item, cf, error: err.message || 'Network error' });
+      }
+    }
+
+    setCachedUploadedRefs(currentUploaded);
+
+    if (stillFailed.length > 0) {
+      setFailedUploads(stillFailed);
+      setJobError(`Upload failed for ${stillFailed.length} frame(s). Please retry or upload to server.`);
+      setJobStatus('FAILED');
+      return;
+    }
+
+    // All succeeded!
+    setFailedUploads([]);
+    try {
+      setJobStageMessage('All frames verified. Enqueueing background recognition worker...');
+      await api.complete360Scan(product.id, {
+        job_id: activeJobId,
+        frames: currentUploaded,
+      });
+      setJobStatus('PENDING');
+      setJobStageMessage('Direct upload complete. Waiting for background worker...');
+    } catch (e: any) {
+      setJobError(e.message || 'Failed to complete 360-scan');
+      setJobStatus('FAILED');
+    }
+  };
+
+  const handleFallbackServerUpload = async () => {
+    if (!cachedCompressedFrames.length) return;
+    setJobError(null);
+    setJobStatus('PENDING');
+    setJobStage('SAVING_FRAMES');
+    setJobStageMessage('Uploading frames via backend server...');
+
+    try {
+      const payload = cachedCompressedFrames.map((cf) => ({
+        angle_tag: cf.angle_tag,
+        image_data_url: cf.jpegDataUrl,
+        poor_crop: cf.poor_crop,
+      }));
+      const res = await api.complete360Scan(product.id, {
+        job_id: activeJobId || undefined,
+        captures: payload,
+      } as any);
+      setActiveJobId(res.job_id);
+      setJobStatus('PENDING');
+      setJobStageMessage('Frames saved. Waiting for background worker...');
+      setFailedUploads([]);
+    } catch (e: any) {
+      setJobError(e.message || 'Failed to upload frames to server');
+      setJobStatus('FAILED');
+    }
+  };
+
+  const handleScanAgain = () => {
+    setIsProcessing(false);
+    setJobError(null);
+    setJobStatus(null);
+    setActiveJobId(null);
+    setFailedUploads([]);
+    setCachedCompressedFrames([]);
+    setCachedUploadItems([]);
+    setCachedUploadedRefs([]);
+    setIsDone(false);
+    setIsScanning(true);
+    setCurrentStepIdx(0);
+    currentStepIdxRef.current = 0;
+    setCaptures({});
+    setStepFrames([]);
+    setStepPhase('WAITING_STEADY');
+    setCountdown(3);
+    stepStartTimeRef.current = Date.now();
+    if (videoRef.current && streamRef.current) {
+      if (videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+      }
+      videoRef.current.play().catch(() => {});
     }
   };
 
@@ -1090,6 +1242,13 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   // Retry job without re-uploading frames
   const handleRetryJob = async () => {
+    if (
+      (jobError || '').toUpperCase().includes('ERR_NO_FRAMES') ||
+      (jobError || '').toLowerCase().includes('no saved frames')
+    ) {
+      handleScanAgain();
+      return;
+    }
     if (!activeJobId) {
       handleSaveEmbeddings();
       return;
@@ -1817,43 +1976,135 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
               </div>
             )}
 
-            {/* Real Stage Telemetry List */}
+            {/* Real Stage Telemetry List with Exact State Icons */}
             <div className="space-y-2 text-left text-xs">
-              <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                jobStage === 'SAVING_FRAMES' || jobDone > 0 || jobStage === 'REMOVING_BACKGROUND' || jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
-                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
-                  : 'opacity-40 border-slate-200 dark:border-slate-800'
-              }`}>
-                <Check className={`w-4 h-4 ${jobDone > 0 ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Frames uploaded & saved in Supabase object storage</span>
-              </div>
-
-              <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                jobStage === 'REMOVING_BACKGROUND' || jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
-                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
-                  : 'opacity-40 border-slate-200 dark:border-slate-800'
-              }`}>
-                <Check className={`w-4 h-4 ${jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED' ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Downscaled ~320px & GrabCut segmentation onto neutral grey (128,128,128)</span>
-              </div>
-
-              <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                jobStage === 'COMPUTING_VECTORS' || jobStatus === 'ENROLLED'
-                  ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 text-purple-700 dark:text-purple-300'
-                  : 'opacity-40 border-slate-200 dark:border-slate-800'
-              }`}>
-                <Check className={`w-4 h-4 ${jobStatus === 'ENROLLED' ? 'text-purple-600' : 'text-slate-400'}`} />
-                <span>Batch ONNX INT8 CLIP ViT-B/32 embedding extraction</span>
-              </div>
-
-              <div className={`p-2.5 rounded-xl border flex items-center gap-2 ${
-                jobStatus === 'ENROLLED'
-                  ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 text-emerald-700 dark:text-emerald-300'
-                  : 'opacity-40 border-slate-200 dark:border-slate-800'
-              }`}>
-                <Check className={`w-4 h-4 ${jobStatus === 'ENROLLED' ? 'text-emerald-600' : 'text-slate-400'}`} />
-                <span>Single-transaction atomic commit & quality score calculated</span>
-              </div>
+              {[
+                {
+                  id: 'UPLOAD',
+                  label: 'Frames uploaded & verified in cloud storage',
+                  status: (() => {
+                    if (jobStatus === 'ENROLLED') return 'DONE';
+                    if (jobStatus === 'FAILED') {
+                      const err = (jobError || '').toUpperCase();
+                      if (
+                        jobStage === 'SAVING_FRAMES' ||
+                        jobStage === 'AWAITING_UPLOAD' ||
+                        err.includes('ERR_NO_FRAMES') ||
+                        err.includes('ERR_MISSING_FRAMES') ||
+                        err.includes('UPLOAD FAILED') ||
+                        failedUploads.length > 0
+                      ) {
+                        return 'FAILED';
+                      }
+                      return 'DONE';
+                    }
+                    if (jobStage === 'SAVING_FRAMES' || jobStage === 'AWAITING_UPLOAD' || jobStage === 'QUEUED') {
+                      return 'IN_PROGRESS';
+                    }
+                    return 'DONE';
+                  })(),
+                },
+                {
+                  id: 'PREPROCESS',
+                  label: 'Downscaled ~320px & product crop isolation',
+                  status: (() => {
+                    if (jobStatus === 'ENROLLED') return 'DONE';
+                    if (jobStatus === 'FAILED') {
+                      const err = (jobError || '').toUpperCase();
+                      if (
+                        jobStage === 'SAVING_FRAMES' ||
+                        jobStage === 'AWAITING_UPLOAD' ||
+                        err.includes('ERR_NO_FRAMES') ||
+                        err.includes('ERR_MISSING_FRAMES') ||
+                        err.includes('UPLOAD FAILED') ||
+                        failedUploads.length > 0
+                      ) {
+                        return 'PENDING';
+                      }
+                      if (jobStage === 'REMOVING_BACKGROUND' || (jobStage === 'PROCESSING_FRAMES' && jobDone === 0)) {
+                        return 'FAILED';
+                      }
+                      return 'DONE';
+                    }
+                    if (jobStage === 'SAVING_FRAMES' || jobStage === 'AWAITING_UPLOAD' || jobStage === 'QUEUED') {
+                      return 'PENDING';
+                    }
+                    if (jobStage === 'REMOVING_BACKGROUND') {
+                      return 'IN_PROGRESS';
+                    }
+                    return 'DONE';
+                  })(),
+                },
+                {
+                  id: 'EMBED',
+                  label: 'Batch ONNX INT8 CLIP ViT-B/32 embedding extraction',
+                  status: (() => {
+                    if (jobStatus === 'ENROLLED') return 'DONE';
+                    if (jobStatus === 'FAILED') {
+                      const err = (jobError || '').toUpperCase();
+                      if (
+                        jobStage === 'SAVING_FRAMES' ||
+                        jobStage === 'AWAITING_UPLOAD' ||
+                        err.includes('ERR_NO_FRAMES') ||
+                        err.includes('ERR_MISSING_FRAMES') ||
+                        err.includes('UPLOAD FAILED') ||
+                        failedUploads.length > 0 ||
+                        jobStage === 'REMOVING_BACKGROUND' ||
+                        (jobStage === 'PROCESSING_FRAMES' && jobDone === 0)
+                      ) {
+                        return 'PENDING';
+                      }
+                      if (jobStage === 'COMPUTING_VECTORS' || (jobStage === 'PROCESSING_FRAMES' && jobDone > 0)) {
+                        return 'FAILED';
+                      }
+                      return 'DONE';
+                    }
+                    if (jobStage === 'COMPUTING_VECTORS' || (jobStage === 'PROCESSING_FRAMES' && jobDone > 0)) {
+                      return 'IN_PROGRESS';
+                    }
+                    if (jobStage === 'SAVING_TO_DATABASE' || jobStage === 'COMPLETED') {
+                      return 'DONE';
+                    }
+                    return 'PENDING';
+                  })(),
+                },
+                {
+                  id: 'DATABASE',
+                  label: 'Single-transaction atomic commit & quality score calculated',
+                  status: (() => {
+                    if (jobStatus === 'ENROLLED') return 'DONE';
+                    if (jobStatus === 'FAILED') {
+                      if (jobStage === 'SAVING_TO_DATABASE') {
+                        return 'FAILED';
+                      }
+                      return 'PENDING';
+                    }
+                    if (jobStage === 'SAVING_TO_DATABASE') {
+                      return 'IN_PROGRESS';
+                    }
+                    return 'PENDING';
+                  })(),
+                },
+              ].map((step) => (
+                <div
+                  key={step.id}
+                  className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-all ${
+                    step.status === 'DONE'
+                      ? 'bg-emerald-50/60 dark:bg-emerald-950/20 border-emerald-300 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                      : step.status === 'FAILED'
+                      ? 'bg-red-50 dark:bg-red-950/40 border-red-300 dark:border-red-800 text-red-700 dark:text-red-300 font-medium'
+                      : step.status === 'IN_PROGRESS'
+                      ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 dark:border-purple-800 text-purple-700 dark:text-purple-300 shadow-sm'
+                      : 'opacity-40 border-slate-200 dark:border-slate-800 text-slate-400'
+                  }`}
+                >
+                  {step.status === 'DONE' && <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />}
+                  {step.status === 'FAILED' && <XCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" />}
+                  {step.status === 'IN_PROGRESS' && <Loader2 className="w-4 h-4 text-purple-600 dark:text-purple-400 animate-spin shrink-0" />}
+                  {step.status === 'PENDING' && <Circle className="w-4 h-4 text-slate-300 dark:text-slate-600 shrink-0" />}
+                  <span>{step.label}</span>
+                </div>
+              ))}
             </div>
 
             {/* Error Message if Failed */}
@@ -1898,26 +2149,98 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
             {/* 2. When Failed */}
             {jobStatus === 'FAILED' && (
-              <div className="flex gap-2 pt-1">
-                <button
-                  onClick={handleRetryJob}
-                  className="flex-1 py-2.5 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Retry
-                </button>
-                <button
-                  onClick={onComplete}
-                  className="flex-1 py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
-                >
-                  Done
-                </button>
-                <button
-                  onClick={() => setIsProcessing(false)}
-                  className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-500 rounded-xl text-xs font-semibold transition-all"
-                >
-                  Close
-                </button>
+              <div className="space-y-2 pt-1">
+                {((jobError || '').toUpperCase().includes('ERR_NO_FRAMES') ||
+                  (jobError || '').toLowerCase().includes('no saved frames') ||
+                  (jobTotal === 0 && jobDone === 0)) ? (
+                  <div className="space-y-2">
+                    <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 rounded-xl text-center space-y-2">
+                      <p className="text-xs text-red-700 dark:text-red-300 font-medium">
+                        This scan has no saved frames. Please scan again.
+                      </p>
+                      <button
+                        onClick={handleScanAgain}
+                        className="w-full py-2.5 px-4 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        Scan again
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={onComplete}
+                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                      >
+                        Done
+                      </button>
+                      <button
+                        onClick={() => setIsProcessing(false)}
+                        className="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-500 rounded-xl text-xs font-semibold transition-all"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : failedUploads.length > 0 ? (
+                  <div className="space-y-2">
+                    <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-xl text-center space-y-2">
+                      <p className="text-xs text-amber-800 dark:text-amber-200 font-medium">
+                        Upload failed for {failedUploads.length} frame(s).
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleRetryFailedUploads}
+                          className="flex-1 py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 shadow-md"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Retry Failed ({failedUploads.length})
+                        </button>
+                        <button
+                          onClick={handleFallbackServerUpload}
+                          className="flex-1 py-2 px-3 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-semibold"
+                        >
+                          Upload via Server
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={onComplete}
+                        className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                      >
+                        Done
+                      </button>
+                      <button
+                        onClick={() => setIsProcessing(false)}
+                        className="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-500 rounded-xl text-xs font-semibold transition-all"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleRetryJob}
+                      className="flex-1 py-2.5 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Retry
+                    </button>
+                    <button
+                      onClick={onComplete}
+                      className="flex-1 py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
+                    >
+                      Done
+                    </button>
+                    <button
+                      onClick={() => setIsProcessing(false)}
+                      className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-500 rounded-xl text-xs font-semibold transition-all"
+                    >
+                      Close
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

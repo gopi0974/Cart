@@ -566,7 +566,11 @@ export const api = {
     productId: string,
     payload:
       | { angle_tag: string; image_data_url: string; original_image_data_url?: string; poor_crop?: boolean }[]
-      | { job_id: string; frames: { angle_tag: string; frame_ref: string; poor_crop?: boolean }[] }
+      | {
+          job_id?: string;
+          frames?: { angle_tag: string; frame_ref: string; poor_crop?: boolean }[];
+          captures?: { angle_tag: string; image_data_url: string; original_image_data_url?: string; poor_crop?: boolean }[];
+        }
   ) {
     const body = Array.isArray(payload) ? { captures: payload } : payload;
     return request<ScanJobResponse>(

@@ -85,8 +85,9 @@ def test_ws_admin_unauthenticated_rejected():
     """Connecting to /ws/admin without a token must be rejected with close code 1008."""
     client = TestClient(app)
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/admin"):
-            pass
+        with client.websocket_connect("/ws/admin") as ws:
+            ws.send_text("ping")
+            ws.receive_text()
     assert exc_info.value.code == 1008
 
 
@@ -114,8 +115,9 @@ def test_ws_cart_unauthenticated_rejected():
     """Connecting to /ws/cart/{cart_id} without a token must be rejected with close code 1008."""
     client = TestClient(app)
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/cart/ws-test-cart-id"):
-            pass
+        with client.websocket_connect("/ws/cart/ws-test-cart-id") as ws:
+            ws.send_text("ping")
+            ws.receive_text()
     assert exc_info.value.code == 1008
 
 

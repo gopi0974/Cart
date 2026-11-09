@@ -47,21 +47,146 @@ class StorageService:
         }
         try:
             with httpx.Client(timeout=10.0) as client:
-                resp = client.post(sign_endpoint, json={"expiresIn": 3600}, headers=headers)
+                # Supabase storage accepts upsert parameter
+                resp = client.post(sign_endpoint, json={"upsert": True}, headers=headers)
+                if resp.status_code not in (200, 201):
+                    # Fallback attempt with empty payload
+                    resp = client.post(sign_endpoint, json={}, headers=headers)
+
                 if resp.status_code in (200, 201):
                     data = resp.json()
                     relative_url = data.get("url")
                     if relative_url:
-                        full_upload_url = f"{self.supabase_url}{relative_url}" if relative_url.startswith("/") else relative_url
+                        # Ensure /storage/v1 is present if relative url begins with /object/
+                        if relative_url.startswith("/object/"):
+                            full_upload_url = f"{self.supabase_url}/storage/v1{relative_url}"
+                        elif relative_url.startswith("/"):
+                            full_upload_url = f"{self.supabase_url}{relative_url}"
+                        else:
+                            full_upload_url = f"{self.supabase_url}/{relative_url}"
+
                         return {
                             "upload_url": full_upload_url,
                             "frame_ref": f"supabase://{self.bucket}/{storage_path}",
                             "storage_path": storage_path,
                         }
+                else:
+                    logger.warning(
+                        f"Supabase create_signed_upload_url returned HTTP {resp.status_code}: {resp.text}"
+                    )
         except Exception as e:
             logger.warning(f"Failed to generate Supabase signed upload URL: {sanitize_secrets(e)}")
 
         return None
+
+    def check_frame_exists(self, frame_ref: str) -> bool:
+        """
+        Checks whether a single frame reference actually exists in storage.
+        Supports both supabase:// URIs and local filesystem paths.
+        """
+        if not frame_ref:
+            return False
+
+        if frame_ref.startswith("supabase://"):
+            parts = frame_ref[len("supabase://"):].split("/", 1)
+            if len(parts) == 2:
+                bucket, path = parts
+                url = f"{self.supabase_url}/storage/v1/object/{bucket}/{path}"
+                headers = {
+                    "Authorization": f"Bearer {self.service_key}",
+                    "apikey": self.service_key,
+                    "Range": "bytes=0-0"
+                }
+                try:
+                    with httpx.Client(timeout=5.0) as client:
+                        resp = client.get(url, headers=headers)
+                        return resp.status_code in (200, 206)
+                except Exception as e:
+                    logger.warning(f"Frame check error for {sanitize_secrets(frame_ref)}: {sanitize_secrets(e)}")
+                    return False
+            return False
+
+        # Local file reference
+        return os.path.isfile(frame_ref)
+
+    def check_frames_exist(self, frame_refs: list) -> tuple:
+        """
+        Verifies existence for a batch of frame references.
+        Optimized to use bucket list API per folder for Supabase frames to avoid N roundtrips.
+        Returns (existing_refs, missing_refs).
+        """
+        if not frame_refs:
+            return [], []
+
+        existing: list = []
+        missing: list = []
+
+        # Group Supabase frames by bucket and folder prefix
+        supabase_by_prefix: dict = {}
+        local_refs: list = []
+
+        for ref in frame_refs:
+            if not ref:
+                missing.append(ref)
+            elif ref.startswith("supabase://"):
+                parts = ref[len("supabase://"):].split("/", 1)
+                if len(parts) == 2:
+                    bucket, path = parts
+                    folder = path.split("/", 1)[0] if "/" in path else ""
+                    filename = path.split("/", 1)[1] if "/" in path else path
+                    key = (bucket, folder)
+                    if key not in supabase_by_prefix:
+                        supabase_by_prefix[key] = []
+                    supabase_by_prefix[key].append((filename, ref))
+                else:
+                    missing.append(ref)
+            else:
+                local_refs.append(ref)
+
+        # 1. Batch query Supabase Storage per folder prefix
+        for (bucket, folder), items in supabase_by_prefix.items():
+            list_url = f"{self.supabase_url}/storage/v1/object/list/{bucket}"
+            headers = {
+                "Authorization": f"Bearer {self.service_key}",
+                "apikey": self.service_key,
+                "Content-Type": "application/json",
+            }
+            found_names = set()
+            try:
+                prefix = f"{folder}/" if folder else ""
+                with httpx.Client(timeout=10.0) as client:
+                    resp = client.post(
+                        list_url,
+                        json={"prefix": prefix, "limit": 100},
+                        headers=headers
+                    )
+                    if resp.status_code == 200:
+                        files = resp.json()
+                        for f in files:
+                            found_names.add(f.get("name"))
+                    else:
+                        logger.warning(f"Supabase list objects returned {resp.status_code}. Falling back to individual checks.")
+            except Exception as e:
+                logger.warning(f"Supabase list failed for prefix {folder}: {sanitize_secrets(e)}. Falling back.")
+
+            for filename, ref in items:
+                if filename in found_names:
+                    existing.append(ref)
+                else:
+                    # Fallback individual check (in case list was paginated or prefix differed)
+                    if self.check_frame_exists(ref):
+                        existing.append(ref)
+                    else:
+                        missing.append(ref)
+
+        # 2. Check local files
+        for ref in local_refs:
+            if os.path.isfile(ref):
+                existing.append(ref)
+            else:
+                missing.append(ref)
+
+        return existing, missing
 
     def save_frame(self, job_id: str, filename: str, image_bytes: bytes) -> str:
         """

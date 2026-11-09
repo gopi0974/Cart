@@ -174,8 +174,8 @@ def test_benchmark_endpoint_latencies(monkeypatch):
     2. /api/v1/shopper/{session_id}
     3. /api/v1/products
     """
-    monkeypatch.setattr("app.database.check_db_health", lambda: True)
-    monkeypatch.setattr("app.main.check_db_health", lambda: True)
+    monkeypatch.setattr("app.database.check_db_health", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.main.check_db_health", lambda *args, **kwargs: True)
     monkeypatch.setattr("app.main.SessionLocal", TestingSessionLocal)
     monkeypatch.setattr("app.migrations.check_schema_health", lambda *args, **kwargs: True)
 

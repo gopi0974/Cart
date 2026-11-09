@@ -270,6 +270,11 @@ def init_360_scan_upload(
     db.add(scan_job)
     db.commit()
 
+    logger.info(
+        f"[init-upload] product_id={product.id} barcode={product.barcode} "
+        f"files_requested={len(req.files)} direct_available={direct_available} job_id={job_id}"
+    )
+
     return {
         "job_id": job_id,
         "product_id": product.id,
@@ -297,7 +302,41 @@ async def save_360_scan_embeddings(
         raise HTTPException(status_code=404, detail="Product not found")
 
     # Path A: Direct upload was used (client sent list of stored frame refs)
-    if req.frames:
+    if req.frames is not None:
+        if len(req.frames) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No frames provided in direct upload payload. (ERR_NO_FRAMES)"
+            )
+
+        frame_refs = [item.get("frame_ref", "") for item in req.frames if item.get("frame_ref")]
+        if not frame_refs:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid frame references provided in payload. (ERR_NO_FRAMES)"
+            )
+
+        logger.info(f"[upload-check] Verifying storage presence for {len(frame_refs)} frames (job_id={req.job_id or 'unknown'})...")
+        existing_refs, missing_refs = storage_service.check_frames_exist(frame_refs)
+        logger.info(f"[upload-check] Storage verify result: {len(existing_refs)} verified, {len(missing_refs)} missing.")
+
+        if missing_refs:
+            missing_names = [ref.split("/")[-1] for ref in missing_refs]
+            summary = ", ".join(missing_names[:5]) + ("..." if len(missing_names) > 5 else "")
+            err_msg = f"Missing {len(missing_refs)} frames in storage: {summary} (ERR_MISSING_FRAMES)"
+            logger.error(f"[upload-check] {err_msg}")
+
+            if req.job_id:
+                job_record = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
+                if job_record:
+                    job_record.status = "FAILED"
+                    job_record.stage = "FAILED"
+                    job_record.error = err_msg
+                    job_record.stage_message = err_msg
+                    db.commit()
+
+            raise HTTPException(status_code=400, detail=err_msg)
+
         job = None
         if req.job_id:
             job = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
@@ -325,12 +364,14 @@ async def save_360_scan_embeddings(
 
         job.status = "PENDING"
         job.stage = "QUEUED"
-        job.stage_message = f"Enqueued {len(clean_frames)} frames for processing."
+        job.stage_message = f"Enqueued {len(clean_frames)} verified frames for processing."
         job.total = len(clean_frames)
         job.done = 0
+        job.error = None
         job.frame_paths_json = json.dumps({"frames": clean_frames, "completed_vectors": [], "primary_frame_url": None})
         db.commit()
 
+        logger.info(f"[scan-complete] Enqueuing background worker for job_id={job.id} with {len(clean_frames)} verified frames.")
         from app.services.scan_worker import enqueue_scan_job
         enqueue_scan_job(job.id)
 
@@ -339,7 +380,7 @@ async def save_360_scan_embeddings(
             "job_id": job.id,
             "product_id": product.id,
             "total_frames": len(clean_frames),
-            "message": "360-scan frames received. Background processing started."
+            "message": "360-scan frames received and verified. Background processing started."
         }
 
     # Path B: Fallback base64 captures
@@ -398,11 +439,13 @@ async def save_360_scan_embeddings(
         scan_job.stage_message = f"Uploaded {len(saved_frames)} frames. Enqueuing background processing..."
         scan_job.done = 0
         scan_job.total = len(saved_frames)
+        scan_job.error = None
         scan_job.frame_paths_json = json.dumps({"frames": saved_frames, "completed_vectors": [], "primary_frame_url": None})
 
     db.commit()
     db.refresh(scan_job)
 
+    logger.info(f"[scan-complete] Base64 fallback enqueued for job_id={scan_job.id} with {len(saved_frames)} frames.")
     # Enqueue background processing
     from app.services.scan_worker import enqueue_scan_job
     enqueue_scan_job(scan_job.id)
@@ -521,7 +564,8 @@ def retry_scan_job(
 ):
     """
     Retries a failed or cancelled scan job using previously saved frames without re-uploading.
-    Resumes from the last completed frame.
+    Re-verifies frames exist in storage, only reuses valid existing frames, and resumes from
+    the last completed frame. If no frames exist, rejects retry with clear ERR_NO_FRAMES error.
     """
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     if not job:
@@ -530,20 +574,58 @@ def retry_scan_job(
     if job.status == "PROCESSING":
         raise HTTPException(status_code=400, detail="Scan job is currently being processed.")
 
-    from app.services.scan_worker import _cancelled_job_ids, enqueue_scan_job
+    from app.services.scan_worker import _parse_job_frame_state, _serialize_job_frame_state, _cancelled_job_ids, enqueue_scan_job
+    frames, completed_vectors, primary_url = _parse_job_frame_state(job.frame_paths_json)
+
+    if not frames:
+        job.status = "FAILED"
+        job.stage = "FAILED"
+        job.error = "This scan has no saved frames. Please scan again. (ERR_NO_FRAMES)"
+        job.stage_message = job.error
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="This scan has no saved frames. Please scan again. (ERR_NO_FRAMES)"
+        )
+
+    # Check which frames actually exist in storage
+    frame_refs = [f["frame_ref"] for f in frames if f.get("frame_ref")]
+    existing_refs, missing_refs = storage_service.check_frames_exist(frame_refs)
+
+    if not existing_refs:
+        job.status = "FAILED"
+        job.stage = "FAILED"
+        job.error = "This scan has no saved frames in storage. Please scan again. (ERR_NO_FRAMES)"
+        job.stage_message = job.error
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="This scan has no saved frames in storage. Please scan again. (ERR_NO_FRAMES)"
+        )
+
+    # Filter to only surviving frames and vectors
+    existing_set = set(existing_refs)
+    surviving_frames = [f for f in frames if f.get("frame_ref") in existing_set]
+    surviving_vectors = [v for v in completed_vectors if v.get("frame_ref") in existing_set]
+
     _cancelled_job_ids.discard(job.id)
 
     job.status = "PENDING"
     job.stage = "QUEUED"
-    job.stage_message = "Retry enqueued. Resuming from last completed frame..."
+    job.stage_message = f"Retry enqueued with {len(surviving_frames)} available frames. Resuming from last completed frame..."
+    job.total = len(surviving_frames)
+    job.done = len(surviving_vectors)
+    job.frame_paths_json = _serialize_job_frame_state(surviving_frames, surviving_vectors, primary_url)
     job.error = None
     db.commit()
 
+    logger.info(f"[scan_retry] Enqueueing retry for job_id={job.id} with {len(surviving_frames)} frames.")
     enqueue_scan_job(job.id)
 
     return {
         "status": "PENDING",
         "job_id": job.id,
+        "total_frames": len(surviving_frames),
         "message": "Job re-queued successfully."
     }
 
