@@ -98,11 +98,12 @@ class VectorStoreMatcher:
         return record
 
     @classmethod
-    def delete_embeddings_for_product(cls, db: Session, product_id: str) -> int:
+    def delete_embeddings_for_product(cls, db: Session, product_id: str, commit: bool = True) -> int:
         """Remove old embeddings for re-scanning or updating a product."""
         count = db.query(ProductEmbedding).filter(ProductEmbedding.product_id == product_id).delete()
-        db.commit()
-        cls.sync_to_disk(db)
+        if commit:
+            db.commit()
+            cls.sync_to_disk(db)
         return count
 
     @classmethod

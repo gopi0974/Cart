@@ -357,8 +357,8 @@ def test_init_360_scan_upload(client, test_db):
         "/api/v1/vision/products/product-uuid-1/360-scan/init-upload",
         json={
             "files": [
-                {"angle_tag": "FRONT", "filename": "FRONT_0.jpg", "poor_crop": False},
-                {"angle_tag": "BACK", "filename": "BACK_0.jpg", "poor_crop": False},
+                {"angle_tag": "FRONT", "filename": "8901030009999_FRONT_0.jpg", "poor_crop": False},
+                {"angle_tag": "BACK", "filename": "8901030009999_BACK_0.jpg", "poor_crop": False},
             ]
         },
         headers=headers
@@ -374,15 +374,28 @@ def test_direct_upload_complete_360_scan(client, test_db):
     admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
     headers = {"Authorization": f"Bearer {admin_token}"}
 
-    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=(["supabase://bucket/f1.jpg", "supabase://bucket/f2.jpg"], [])):
+    job = ScanJob(
+        id="direct-job-123",
+        product_id="product-uuid-1",
+        status="PENDING",
+        stage="AWAITING_UPLOAD",
+        frame_paths_json=None
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    f1 = "supabase://bucket/direct-job-123/8901030009999_FRONT_0.jpg"
+    f2 = "supabase://bucket/direct-job-123/8901030009999_BACK_1.jpg"
+
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=([f1, f2], [])):
         with patch("app.services.scan_worker.enqueue_scan_job") as mock_enqueue:
             resp = client.post(
                 "/api/v1/vision/products/product-uuid-1/360-scan/complete",
                 json={
                     "job_id": "direct-job-123",
                     "frames": [
-                        {"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "poor_crop": False},
-                        {"angle_tag": "BACK", "frame_ref": "supabase://bucket/f2.jpg", "poor_crop": False},
+                        {"angle_tag": "FRONT", "frame_ref": f1, "poor_crop": False},
+                        {"angle_tag": "BACK", "frame_ref": f2, "poor_crop": False},
                     ]
                 },
                 headers=headers
@@ -399,15 +412,28 @@ def test_direct_upload_complete_360_scan_rejects_missing_frames(client, test_db)
     admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
     headers = {"Authorization": f"Bearer {admin_token}"}
 
-    # Simulate missing frame f2.jpg in storage
-    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=(["supabase://bucket/f1.jpg"], ["supabase://bucket/f2.jpg"])):
+    job = ScanJob(
+        id="missing-job-123",
+        product_id="product-uuid-1",
+        status="PENDING",
+        stage="AWAITING_UPLOAD",
+        frame_paths_json=None
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    f1 = "supabase://bucket/missing-job-123/8901030009999_FRONT_0.jpg"
+    f2 = "supabase://bucket/missing-job-123/8901030009999_BACK_1.jpg"
+
+    # Simulate missing frame f2 in storage
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=([f1], [f2])):
         resp = client.post(
             "/api/v1/vision/products/product-uuid-1/360-scan/complete",
             json={
                 "job_id": "missing-job-123",
                 "frames": [
-                    {"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "poor_crop": False},
-                    {"angle_tag": "BACK", "frame_ref": "supabase://bucket/f2.jpg", "poor_crop": False},
+                    {"angle_tag": "FRONT", "frame_ref": f1, "poor_crop": False},
+                    {"angle_tag": "BACK", "frame_ref": f2, "poor_crop": False},
                 ]
             },
             headers=headers
@@ -415,7 +441,7 @@ def test_direct_upload_complete_360_scan_rejects_missing_frames(client, test_db)
         assert resp.status_code == 400
         detail = resp.json()["detail"]
         assert "ERR_MISSING_FRAMES" in detail
-        assert "f2.jpg" in detail
+        assert "8901030009999_BACK_1.jpg" in detail
 
 
 def test_retry_scan_job_rejects_empty_frames(client, test_db):
@@ -541,6 +567,247 @@ def test_public_health_does_not_call_alembic(client):
         assert resp.status_code == 200
         # Verify Alembic migration context was NOT opened during public /health request
         mock_mig.assert_not_called()
+
+
+def test_frame_save_exception_triggers_sanitize_secrets(client, test_db):
+    """Verifies that an exception during base64 frame saving triggers sanitize_secrets without NameError."""
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    captures = [
+        {"angle_tag": "FRONT", "image_data_url": _create_sample_base64_image((255, 0, 0)), "poor_crop": False},
+        {"angle_tag": "BACK", "image_data_url": _create_sample_base64_image((0, 255, 0)), "poor_crop": False},
+    ]
+
+    call_count = 0
+    def side_effect_save(job_id, filename, image_bytes):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("Database user:secret_pass_1234@cluster error")
+        return f"supabase://bucket/{job_id}/{filename}"
+
+    with patch("app.services.storage_service.storage_service.save_frame", side_effect=side_effect_save):
+        with patch("app.services.scan_worker.enqueue_scan_job"):
+            resp = client.post(
+                "/api/v1/vision/products/product-uuid-1/360-scan/complete",
+                json={"captures": captures},
+                headers=headers
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "PENDING"
+            assert data["total_frames"] == 1
+
+
+def test_frame_ref_validation_rejects_unmatched_job_or_product(client, test_db):
+    """Direct upload must reject frame_refs pointing to other jobs, other products, or path traversal."""
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    job = ScanJob(
+        id="valid-job-999",
+        product_id="product-uuid-1",
+        status="PENDING",
+        stage="AWAITING_UPLOAD"
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    # 1. Foreign job ID in frame_ref
+    resp = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/complete",
+        json={
+            "job_id": "valid-job-999",
+            "frames": [{"angle_tag": "FRONT", "frame_ref": "supabase://bucket/different-job-000/8901030009999_f.jpg"}]
+        },
+        headers=headers
+    )
+    assert resp.status_code == 400
+    assert "does not belong to job" in resp.json()["detail"]
+
+    # 2. Foreign product prefix in frame_ref
+    resp2 = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/complete",
+        json={
+            "job_id": "valid-job-999",
+            "frames": [{"angle_tag": "FRONT", "frame_ref": "supabase://bucket/valid-job-999/FOREIGNBARCODE_f.jpg"}]
+        },
+        headers=headers
+    )
+    assert resp2.status_code == 400
+    assert "product barcode" in resp2.json()["detail"]
+
+
+def test_init_upload_rejects_path_traversal_and_unmatched_filenames(client, test_db):
+    """init-upload must reject traversal patterns and files not prefixed with product barcode."""
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Path traversal
+    resp1 = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/init-upload",
+        json={"files": [{"angle_tag": "FRONT", "filename": "../../../etc/passwd"}]},
+        headers=headers
+    )
+    assert resp1.status_code == 400
+    assert "path traversal" in resp1.json()["detail"]
+
+    # Wrong prefix
+    resp2 = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/init-upload",
+        json={"files": [{"angle_tag": "FRONT", "filename": "random_file.jpg"}]},
+        headers=headers
+    )
+    assert resp2.status_code == 400
+    assert "must start with product barcode" in resp2.json()["detail"]
+
+
+def test_retry_scan_job_partial_frames_requires_confirmation(client, test_db):
+    """Retry with partial surviving frames warns admin with missing angles and requires confirmation."""
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    f1 = "supabase://bucket/partial-job-1/8901030009999_FRONT.jpg"
+    f2 = "supabase://bucket/partial-job-1/8901030009999_BACK.jpg"
+    f3 = "supabase://bucket/partial-job-1/8901030009999_LEFT.jpg"
+
+    job = ScanJob(
+        id="partial-job-1",
+        product_id="product-uuid-1",
+        status="FAILED",
+        stage="FAILED",
+        frame_paths_json=json.dumps({
+            "frames": [
+                {"angle_tag": "FRONT", "frame_ref": f1},
+                {"angle_tag": "BACK", "frame_ref": f2},
+                {"angle_tag": "LEFT", "frame_ref": f3},
+            ],
+            "completed_vectors": [],
+            "primary_frame_url": None
+        })
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    # Only f1 and f2 exist; f3 (LEFT) is missing
+    with patch("app.services.storage_service.storage_service.check_frames_exist", return_value=([f1, f2], [f3])):
+        # First retry call: without confirm_partial -> returns confirmation warning
+        resp = client.post("/api/v1/vision/jobs/partial-job-1/retry", json={"confirm_partial": False}, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["requires_confirmation"] is True
+        assert data["surviving_count"] == 2
+        assert data["total_count"] == 3
+        assert "LEFT" in data["missing_angles"]
+
+        # Second retry call: with confirm_partial -> enqueues successfully
+        with patch("app.services.scan_worker.enqueue_scan_job") as mock_enq:
+            resp2 = client.post("/api/v1/vision/jobs/partial-job-1/retry", json={"confirm_partial": True}, headers=headers)
+            assert resp2.status_code == 200
+            data2 = resp2.json()
+            assert data2["status"] == "PENDING"
+            assert data2["total_frames"] == 2
+            mock_enq.assert_called_once_with("partial-job-1")
+
+
+def test_server_upload_enforces_size_limits_and_rbac(client, test_db):
+    """Streaming server upload enforces RBAC and frame size limit of 5MB."""
+    staff_user = User(
+        id="staff-uuid-99",
+        email="staff@smartcart.internal",
+        full_name="Staff Worker",
+        role="STAFF",
+        password_hash=hash_password("StaffPass!"),
+        is_active=True
+    )
+    test_db.add(staff_user)
+    test_db.commit()
+
+    staff_token = create_access_token({"sub": "staff@smartcart.internal", "role": "STAFF"})
+    admin_token = create_access_token({"sub": "admin@smartcart.internal", "role": "ADMIN"})
+
+    job = ScanJob(id="upload-job-1", product_id="product-uuid-1", status="PENDING", stage="AWAITING_UPLOAD")
+    test_db.add(job)
+    test_db.commit()
+
+    # 1. Staff role must be rejected with 403
+    resp_staff = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/upload-frame",
+        data={"job_id": "upload-job-1", "angle_tag": "FRONT"},
+        files={"file": ("frame.jpg", b"fake-jpg-content", "image/jpeg")},
+        headers={"Authorization": f"Bearer {staff_token}"}
+    )
+    assert resp_staff.status_code == 403
+
+    # 2. File > 5MB must be rejected with 400
+    huge_bytes = b"0" * (5 * 1024 * 1024 + 10)
+    resp_large = client.post(
+        "/api/v1/vision/products/product-uuid-1/360-scan/upload-frame",
+        data={"job_id": "upload-job-1", "angle_tag": "FRONT"},
+        files={"file": ("frame.jpg", huge_bytes, "image/jpeg")},
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert resp_large.status_code == 400
+    assert "exceeds maximum allowed size" in resp_large.json()["detail"]
+
+    # 3. Valid file with Admin succeeds
+    with patch("app.services.storage_service.storage_service.save_frame", return_value="supabase://bucket/upload-job-1/f.jpg"):
+        resp_ok = client.post(
+            "/api/v1/vision/products/product-uuid-1/360-scan/upload-frame",
+            data={"job_id": "upload-job-1", "angle_tag": "FRONT"},
+            files={"file": ("frame.jpg", b"valid-frame-bytes", "image/jpeg")},
+            headers={"Authorization": f"Bearer {admin_token}"}
+        )
+        assert resp_ok.status_code == 200
+        assert resp_ok.json()["frame_ref"] == "supabase://bucket/upload-job-1/f.jpg"
+
+
+def test_atomic_vector_enrollment_rolls_back_on_failure(test_db):
+    """Failure during vector insertion must roll back deletion, leaving old vectors intact."""
+    from app.services.scan_worker import _execute_scan_job_sync
+    from app.models.product import ProductEmbedding
+    from app.ai.vector_store import VectorStoreMatcher
+
+    # 1. Product initially has 3 enrolled vectors
+    for i in range(3):
+        VectorStoreMatcher.store_embedding(
+            db=test_db,
+            product_id="product-uuid-1",
+            barcode="8901030009999",
+            angle_tag=f"OLD_{i}",
+            vector=[0.1] * 512,
+            commit=True
+        )
+
+    initial_count = test_db.query(ProductEmbedding).filter(ProductEmbedding.product_id == "product-uuid-1").count()
+    assert initial_count == 3
+
+    # Create a job that reaches stage E but fails during database save
+    frames = [{"angle_tag": "FRONT", "frame_ref": "supabase://bucket/f1.jpg", "completed": True}]
+    job = ScanJob(
+        id="failing-atomic-job",
+        product_id="product-uuid-1",
+        status="PENDING",
+        stage="QUEUED",
+        frame_paths_json=json.dumps({"frames": frames, "completed_vectors": [{"angle_tag": "FRONT", "v_tag": "CLEAN", "vec": [0.2] * 512, "frame_ref": "supabase://bucket/f1.jpg"}], "primary_frame_url": None})
+    )
+    test_db.add(job)
+    test_db.commit()
+
+    with patch("app.services.scan_worker.SessionLocal", lambda: test_db):
+        # Patch store_embedding to raise an error during insertion
+        original_store = VectorStoreMatcher.store_embedding
+        def failing_store(*args, **kwargs):
+            raise RuntimeError("Simulated DB connection drop during vector insert")
+
+        with patch.object(VectorStoreMatcher, "store_embedding", side_effect=failing_store):
+            _execute_scan_job_sync("failing-atomic-job")
+
+    # Verify that the transaction rolled back and the 3 original vectors are still intact!
+    test_db.expire_all()
+    surviving_count = test_db.query(ProductEmbedding).filter(ProductEmbedding.product_id == "product-uuid-1").count()
+    assert surviving_count == 3, f"Expected 3 vectors to be preserved by atomic rollback, but found {surviving_count}!"
 
 
 

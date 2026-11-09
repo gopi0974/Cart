@@ -1,8 +1,6 @@
-import os
 import io
 import json
 import base64
-import uuid
 import time
 import asyncio
 import logging
@@ -10,16 +8,14 @@ import threading
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import cv2
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database import SessionLocal
-from app.models.product import Product, ProductImage, ProductEmbedding
+from app.models.product import Product, ProductImage
 from app.models.scan_job import ScanJob
 from app.ai.feature_extractor import (
     get_embeddings_batch,
-    get_embedding,
     MODEL_NAME,
     MODEL_VERSION,
     VECTOR_DIM
@@ -205,8 +201,6 @@ def _execute_scan_job_sync(job_id: str):
     - Resumes from last completed frame on retry
     - Caps scan at max 40 frames and 60 vectors
     """
-    global _worker_timing_metrics
-
     # Enforce single worker concurrency
     with _scan_worker_lock:
         db: Session = SessionLocal()
@@ -407,65 +401,73 @@ def _execute_scan_job_sync(job_id: str):
                     "No embeddings were generated from the frames. Aborting to protect existing vectors. (ERR_ZERO_VECTORS)"
                 )
 
-            # Clean existing embeddings for product atomically before inserting new ones
-            VectorStoreMatcher.delete_embeddings_for_product(db, product.id)
-            db.query(ProductImage).filter(
-                ProductImage.product_id == product.id,
-                ProductImage.is_360_scan == True
-            ).delete(synchronize_session=False)
+            # Atomic transaction: delete old vectors, insert new vectors, update product quality & images,
+            # and mark job enrolled strictly inside ONE database transaction.
+            try:
+                # 1. Clean existing embeddings for product atomically (commit=False)
+                VectorStoreMatcher.delete_embeddings_for_product(db, product.id, commit=False)
+                db.query(ProductImage).filter(
+                    ProductImage.product_id == product.id,
+                    ProductImage.is_360_scan == True
+                ).delete(synchronize_session=False)
 
-            if primary_frame_url:
-                product.primary_image_url = primary_frame_url
-            product.is_active = True
+                if primary_frame_url:
+                    product.primary_image_url = primary_frame_url
+                product.is_active = True
 
-            # Insert new ProductEmbedding records
-            for entry in completed_vectors:
-                full_tag = f"{entry['angle_tag']}_{entry['v_tag']}"
-                VectorStoreMatcher.store_embedding(
-                    db=db,
-                    product_id=product.id,
-                    barcode=product.barcode,
-                    angle_tag=full_tag,
-                    vector=entry["vec"],
-                    image_path=entry.get("frame_ref"),
-                    model_name=MODEL_NAME,
-                    model_version=MODEL_VERSION,
-                    vector_dim=VECTOR_DIM,
-                    commit=False
-                )
+                # 2. Insert new ProductEmbedding records (commit=False)
+                for entry in completed_vectors:
+                    full_tag = f"{entry['angle_tag']}_{entry['v_tag']}"
+                    VectorStoreMatcher.store_embedding(
+                        db=db,
+                        product_id=product.id,
+                        barcode=product.barcode,
+                        angle_tag=full_tag,
+                        vector=entry["vec"],
+                        image_path=entry.get("frame_ref"),
+                        model_name=MODEL_NAME,
+                        model_version=MODEL_VERSION,
+                        vector_dim=VECTOR_DIM,
+                        commit=False
+                    )
 
-            # Calculate quality_score
-            unique_angles = set(f.get("angle_tag", "") for f in frames)
-            angle_score = min(1.0, len(unique_angles) / 9.0)
-            frame_score = min(1.0, len(frames) / 36.0)
+                # 3. Calculate quality_score
+                unique_angles = set(f.get("angle_tag", "") for f in frames)
+                angle_score = min(1.0, len(unique_angles) / 9.0)
+                frame_score = min(1.0, len(frames) / 36.0)
 
-            intra_sim = 0.85
-            if completed_vectors:
-                sample_vecs = [item["vec"] for item in completed_vectors[:20]]
-                if len(sample_vecs) >= 2:
-                    sims = []
-                    for s1 in range(min(10, len(sample_vecs))):
-                        for s2 in range(s1 + 1, min(10, len(sample_vecs))):
-                            sim = float(np.dot(sample_vecs[s1], sample_vecs[s2]))
-                            sims.append(sim)
-                    if sims:
-                        intra_sim = max(0.0, min(1.0, float(np.mean(sims))))
+                intra_sim = 0.85
+                if completed_vectors:
+                    sample_vecs = [item["vec"] for item in completed_vectors[:20]]
+                    if len(sample_vecs) >= 2:
+                        sims = []
+                        for s1 in range(min(10, len(sample_vecs))):
+                            for s2 in range(s1 + 1, min(10, len(sample_vecs))):
+                                sim = float(np.dot(sample_vecs[s1], sample_vecs[s2]))
+                                sims.append(sim)
+                        if sims:
+                            intra_sim = max(0.0, min(1.0, float(np.mean(sims))))
 
-            sharpness_score = 0.90
-            composite_quality = round(0.30 * frame_score + 0.30 * angle_score + 0.20 * sharpness_score + 0.20 * intra_sim, 2)
-            product.quality_score = composite_quality
+                sharpness_score = 0.90
+                composite_quality = round(0.30 * frame_score + 0.30 * angle_score + 0.20 * sharpness_score + 0.20 * intra_sim, 2)
+                product.quality_score = composite_quality
 
-            # Mark job ENROLLED
-            job.status = "ENROLLED"
-            job.stage = "COMPLETED"
-            job.stage_message = f"Successfully enrolled {len(completed_vectors)} vectors across {len(frames)} frames."
-            job.done = len(completed_vectors)
-            job.error = None
+                # 4. Mark job ENROLLED
+                job.status = "ENROLLED"
+                job.stage = "COMPLETED"
+                job.stage_message = f"Successfully enrolled {len(completed_vectors)} vectors across {len(frames)} frames."
+                job.done = len(completed_vectors)
+                job.error = None
 
-            db.commit()
-            db.refresh(product)
-            VectorStoreMatcher.sync_to_disk(db)
-            catalog_cache.invalidate()
+                # 5. Commit all changes atomically in one transaction
+                db.commit()
+                db.refresh(product)
+                VectorStoreMatcher.sync_to_disk(db)
+                catalog_cache.invalidate()
+            except Exception as atomic_err:
+                db.rollback()
+                logger.error(f"Atomic vector enrollment transaction failed: {sanitize_secrets(atomic_err)}. All changes rolled back.")
+                raise
 
             t_db_ms = (time.time() - t_db_start) * 1000.0
             total_duration_ms = (time.time() - job_start_time) * 1000.0

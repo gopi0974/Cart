@@ -1,4 +1,3 @@
-import time
 import contextvars
 import logging
 from sqlalchemy import event

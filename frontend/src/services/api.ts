@@ -588,11 +588,21 @@ export const api = {
     });
   },
 
-  async retryScanJob(jobId: string) {
-    return request<{ status: string; job_id: string; message: string }>(
+  async retryScanJob(jobId: string, payload?: { confirm_partial?: boolean }) {
+    return request<{
+      status: string;
+      job_id?: string;
+      message: string;
+      requires_confirmation?: boolean;
+      surviving_count?: number;
+      total_count?: number;
+      missing_angles?: string[];
+    }>(
       `/vision/jobs/${jobId}/retry`,
       {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
       }
     );
   },

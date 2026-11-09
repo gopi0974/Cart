@@ -2,7 +2,6 @@ import os
 import io
 import logging
 from typing import Optional
-from pathlib import Path
 import httpx
 from PIL import Image
 

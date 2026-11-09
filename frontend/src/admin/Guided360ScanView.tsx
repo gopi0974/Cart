@@ -99,6 +99,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [cachedCompressedFrames, setCachedCompressedFrames] = useState<any[]>([]);
   const [cachedUploadItems, setCachedUploadItems] = useState<any[]>([]);
   const [cachedUploadedRefs, setCachedUploadedRefs] = useState<any[]>([]);
+  const [partialConfirmation, setPartialConfirmation] = useState<{ surviving: number; total: number; missingAngles: string[] } | null>(null);
 
   // Selected angle for expanded review gallery
   const [selectedGalleryAngle, setSelectedGalleryAngle] = useState<string | null>(null);
@@ -1255,10 +1256,18 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     }
     try {
       setJobError(null);
+      const resp = await api.retryScanJob(activeJobId);
+      if (resp.requires_confirmation) {
+        setPartialConfirmation({
+          surviving: resp.surviving_count || 0,
+          total: resp.total_count || 0,
+          missingAngles: resp.missing_angles || [],
+        });
+        return;
+      }
       setJobStatus('PENDING');
       setJobStage('QUEUED');
       setJobStageMessage('Resuming enrollment from last completed frame...');
-      await api.retryScanJob(activeJobId);
     } catch (e: any) {
       setJobError(e.message || 'Failed to retry job.');
     }
@@ -2179,6 +2188,55 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                       >
                         Close
                       </button>
+                    </div>
+                  </div>
+                ) : partialConfirmation ? (
+                  <div className="space-y-3">
+                    <div className="p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-xl space-y-2.5 text-left">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+                            Partial Frames Warning
+                          </p>
+                          <p className="text-[11px] text-amber-800 dark:text-amber-300 mt-0.5">
+                            Only {partialConfirmation.surviving} of {partialConfirmation.total} frames found in storage. Some angles will be missing:
+                          </p>
+                          <div className="flex flex-wrap gap-1 mt-1.5">
+                            {partialConfirmation.missingAngles.map(ang => (
+                              <span key={ang} className="px-1.5 py-0.5 bg-amber-200/70 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 rounded text-[10px] font-mono border border-amber-300 dark:border-amber-700">
+                                {ang}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button
+                          onClick={async () => {
+                            if (!activeJobId) return;
+                            try {
+                              setPartialConfirmation(null);
+                              setJobError(null);
+                              setJobStatus('PENDING');
+                              setJobStage('QUEUED');
+                              setJobStageMessage('Enrolling with surviving frames...');
+                              await api.retryScanJob(activeJobId, { confirm_partial: true });
+                            } catch (e: any) {
+                              setJobError(e.message || 'Failed to retry job.');
+                            }
+                          }}
+                          className="flex-1 py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold shadow-sm"
+                        >
+                          Confirm &amp; Enroll Partial
+                        </button>
+                        <button
+                          onClick={() => setPartialConfirmation(null)}
+                          className="py-2 px-3 bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold"
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : failedUploads.length > 0 ? (

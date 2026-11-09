@@ -163,7 +163,6 @@ def _compute_schema_info_uncached(connection=None, custom_url=None) -> Dict[str,
     Never exposes raw database credentials.
     """
     from app.database import engine
-    global _last_migration_error
 
     try:
         alembic_cfg = get_alembic_config(connection=connection, custom_url=custom_url)
@@ -221,7 +220,6 @@ def get_schema_info(connection=None, custom_url=None, force_refresh: bool = Fals
     Returns current schema status. Uses in-memory cached results up to 5 minutes
     to avoid opening Alembic migration contexts on every health poll.
     """
-    global _cached_schema_info, _cached_schema_time
     now = time.time()
 
     # If connection or custom_url provided, compute directly

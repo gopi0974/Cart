@@ -1,4 +1,3 @@
-import os
 import io
 import uuid
 import json
@@ -6,7 +5,7 @@ import base64
 import logging
 from typing import Optional, List, Tuple, Dict, Any
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
 from sqlalchemy.orm import Session
 from PIL import Image, ImageEnhance, ImageFilter
 import numpy as np
@@ -20,15 +19,16 @@ from app.database import get_db
 from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
-from app.models.product import Product, ProductImage
+from app.models.product import Product
 from app.models.scan_job import ScanJob
 from app.models.user import User
 from app.services.session_service import SessionService
 from app.services.alert_service import AlertService
 from app.services.storage_service import storage_service
-from app.ai.feature_extractor import get_embedding, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
+from app.ai.feature_extractor import get_embedding
 from app.ai.vector_store import VectorStoreMatcher
 from app.api.v1.auth import get_current_user, require_admin_or_manager
+from app.utils.sanitization import sanitize_secrets
 
 logger = logging.getLogger("smartcart.vision")
 
@@ -60,6 +60,9 @@ class InitUploadFileItem(BaseModel):
 
 class InitUploadRequest(BaseModel):
     files: List[InitUploadFileItem]
+
+class RetryJobRequest(BaseModel):
+    confirm_partial: bool = False
 
 class PreviewTestRequest(BaseModel):
     image_data_url: str
@@ -237,6 +240,20 @@ def init_360_scan_upload(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    if len(req.files) > 40:
+        raise HTTPException(status_code=400, detail="Exceeded maximum limit of 40 frames per scan.")
+
+    # Validate filenames strictly belong to this product prefix and contain no directory traversal
+    allowed_prefixes = (product.barcode, product.id)
+    for f in req.files:
+        if ".." in f.filename or "/" in f.filename or "\\" in f.filename:
+            raise HTTPException(status_code=400, detail=f"Invalid filename '{f.filename}': path traversal not permitted.")
+        if not any(f.filename.startswith(p) for p in allowed_prefixes):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid filename '{f.filename}': filename must start with product barcode ({product.barcode}) or ID prefix."
+            )
+
     job_id = str(uuid.uuid4())
     upload_items = []
     direct_available = storage_service.is_supabase_configured
@@ -309,14 +326,50 @@ async def save_360_scan_embeddings(
                 detail="No frames provided in direct upload payload. (ERR_NO_FRAMES)"
             )
 
-        frame_refs = [item.get("frame_ref", "") for item in req.frames if item.get("frame_ref")]
+        if len(req.frames) > 40:
+            raise HTTPException(
+                status_code=400,
+                detail="Exceeded maximum limit of 40 frames per scan."
+            )
+
+        if not req.job_id:
+            raise HTTPException(status_code=400, detail="job_id is required for direct upload.")
+
+        job = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail=f"ScanJob '{req.job_id}' not found.")
+        if job.product_id != product.id:
+            raise HTTPException(status_code=400, detail=f"ScanJob '{req.job_id}' does not belong to product '{product.id}'.")
+
+        # Validate that each frame_ref belongs to this job and product prefix
+        allowed_prefixes = (product.barcode, product.id)
+        frame_refs = []
+        for item in req.frames:
+            ref = item.get("frame_ref", "")
+            if not ref:
+                continue
+            if f"/{req.job_id}/" not in ref:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid frame reference '{ref}': frame does not belong to job '{req.job_id}'."
+                )
+            if ".." in ref:
+                raise HTTPException(status_code=400, detail="Invalid frame reference: path traversal detected.")
+            ref_filename = ref.split("/")[-1]
+            if not any(ref_filename.startswith(p) for p in allowed_prefixes):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid frame reference '{ref}': filename must start with product barcode ({product.barcode}) or ID prefix."
+                )
+            frame_refs.append(ref)
+
         if not frame_refs:
             raise HTTPException(
                 status_code=400,
                 detail="No valid frame references provided in payload. (ERR_NO_FRAMES)"
             )
 
-        logger.info(f"[upload-check] Verifying storage presence for {len(frame_refs)} frames (job_id={req.job_id or 'unknown'})...")
+        logger.info(f"[upload-check] Verifying storage presence for {len(frame_refs)} frames (job_id={req.job_id})...")
         existing_refs, missing_refs = storage_service.check_frames_exist(frame_refs)
         logger.info(f"[upload-check] Storage verify result: {len(existing_refs)} verified, {len(missing_refs)} missing.")
 
@@ -326,32 +379,13 @@ async def save_360_scan_embeddings(
             err_msg = f"Missing {len(missing_refs)} frames in storage: {summary} (ERR_MISSING_FRAMES)"
             logger.error(f"[upload-check] {err_msg}")
 
-            if req.job_id:
-                job_record = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
-                if job_record:
-                    job_record.status = "FAILED"
-                    job_record.stage = "FAILED"
-                    job_record.error = err_msg
-                    job_record.stage_message = err_msg
-                    db.commit()
+            job.status = "FAILED"
+            job.stage = "FAILED"
+            job.error = err_msg
+            job.stage_message = err_msg
+            db.commit()
 
             raise HTTPException(status_code=400, detail=err_msg)
-
-        job = None
-        if req.job_id:
-            job = db.query(ScanJob).filter(ScanJob.id == req.job_id).first()
-
-        if not job:
-            job = ScanJob(
-                id=req.job_id or str(uuid.uuid4()),
-                product_id=product.id,
-                status="PENDING",
-                stage="QUEUED",
-                stage_message=f"Direct upload verified ({len(req.frames)} frames).",
-                done=0,
-                total=len(req.frames),
-            )
-            db.add(job)
 
         clean_frames = []
         for item in req.frames:
@@ -385,16 +419,23 @@ async def save_360_scan_embeddings(
 
     # Path B: Fallback base64 captures
     if not req.captures:
-        raise HTTPException(status_code=400, detail="No camera frames provided in 360 scan payload.")
+        raise HTTPException(status_code=400, detail="No camera frames provided in 360 scan payload. (ERR_NO_FRAMES)")
+
+    # Size limits: max 40 frames and max 5MB per frame
+    if len(req.captures) > 40:
+        raise HTTPException(status_code=400, detail="Exceeded maximum limit of 40 frames per scan.")
+
+    MAX_BYTES_PER_FRAME = 5 * 1024 * 1024
+    MAX_B64_LEN = (MAX_BYTES_PER_FRAME * 4 // 3) + 200
 
     job_id = req.job_id or str(uuid.uuid4())
     saved_frames = []
 
-    # Cap base64 captures to max 40 frames
-    capped_captures = req.captures[:40]
-
-    for idx, cap in enumerate(capped_captures):
+    for idx, cap in enumerate(req.captures):
         raw_b64 = cap.image_data_url
+        if len(raw_b64) > MAX_B64_LEN:
+            raise HTTPException(status_code=400, detail=f"Frame {cap.angle_tag} exceeds maximum allowed size of 5MB.")
+
         if raw_b64.startswith("data:image"):
             parts = raw_b64.split(",", 1)
             if len(parts) == 2:
@@ -402,8 +443,15 @@ async def save_360_scan_embeddings(
 
         try:
             image_bytes = base64.b64decode(raw_b64)
+            if len(image_bytes) > MAX_BYTES_PER_FRAME:
+                raise HTTPException(status_code=400, detail=f"Frame {cap.angle_tag} exceeds maximum allowed size of 5MB.")
+
             filename = f"{product.barcode}_{cap.angle_tag}_{idx}_{uuid.uuid4().hex[:6]}.jpg"
             frame_ref = storage_service.save_frame(job_id, filename, image_bytes)
+
+            # Low memory footprint: release buffer immediately
+            del image_bytes
+            cap.image_data_url = ""
 
             saved_frames.append({
                 "angle_tag": cap.angle_tag,
@@ -411,6 +459,8 @@ async def save_360_scan_embeddings(
                 "poor_crop": bool(cap.poor_crop),
                 "completed": False,
             })
+        except HTTPException:
+            raise
         except Exception as e:
             logger.warning(f"Error saving frame {cap.angle_tag}: {sanitize_secrets(e)}")
 
@@ -446,7 +496,6 @@ async def save_360_scan_embeddings(
     db.refresh(scan_job)
 
     logger.info(f"[scan-complete] Base64 fallback enqueued for job_id={scan_job.id} with {len(saved_frames)} frames.")
-    # Enqueue background processing
     from app.services.scan_worker import enqueue_scan_job
     enqueue_scan_job(scan_job.id)
 
@@ -456,6 +505,50 @@ async def save_360_scan_embeddings(
         "product_id": product.id,
         "total_frames": len(saved_frames),
         "message": "360-scan frames saved successfully. Background processing started."
+    }
+
+
+@router.post("/products/{product_id}/360-scan/upload-frame")
+async def upload_single_frame_server(
+    product_id: str,
+    job_id: str = Form(...),
+    angle_tag: str = Form(...),
+    file: UploadFile = File(...),
+    poor_crop: bool = Form(False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Streaming single-frame upload endpoint through the backend server.
+    Low-memory footprint: streams one frame at a time without buffering all frames in RAM.
+    Limits: Max 5MB per frame. Requires Admin or Manager.
+    """
+    product = db.query(Product).filter(Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail=f"ScanJob '{job_id}' not found.")
+    if job.product_id != product.id:
+        raise HTTPException(status_code=400, detail="ScanJob does not belong to this product.")
+
+    MAX_BYTES_PER_FRAME = 5 * 1024 * 1024
+    content = await file.read(MAX_BYTES_PER_FRAME + 1024)
+    if len(content) > MAX_BYTES_PER_FRAME:
+        raise HTTPException(status_code=400, detail="Frame exceeds maximum allowed size of 5MB.")
+
+    clean_angle = angle_tag.strip().replace(" ", "_").upper()
+    filename = f"{product.barcode}_{clean_angle}_{uuid.uuid4().hex[:6]}.jpg"
+    frame_ref = storage_service.save_frame(job_id, filename, content)
+    del content
+
+    return {
+        "job_id": job_id,
+        "angle_tag": angle_tag,
+        "filename": filename,
+        "frame_ref": frame_ref,
+        "poor_crop": poor_crop
     }
 
 
@@ -559,6 +652,7 @@ def get_product_active_job(
 @router.post("/jobs/{job_id}/retry")
 def retry_scan_job(
     job_id: str,
+    req: Optional[RetryJobRequest] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
@@ -566,6 +660,7 @@ def retry_scan_job(
     Retries a failed or cancelled scan job using previously saved frames without re-uploading.
     Re-verifies frames exist in storage, only reuses valid existing frames, and resumes from
     the last completed frame. If no frames exist, rejects retry with clear ERR_NO_FRAMES error.
+    If some frames are missing, warns and requires explicit confirmation before partial enrollment.
     """
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     if not job:
@@ -607,6 +702,23 @@ def retry_scan_job(
     existing_set = set(existing_refs)
     surviving_frames = [f for f in frames if f.get("frame_ref") in existing_set]
     surviving_vectors = [v for v in completed_vectors if v.get("frame_ref") in existing_set]
+
+    # If only some frames survived, inform admin and require confirmation before proceeding
+    if len(surviving_frames) < len(frames):
+        missing_angles = [
+            f.get("angle_tag", f"frame_{idx}")
+            for idx, f in enumerate(frames)
+            if f.get("frame_ref") not in existing_set
+        ]
+        if not (req and req.confirm_partial):
+            return {
+                "status": "CONFIRMATION_REQUIRED",
+                "requires_confirmation": True,
+                "surviving_count": len(surviving_frames),
+                "total_count": len(frames),
+                "missing_angles": missing_angles,
+                "message": f"Only {len(surviving_frames)} of {len(frames)} frames found, some angles will be missing: {', '.join(missing_angles)}."
+            }
 
     _cancelled_job_ids.discard(job.id)
 
