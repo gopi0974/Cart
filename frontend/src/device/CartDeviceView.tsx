@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
 import { getApiBaseUrl } from '../services/api';
+import { privacyDetector, DetectorState } from '../services/privacyDetector';
+import { Link } from 'react-router-dom';
 
 interface LogEntry {
   id: string;
@@ -49,7 +51,17 @@ export const CartDeviceView: React.FC = () => {
   // Vision flags
   const [handPresent, setHandPresent] = useState<boolean>(false);
   const [facePresent, setFacePresent] = useState<boolean>(false);
+  const [handCount, setHandCount] = useState<number>(0);
   const [faceWithheldCount, setFaceWithheldCount] = useState<number>(0);
+  const [detectorState, setDetectorState] = useState<DetectorState>(privacyDetector.getState());
+  const [detectorMs, setDetectorMs] = useState<number>(0);
+
+  // Subscribe to privacy detector lifecycle state
+  useEffect(() => {
+    return privacyDetector.subscribeState((s) => {
+      setDetectorState(s);
+    });
+  }, []);
 
   const [telemetry, setTelemetry] = useState<{ fps: number; sizeKb: number; count: number; lastHeartbeat: string }>({
     fps: 0,
@@ -125,6 +137,11 @@ export const CartDeviceView: React.FC = () => {
       onVisionFlagsChange: (flags) => {
         setHandPresent(flags.handPresent);
         setFacePresent(flags.facePresent);
+        setHandCount(flags.handCount);
+        setDetectorMs(flags.processingMs);
+      },
+      onDetectorStateChange: (state) => {
+        setDetectorState(state);
       },
       onLog: (text, level) => {
         addLog(text, level);
@@ -217,6 +234,32 @@ export const CartDeviceView: React.FC = () => {
 
         {/* Live Status Indicator */}
         <div className="flex items-center gap-3">
+          {/* Privacy Detector Status Badge */}
+          {detectorState.status === 'loading' ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 font-mono text-xs font-semibold animate-pulse">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+              <span>Loading detector...</span>
+            </div>
+          ) : detectorState.status === 'ready' ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-mono text-xs font-semibold">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Detector: {detectorState.delegate} ({detectorMs}ms)</span>
+            </div>
+          ) : detectorState.status === 'error' ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 font-mono text-xs font-semibold">
+              <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+              <span>Detector Error</span>
+            </div>
+          ) : null}
+
+          <Link
+            to="/detector-test"
+            className="hidden sm:flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-700 hover:border-slate-600 bg-slate-900/60 hover:bg-slate-800 text-xs font-mono text-slate-300 transition-all"
+            title="Open Detector Visual Diagnostic"
+          >
+            <span>/detector-test</span>
+          </Link>
+
           <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl border font-mono text-xs font-semibold bg-slate-900/60">
             {connectionStatus === 'ONLINE' ? (
               <>
@@ -294,8 +337,16 @@ export const CartDeviceView: React.FC = () => {
                       : 'bg-black/60 text-slate-500 border-white/10'
                   }`}>
                     <Hand className="w-3.5 h-3.5" />
-                    <span>HAND: {handPresent ? 'PRESENT' : 'CLEAR'}</span>
+                    <span>HAND: {handPresent ? `PRESENT (${handCount})` : 'CLEAR'}</span>
                   </div>
+
+                  {/* Safe Failure Banner if detector not ready */}
+                  {isRunning && detectorState.status !== 'ready' && (
+                    <div className="px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold flex items-center gap-1.5 backdrop-blur-md bg-red-500/25 text-red-300 border border-red-500/40 animate-pulse">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                      <span>Privacy detector not ready, frames are not being sent</span>
+                    </div>
+                  )}
 
                   {facePresent && (
                     <div className="px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold flex items-center gap-1.5 backdrop-blur-md bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
@@ -313,6 +364,8 @@ export const CartDeviceView: React.FC = () => {
                     <span className="text-slate-400">Size:</span> <span className="font-bold">{telemetry.sizeKb} KB</span>
                     <span className="mx-2 text-slate-600">|</span>
                     <span className="text-slate-400">Frames:</span> <span className="font-bold text-emerald-400">{telemetry.count}</span>
+                    <span className="mx-2 text-slate-600">|</span>
+                    <span className="text-slate-400">Infer:</span> <span className="font-bold text-amber-400">{detectorMs}ms</span>
                   </div>
                   <div>
                     <span className="text-slate-400">Heartbeat:</span> <span className="text-slate-200">{telemetry.lastHeartbeat}</span>
@@ -325,11 +378,14 @@ export const CartDeviceView: React.FC = () => {
           {/* Privacy Note Banner */}
           <div className="p-4 bg-emerald-950/20 border border-emerald-500/30 rounded-2xl text-xs text-emerald-200 flex items-start gap-3">
             <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-            <div className="space-y-0.5">
+            <div className="space-y-1">
               <div className="font-bold text-emerald-300">Privacy Protection Active</div>
-              <p className="text-[11px] text-emerald-400/90 leading-relaxed">
-                In-device vision analysis runs entirely in your local browser. If any shopper or staff face enters the camera view, image frames are automatically withheld on this device and are never sent to the server.
-                {faceWithheldCount > 0 && <span className="font-bold ml-1 text-white">({faceWithheldCount} frames withheld so far)</span>}
+              <p className="text-[11px] text-emerald-400/90 leading-relaxed font-medium">
+                Face detection reduces but does not guarantee that faces are not captured. Point the camera at the cart interior only.
+              </p>
+              <p className="text-[10px] text-slate-400 leading-relaxed">
+                Powered by in-browser self-hosted MediaPipe Face & Hand Landmarker models ({detectorState.delegate || 'CPU'} delegate).
+                {faceWithheldCount > 0 && <span className="font-bold ml-1 text-amber-300">({faceWithheldCount} frames withheld so far)</span>}
               </p>
             </div>
           </div>

@@ -3,20 +3,40 @@
  * ----------------------------------------------------------------
  * Connects to /ws/device with first-message authentication (no tokens in URL).
  * Streams motion-gated 640x480 JPEG frames (quality 0.7) at 2-5 FPS, plus 10s keep-alives.
- * Runs in-browser face and hand detection: withholds images if a face is detected (privacy enforcement).
+ * Real in-browser face and hand detection powered by self-hosted MediaPipe tasks-vision.
+ * Privacy rule: If face_present or detector not ready, frame image data is withheld.
  * Transmits 5-second heartbeats and handles automatic reconnection with exponential backoff.
  */
 
 import { CameraHelper } from '../services/cameraHelper';
+import {
+  privacyDetector,
+  NormalizedBox,
+  DetectorState
+} from '../services/privacyDetector';
+
+export interface VisionFlagsPayload {
+  handPresent: boolean;
+  facePresent: boolean;
+  handCount: number;
+  faceBoxes: NormalizedBox[];
+  handBoxes: NormalizedBox[];
+  detectorReady: boolean;
+  privacyRedacted: boolean;
+  processingMs: number;
+  delegate: 'GPU' | 'CPU' | null;
+  error?: string;
+}
 
 export interface CartCameraConfig {
   token: string;
   videoElement: HTMLVideoElement;
   onStatusChange: (status: 'CONNECTING' | 'ONLINE' | 'OFFLINE' | 'RECONNECTING', message?: string) => void;
   onMotionChange: (isMotion: boolean, motionLevel?: number) => void;
-  onVisionFlagsChange?: (flags: { handPresent: boolean; facePresent: boolean; privacyRedacted: boolean }) => void;
+  onVisionFlagsChange?: (flags: VisionFlagsPayload) => void;
+  onDetectorStateChange?: (state: DetectorState) => void;
   onLog: (message: string, level?: 'info' | 'warn' | 'error' | 'success') => void;
-  onFrameSent: (info: { fps: number; sizeKb: number; timestamp: number; isReference?: boolean; faceWithheld?: boolean }) => void;
+  onFrameSent: (info: { fps: number; sizeKb: number; timestamp: number; isReference?: boolean; faceWithheld?: boolean; detectorReady?: boolean }) => void;
   onVerificationResult?: (result: any) => void;
 }
 
@@ -48,6 +68,7 @@ export class CartCameraManager {
   private motionLevel = 0.0;
   private handPresent = false;
   private facePresent = false;
+  private detectorReady = false;
 
   private motionCheckInterval: any = null;
   private frameSendInterval: any = null;
@@ -69,23 +90,12 @@ export class CartCameraManager {
   private readonly motionPixelRatio = 0.025; // 2.5% of pixels changed to trigger motion
   private readonly motionCooldownMs = 1200; // Cooldown after movement ceases
 
-  // Optional native FaceDetector
-  private nativeFaceDetector: any = null;
-
   constructor(config: CartCameraConfig) {
     this.config = config;
     this.canvas = document.createElement('canvas');
     this.canvas.width = this.targetWidth;
     this.canvas.height = this.targetHeight;
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
-
-    if (typeof window !== 'undefined' && 'FaceDetector' in window) {
-      try {
-        this.nativeFaceDetector = new (window as any).FaceDetector({ fastMode: true, maxDetectedFaces: 2 });
-      } catch {
-        this.nativeFaceDetector = null;
-      }
-    }
   }
 
   public async start(): Promise<void> {
@@ -112,10 +122,28 @@ export class CartCameraManager {
 
       this.config.onLog('Camera live preview active.', 'success');
 
+      // Initialize self-hosted MediaPipe privacy detector
+      try {
+        this.config.onLog('Loading self-hosted MediaPipe Face & Hand Landmarker...', 'info');
+        await privacyDetector.load();
+        const detState = privacyDetector.getState();
+        this.detectorReady = detState.status === 'ready';
+        if (this.config.onDetectorStateChange) {
+          this.config.onDetectorStateChange(detState);
+        }
+        this.config.onLog(`Privacy detector ready (${detState.delegate} delegate).`, 'success');
+      } catch (detErr: any) {
+        this.detectorReady = false;
+        this.config.onLog(`Privacy detector failed to load: ${detErr.message}. Images will be withheld.`, 'error');
+        if (this.config.onDetectorStateChange) {
+          this.config.onDetectorStateChange(privacyDetector.getState());
+        }
+      }
+
       // Connect to WebSocket device channel with first-message auth
       this.connectWebSocket();
 
-      // Start motion & vision detection loop (15 checks per sec)
+      // Start motion detection loop (15 checks per sec)
       this.startMotionDetector();
 
       // Start streaming loop (sends frames during motion or every 10s keepalive)
@@ -166,10 +194,21 @@ export class CartCameraManager {
 
   /**
    * Explicitly captures an empty-cart reference frame.
+   * Safe failure: refused if detector is not ready or if face is present.
    */
   public captureReferenceFrame(): boolean {
     if (!this.isRunning || !this.ctx || !this.config.videoElement || this.ws?.readyState !== WebSocket.OPEN) {
       this.config.onLog('Cannot capture reference: camera or WebSocket is not online.', 'warn');
+      return false;
+    }
+
+    const det = privacyDetector.detect(this.config.videoElement);
+    if (!det.detector_ready) {
+      this.config.onLog('Cannot capture reference: Privacy detector is not ready.', 'error');
+      return false;
+    }
+    if (det.face_present) {
+      this.config.onLog('Cannot capture reference: Face detected in frame. Remove face from view.', 'error');
       return false;
     }
 
@@ -183,8 +222,12 @@ export class CartCameraManager {
         format: 'jpeg',
         data: dataUrl,
         is_reference: true,
-        hand_present: this.handPresent,
-        face_present: false, // reference should have no face
+        detector_ready: true,
+        hand_present: det.hand_present,
+        hand_count: det.hand_count,
+        face_present: false,
+        face_boxes: [],
+        hand_boxes: det.hand_boxes,
         motion_level: this.motionLevel,
         timestamp: Date.now()
       }));
@@ -195,7 +238,8 @@ export class CartCameraManager {
         fps: this.currentFps,
         sizeKb,
         timestamp: Date.now(),
-        isReference: true
+        isReference: true,
+        detectorReady: true
       });
       return true;
     } catch (e: any) {
@@ -207,7 +251,6 @@ export class CartCameraManager {
   private connectWebSocket(): void {
     if (!this.isRunning) return;
 
-    // Connect to /ws/device without token in query string
     const wsUrl = getDeviceWsUrl();
     const isReconnect = this.reconnectAttempts > 0;
 
@@ -219,24 +262,26 @@ export class CartCameraManager {
 
       this.ws.onopen = () => {
         this.reconnectAttempts = 0;
-        this.config.onLog('WebSocket connected. Sending first-message auth token...', 'info');
+        this.config.onLog('WebSocket transport connected. Authenticating via first message...', 'info');
 
-        // Step 1: FIRST MESSAGE AUTH
+        // Transmit FIRST-MESSAGE authentication (Token never placed in URL)
         this.ws?.send(JSON.stringify({
           type: 'auth',
-          token: this.config.token.trim()
+          token: this.config.token.trim(),
+          client: 'CartCameraWebcamClient',
+          version: '2.0.0'
         }));
       };
 
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          
+
           if (data.type === 'auth_ok') {
             this.config.onStatusChange('ONLINE');
-            this.config.onLog(`Device authenticated! Cart: ${data.cart_number} (Online)`, 'success');
+            this.config.onLog(`Cart camera authenticated! Cart: ${data.cart_number} (ID: ${data.cart_id})`, 'success');
 
-            // Start 5-second heartbeat loop
+            // Start 5-second heartbeats
             if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = setInterval(() => {
               this.sendHeartbeat();
@@ -251,8 +296,8 @@ export class CartCameraManager {
           } else if (data.type === 'frame_ack') {
             // Frame received by server
 
-          } else if (data.type === 'reference_frame_ack') {
-            this.config.onLog('Server acknowledged empty cart reference frame.', 'success');
+          } else if (data.type === 'reference_ack') {
+            this.config.onLog('Server acknowledged empty cart reference baseline.', 'success');
 
           } else if (data.type === 'frame_error') {
             this.config.onLog(`Server frame error: ${data.message}`, 'warn');
@@ -322,69 +367,13 @@ export class CartCameraManager {
     }
   }
 
-  private async detectVisionFeatures(ctx: CanvasRenderingContext2D, width: number, height: number): Promise<{ handPresent: boolean; facePresent: boolean }> {
-    let facePresent = false;
-    let handPresent = false;
-
-    // 1. Native FaceDetector API (Chromium / Edge / Android)
-    if (this.nativeFaceDetector && this.config.videoElement) {
-      try {
-        const faces = await this.nativeFaceDetector.detect(this.config.videoElement);
-        if (faces && faces.length > 0) {
-          facePresent = true;
-        }
-      } catch {}
-    }
-
-    // 2. Skin tone & Upper-Region Cluster Detector (Cross-Browser Fallback)
-    try {
-      const imgData = ctx.getImageData(0, 0, width, height);
-      const data = imgData.data;
-      const totalPixels = width * height;
-      let upperSkinPixels = 0;
-      let lowerSkinPixels = 0;
-
-      for (let i = 0; i < data.length; i += 4 * 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        const pixelIdx = i / 4;
-        const yCoord = Math.floor(pixelIdx / width);
-
-        // Standard biometric skin-tone filter: R > G > B, (R - G) > 15, R > 90
-        const isSkin = (r > 95 && g > 40 && b > 20 && r > g && r > b && (r - g) > 15 && Math.abs(r - g) > 15);
-        if (isSkin) {
-          if (yCoord < height * 0.45) {
-            upperSkinPixels++;
-          } else {
-            lowerSkinPixels++;
-          }
-        }
-      }
-
-      // Upper skin cluster indicates face / person looking down into basket
-      const upperSampled = totalPixels * 0.45 / 4;
-      if (upperSkinPixels / upperSampled > 0.08) {
-        facePresent = true;
-      }
-
-      // Lower/side skin cluster indicates hands reaching into basket
-      const lowerSampled = totalPixels * 0.55 / 4;
-      if (lowerSkinPixels / lowerSampled > 0.05) {
-        handPresent = true;
-      }
-    } catch {}
-
-    return { handPresent, facePresent };
-  }
-
   private startMotionDetector(): void {
-    this.motionCheckInterval = setInterval(async () => {
+    this.motionCheckInterval = setInterval(() => {
       if (!this.isRunning || !this.ctx || !this.config.videoElement) return;
       if (this.config.videoElement.readyState < 2) return;
 
       try {
-        // Draw miniature frame (64x48) for lightning-fast motion & vision computation
+        // Draw miniature frame (64x48) for lightning-fast motion computation
         this.ctx.drawImage(this.config.videoElement, 0, 0, 64, 48);
         const imgData = this.ctx.getImageData(0, 0, 64, 48);
         const data = imgData.data;
@@ -404,19 +393,6 @@ export class CartCameraManager {
           const ratio = diffCount / totalPixels;
           this.motionLevel = Math.round(ratio * 100) / 100;
           const now = Date.now();
-
-          // Evaluate hand and face features
-          const { handPresent, facePresent } = await this.detectVisionFeatures(this.ctx, 64, 48);
-          this.handPresent = handPresent;
-          this.facePresent = facePresent;
-
-          if (this.config.onVisionFlagsChange) {
-            this.config.onVisionFlagsChange({
-              handPresent,
-              facePresent,
-              privacyRedacted: facePresent
-            });
-          }
 
           if (ratio > this.motionPixelRatio) {
             this.lastMotionTime = now;
@@ -448,13 +424,63 @@ export class CartCameraManager {
 
     try {
       const now = Date.now();
+
+      // 1. Run real MediaPipe detector on downscaled copy (~320 px)
+      const det = privacyDetector.detect(this.config.videoElement);
+      this.handPresent = det.hand_present;
+      this.facePresent = det.face_present;
+      this.detectorReady = det.detector_ready;
+
+      if (this.config.onVisionFlagsChange) {
+        this.config.onVisionFlagsChange({
+          handPresent: det.hand_present,
+          facePresent: det.face_present,
+          handCount: det.hand_count,
+          faceBoxes: det.face_boxes,
+          handBoxes: det.hand_boxes,
+          detectorReady: det.detector_ready,
+          privacyRedacted: det.face_present || !det.detector_ready,
+          processingMs: det.processing_ms,
+          delegate: det.delegate,
+          error: det.error
+        });
+      }
+
+      // SAFE FAILURE: If detector is not ready or failed, do NOT send images
+      if (!det.detector_ready) {
+        this.config.onLog('Privacy detector not ready, frames are not being sent', 'warn');
+        this.ws.send(JSON.stringify({
+          type: 'frame',
+          data: null,
+          detector_ready: false,
+          face_present: false,
+          hand_present: false,
+          hand_count: 0,
+          face_boxes: [],
+          hand_boxes: [],
+          motion_level: this.motionLevel,
+          is_keepalive: isKeepAlive,
+          timestamp: now
+        }));
+        this.config.onFrameSent({
+          fps: this.currentFps || (this.isMotion ? 3 : 0),
+          sizeKb: 0,
+          timestamp: now,
+          faceWithheld: true,
+          detectorReady: false
+        });
+        return;
+      }
+
+      // PRIVACY ENFORCEMENT: If face detected, image is WITHHELD (data: null)
       let dataUrl: string | null = null;
       let sizeKb = 0;
+      let faceWithheld = false;
 
-      // PRIVACY ENFORCEMENT: If face is detected, do NOT send image data!
-      if (this.facePresent) {
+      if (det.face_present) {
         dataUrl = null;
         sizeKb = 0;
+        faceWithheld = true;
       } else {
         this.ctx.drawImage(this.config.videoElement, 0, 0, this.targetWidth, this.targetHeight);
         dataUrl = this.canvas.toDataURL('image/jpeg', this.jpegQuality);
@@ -465,10 +491,15 @@ export class CartCameraManager {
         type: 'frame',
         format: 'jpeg',
         data: dataUrl,
-        hand_present: this.handPresent,
-        face_present: this.facePresent,
+        detector_ready: true,
+        face_present: det.face_present,
+        hand_present: det.hand_present,
+        hand_count: det.hand_count,
+        face_boxes: det.face_boxes,
+        hand_boxes: det.hand_boxes,
+        processing_ms: det.processing_ms,
         motion_level: this.motionLevel,
-        privacy_redacted: this.facePresent,
+        privacy_redacted: det.face_present,
         is_keepalive: isKeepAlive,
         timestamp: now
       }));
@@ -486,7 +517,8 @@ export class CartCameraManager {
         fps: this.currentFps || (this.isMotion ? 3 : 0),
         sizeKb,
         timestamp: now,
-        faceWithheld: this.facePresent
+        faceWithheld,
+        detectorReady: true
       });
     } catch (err: any) {
       this.config.onLog(`Frame capture error: ${err.message}`, 'warn');

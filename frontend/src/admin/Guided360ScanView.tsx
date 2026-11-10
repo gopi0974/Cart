@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { Product } from '../types';
 import { api } from '../services/api';
+import { privacyDetector } from '../services/privacyDetector';
 
 interface Props {
   product: Product;
@@ -79,8 +80,29 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   // Product Detection & Exclusion Warnings
   const [faceDetectedWarning, setFaceDetectedWarning] = useState(false);
+  const [handDetectedWarning, setHandDetectedWarning] = useState(false);
+  const [detectorStatus, setDetectorStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [detectorError, setDetectorError] = useState<string | null>(null);
   const [productRatio, setProductRatio] = useState<number>(0);
   const [detectedBox, setDetectedBox] = useState<ProductBoundingBox | null>(null);
+
+  // Load real in-browser MediaPipe Privacy Detector
+  useEffect(() => {
+    let mounted = true;
+    privacyDetector.load()
+      .then(() => {
+        if (mounted) {
+          setDetectorStatus('ready');
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          setDetectorStatus('error');
+          setDetectorError(err?.message || 'Failed to initialize privacy detector');
+        }
+      });
+    return () => { mounted = false; };
+  }, []);
 
   // Submission & Pipeline State (Real Background Job)
   const [isProcessing, setIsProcessing] = useState(false);
@@ -467,7 +489,6 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         const totalGuidePixels = (gX2 - gX1) * (gY2 - gY1);
 
         let productPixelCount = 0;
-        let skinPixelCount = 0;
         let minPX = gX2;
         let maxPX = gX1;
         let minPY = gY2;
@@ -479,23 +500,10 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           const row = y * 160;
           for (let x = gX1; x < gX2; x++) {
             const idx = row + x;
-            const pIdx = idx * 4;
-            const r = data[pIdx];
-            const g = data[pIdx + 1];
-            const b = data[pIdx + 2];
-
-            // Skin / Hand / Face color filtering in YCbCr & RGB space
-            const cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128;
-            const cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128;
-            const isSkin = (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) ||
-                           (r > 95 && g > 40 && b > 20 && Math.max(r, g, b) - Math.min(r, g, b) > 15 && Math.abs(r - g) > 15 && r > g && r > b);
-
-            if (isSkin) {
-              skinPixelCount++;
-            } else if (bgRef) {
+            if (bgRef) {
               const bgDiff = Math.abs(gray[idx] - bgRef[idx]);
               if (bgDiff > 24) {
-                // Foreground pixel that is NOT background and NOT skin
+                // Foreground pixel that is NOT background
                 productPixelCount++;
                 if (x < minPX) minPX = x;
                 if (x > maxPX) maxPX = x;
@@ -515,9 +523,9 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           }
         }
 
-        // Face & Body Intrusion Guard: If skin/face dominates >35% of guide box
-        const skinRatio = skinPixelCount / totalGuidePixels;
-        const isFaceIntrusion = skinRatio > 0.35;
+        // Real in-browser MediaPipe Detection (Face and Hand Landmarker)
+        const det = privacyDetector.detect(video);
+        const isFaceIntrusion = det.face_present || det.face_boxes.length > 0;
         setFaceDetectedWarning(isFaceIntrusion);
 
         // Product ratio inside guide box
@@ -545,6 +553,37 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           };
         }
         setDetectedBox(computedBox);
+
+        // Hand occlusion / covering guard: reject hands covering the product
+        let isHandCoveringProduct = false;
+        if (computedBox && det.hand_boxes.length > 0) {
+          const prodNormX1 = computedBox.x / vw;
+          const prodNormY1 = computedBox.y / vh;
+          const prodNormX2 = (computedBox.x + computedBox.width) / vw;
+          const prodNormY2 = (computedBox.y + computedBox.height) / vh;
+
+          for (const hBox of det.hand_boxes) {
+            const hX1 = hBox.x;
+            const hY1 = hBox.y;
+            const hX2 = hBox.x + hBox.width;
+            const hY2 = hBox.y + hBox.height;
+
+            const interX1 = Math.max(prodNormX1, hX1);
+            const interY1 = Math.max(prodNormY1, hY1);
+            const interX2 = Math.min(prodNormX2, hX2);
+            const interY2 = Math.min(prodNormY2, hY2);
+
+            if (interX2 > interX1 && interY2 > interY1) {
+              const interArea = (interX2 - interX1) * (interY2 - interY1);
+              const prodArea = (prodNormX2 - prodNormX1) * (prodNormY2 - prodNormY1);
+              if (prodArea > 0 && (interArea / prodArea) > 0.08) {
+                isHandCoveringProduct = true;
+                break;
+              }
+            }
+          }
+        }
+        setHandDetectedWarning(isHandCoveringProduct);
 
         // Discrete Laplacian Sharpness on Product Region
         let laplacianSum = 0;
@@ -622,8 +661,14 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
 
         // Visual HUD Feedback
-        if (isFaceIntrusion) {
+        if (detectorStatus !== 'ready') {
+          setCameraFeedback(detectorStatus === 'loading' ? 'Loading privacy detector...' : 'Privacy detector error — capture disabled');
+          setFocusStatus('BLURRY');
+        } else if (isFaceIntrusion) {
           setCameraFeedback('Show only the product. Keep your face out of the frame');
+          setFocusStatus('BLURRY');
+        } else if (isHandCoveringProduct) {
+          setCameraFeedback('Keep hands clear of the product');
           setFocusStatus('BLURRY');
         } else if (!isLightingOk) {
           setCameraFeedback('Too dark — bring item into better lighting');
@@ -643,7 +688,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
 
         // Automatic Guided Capture Execution
-        if (!isPausedRef.current && autoCaptureEnabled && productConfirmedRef.current && !isFaceIntrusion && isProductBigEnough) {
+        if (!isPausedRef.current && autoCaptureEnabled && productConfirmedRef.current && !isFaceIntrusion && !isHandCoveringProduct && detectorStatus === 'ready' && isProductBigEnough) {
           const currentPhase = phaseRef.current;
           const now = Date.now();
           const stepElapsed = now - stepStartTimeRef.current;
@@ -667,7 +712,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
           // Phase 2: Countdown "Hold still... 3, 2, 1" (at least 3 seconds)
           else if (currentPhase === 'COUNTDOWN') {
-            if (motionDiff > 25.0 || isFaceIntrusion) {
+            if (motionDiff > 25.0 || isFaceIntrusion || isHandCoveringProduct || detectorStatus !== 'ready') {
               setStepPhase('WAITING_STEADY');
               steadyCounterRef.current = 0;
               setCountdown(3);
@@ -687,7 +732,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
           // Phase 3: Capturing 5 to 8 frames spaced >= 300ms apart with near-duplicate skip
           else if (currentPhase === 'CAPTURING') {
-            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk && !isFaceIntrusion) {
+            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk && !isFaceIntrusion && !isHandCoveringProduct && detectorStatus === 'ready') {
               let isDuplicate = false;
               if (lastCapturedGrayRef.current) {
                 let dupSum = 0;
@@ -781,8 +826,16 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   // Step Controls: Capture Now (immediately snaps a frame)
   const handleCaptureNow = () => {
+    if (detectorStatus !== 'ready') {
+      alert('Cannot capture: Privacy detector is still initializing.');
+      return;
+    }
     if (faceDetectedWarning) {
-      alert('Cannot capture while face/hands are detected in the guide box. Show only the product.');
+      alert('Show only the product. Keep your face out of the frame');
+      return;
+    }
+    if (handDetectedWarning) {
+      alert('Cannot capture while hands are covering the product. Keep hands clear.');
       return;
     }
 
@@ -1440,7 +1493,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
               {/* Center Guidance Box with Blur-Score Feedback & Countdown Overlay */}
               <div className={`absolute inset-10 border-2 rounded-3xl flex flex-col items-center justify-center p-4 text-center bg-black/50 backdrop-blur-[2px] transition-all relative overflow-hidden ${
-                faceDetectedWarning
+                faceDetectedWarning || handDetectedWarning
                   ? 'border-red-500 bg-red-950/70 ring-4 ring-red-500/50'
                   : stepPhase === 'STEP_COMPLETED'
                   ? 'border-emerald-400 bg-emerald-950/60 ring-4 ring-emerald-400/40'
@@ -1472,18 +1525,34 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   </div>
                 )}
 
-                {/* Face & Body Warning Banner: "Show only the product. Keep your face out of the frame" */}
+                {/* Face Warning Banner: "Show only the product. Keep your face out of the frame" */}
                 {faceDetectedWarning && !isCalibratingBg && (
                   <div className="absolute inset-0 bg-red-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30 animate-pulse">
                     <ShieldAlert className="w-12 h-12 text-red-400 mb-2" />
                     <span className="text-xs font-bold text-white uppercase tracking-wider text-red-200">
-                      Person Detected in Guide Box
+                      Face Detected in Frame
                     </span>
                     <p className="text-xs font-bold text-white mt-1 leading-snug">
-                      "Show only the product. Keep your face out of the frame"
+                      &ldquo;Show only the product. Keep your face out of the frame&rdquo;
                     </p>
                     <span className="text-[10px] text-red-300 mt-1.5 font-mono">
-                      Face / skin intrusion blocked from capture
+                      Face intrusion blocked by MediaPipe detector
+                    </span>
+                  </div>
+                )}
+
+                {/* Hand Obstruction Warning Banner */}
+                {handDetectedWarning && !faceDetectedWarning && !isCalibratingBg && (
+                  <div className="absolute inset-0 bg-amber-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30 animate-pulse">
+                    <ShieldAlert className="w-12 h-12 text-amber-400 mb-2" />
+                    <span className="text-xs font-bold text-white uppercase tracking-wider text-amber-200">
+                      Hand Obstructing Product
+                    </span>
+                    <p className="text-xs font-bold text-white mt-1 leading-snug">
+                      Keep hands clear of the product during capture
+                    </p>
+                    <span className="text-[10px] text-amber-300 mt-1.5 font-mono">
+                      Hand coverage blocked by MediaPipe detector
                     </span>
                   </div>
                 )}
@@ -1642,9 +1711,9 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
               <button
                 onClick={handleCaptureNow}
-                disabled={faceDetectedWarning}
+                disabled={faceDetectedWarning || handDetectedWarning || detectorStatus !== 'ready'}
                 className={`py-3 px-2 rounded-2xl text-white font-semibold text-xs flex flex-col items-center justify-center gap-1 active:scale-95 transition-all shadow-lg ${
-                  faceDetectedWarning
+                  faceDetectedWarning || handDetectedWarning || detectorStatus !== 'ready'
                     ? 'bg-slate-600 opacity-50 cursor-not-allowed shadow-none'
                     : 'bg-purple-600 hover:bg-purple-700 shadow-purple-600/30'
                 }`}

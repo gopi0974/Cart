@@ -321,3 +321,102 @@ def test_device_watchdog_timeout_transition():
         assert cart.camera_status == "OFFLINE"
     finally:
         db.close()
+
+def test_skin_color_heuristics_completely_deleted_and_mediapipe_used():
+    """Requirement 7: Test that all legacy skin-colour heuristics are deleted from frontend and real MediaPipe detector is wired."""
+    frontend_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "src"))
+    assert os.path.exists(frontend_src), f"frontend/src not found at {frontend_src}"
+
+    forbidden_tokens = ["isSkin", "skinPixelCount", "upperSkinPixels", "lowerSkinPixels", "skinRatio"]
+
+    for root, _, files in os.walk(frontend_src):
+        for f in files:
+            if f.endswith((".ts", ".tsx", ".js")):
+                filepath = os.path.join(root, f)
+                with open(filepath, "r", encoding="utf-8") as file:
+                    content = file.read()
+                    for token in forbidden_tokens:
+                        assert token not in content, (
+                            f"Legacy skin-colour heuristic token '{token}' found in {f}! "
+                            f"Must be completely replaced by real MediaPipe detector."
+                        )
+
+    # Verify real detector integration in both cartCamera.ts and Guided360ScanView.tsx
+    cart_camera_path = os.path.join(frontend_src, "device", "cartCamera.ts")
+    guided_scan_path = os.path.join(frontend_src, "admin", "Guided360ScanView.tsx")
+
+    with open(cart_camera_path, "r", encoding="utf-8") as f:
+        cart_camera_code = f.read()
+        assert "privacyDetector" in cart_camera_code
+        assert "privacyDetector.detect" in cart_camera_code
+
+    with open(guided_scan_path, "r", encoding="utf-8") as f:
+        guided_scan_code = f.read()
+        assert "privacyDetector" in guided_scan_code
+        assert "privacyDetector.detect" in guided_scan_code
+
+    # Verify self-hosted model and wasm assets exist in frontend/public/mediapipe
+    public_mediapipe = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "public", "mediapipe"))
+    assert os.path.exists(os.path.join(public_mediapipe, "wasm", "vision_wasm_internal.wasm")), "Missing vision_wasm_internal.wasm in public"
+    assert os.path.exists(os.path.join(public_mediapipe, "models", "blaze_face_short_range.tflite")), "Missing blaze_face_short_range.tflite in public"
+    assert os.path.exists(os.path.join(public_mediapipe, "models", "hand_landmarker.task")), "Missing hand_landmarker.task in public"
+
+def test_device_safe_failure_when_detector_not_ready():
+    """Safe failure: when detector_ready is false, client sends data: null, no image is processed."""
+    client = TestClient(app)
+    with client.websocket_connect("/ws/device") as ws:
+        ws.send_text(json.dumps({
+            "type": "auth",
+            "token": RAW_DEVICE_TOKEN
+        }))
+        json.loads(ws.receive_text())
+
+        # Frame with detector_ready: False and data: None
+        ws.send_text(json.dumps({
+            "type": "frame",
+            "data": None,
+            "detector_ready": False,
+            "face_present": False,
+            "hand_present": False,
+            "hand_count": 0,
+            "face_boxes": [],
+            "hand_boxes": [],
+            "motion_level": 0.15
+        }))
+
+        ack = json.loads(ws.receive_text())
+        assert ack["type"] == "frame_ack"
+        assert ack["status"] == "METADATA_ONLY"
+
+        # In-memory preview has no image
+        latest = get_latest_frame("cart-003-test-id")
+        assert latest is None or latest.get("data") is None
+
+def test_device_frame_with_face_and_hand_boxes():
+    """Frame transmission transmits normalized boxes, hand_count, and respects face withholding."""
+    client = TestClient(app)
+    with client.websocket_connect("/ws/device") as ws:
+        ws.send_text(json.dumps({
+            "type": "auth",
+            "token": RAW_DEVICE_TOKEN
+        }))
+        json.loads(ws.receive_text())
+
+        # Frame with 1 hand box, 1 face box, face_present: True -> image data is null
+        ws.send_text(json.dumps({
+            "type": "frame",
+            "data": None,
+            "detector_ready": True,
+            "face_present": True,
+            "hand_present": True,
+            "hand_count": 1,
+            "face_boxes": [{"x": 0.4, "y": 0.1, "width": 0.2, "height": 0.25}],
+            "hand_boxes": [{"x": 0.2, "y": 0.6, "width": 0.15, "height": 0.2}],
+            "processing_ms": 14,
+            "motion_level": 0.4
+        }))
+
+        ack = json.loads(ws.receive_text())
+        assert ack["type"] == "frame_ack"
+        assert ack["status"] == "FACE_REDACTED"
+

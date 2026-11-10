@@ -197,3 +197,4 @@ Optional digital PIR / motion sensor signal from ESP32 GPIO.
 1. **Memory Bounds**: Use PSRAM on ESP32-CAM for JPEG frame buffers (`fb->buf`). Limit capture size to 640x480 (`FRAMESIZE_VGA`) and JPEG quality to 10-12 (which maps to 0.70).
 2. **Reconnection**: Implement exponential backoff: 1s, 2s, 4s, up to 10s max.
 3. **Privacy**: ESP32-CAM hardware with localized face detection (ESP-WHO) must clear the JPEG buffer before transmitting when a face bounding box is present.
+
