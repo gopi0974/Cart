@@ -480,3 +480,4 @@ export const DetectorTestView: React.FC = () => {
   );
 };
 export default DetectorTestView;
+

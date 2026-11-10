@@ -152,12 +152,14 @@ async def scan_item(req: ScanItemRequest, session: CartSession = Depends(verify_
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.post("/{session_id}/items/{item_id}/initiate-remove", response_model=CartItemResponse)
+@router.post("/{session_id}/items/{item_id}/initiate-remove")
 async def initiate_item_remove(item_id: str, session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
-    """Shopper taps 'Remove' on an item. Sets item to REMOVING state."""
+    """Shopper taps 'Remove' on an item. If PENDING, deletes immediately; if VERIFIED, sets to REMOVING."""
     try:
-        item = await SessionService.initiate_item_removal(db, session.id, item_id)
-        return _format_item_response(item)
+        res = await SessionService.initiate_item_removal(db, session.id, item_id)
+        if isinstance(res, dict):
+            return res
+        return _format_item_response(res)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

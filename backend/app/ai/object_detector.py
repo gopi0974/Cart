@@ -1,6 +1,8 @@
 import os
 import uuid
+import time
 import logging
+from pathlib import Path
 import numpy as np
 from PIL import Image
 from typing import Tuple, Optional
@@ -111,36 +113,84 @@ class ObjectDetector:
         status: str = "SUCCESS"
     ) -> str:
         """
-        Save real annotated evidence image to uploads/evidence/ and return URL.
+        Save evidence snapshot to uploads/evidence/ and return URL.
+        Privacy Enforcement:
+        - CROPS OF PRODUCT AREA ONLY (never full camera frames, never faces).
+        - If box is provided: strictly crops product bounding box.
+        - If box is omitted: crops centered product region (never entire frame).
         """
         filename = f"{status.lower()}_{uuid.uuid4().hex[:10]}.jpg"
         filepath = os.path.join(settings.EVIDENCE_DIR, filename)
 
         if HAS_CV2 and isinstance(image_bgr, np.ndarray):
-            annotated = image_bgr.copy()
+            h, w = image_bgr.shape[:2]
             if box:
                 x1, y1, x2, y2 = box
-                color = (34, 197, 94) if status == "SUCCESS" else (59, 130, 246) if status == "UNCERTAIN" else (239, 68, 68)
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(
-                    annotated,
-                    label[:32],
-                    (max(10, x1), max(25, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    color,
-                    2
-                )
-            cv2.imwrite(filepath, annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        else:
-            if isinstance(image_bgr, np.ndarray):
-                pil_img = Image.fromarray(image_bgr)
-            elif isinstance(image_bgr, Image.Image):
-                pil_img = image_bgr
+                # Clamp coordinates to frame boundaries
+                x1 = max(0, min(w - 1, x1))
+                y1 = max(0, min(h - 1, y1))
+                x2 = max(x1 + 1, min(w, x2))
+                y2 = max(y1 + 1, min(h, y2))
+                cropped_product = image_bgr[y1:y2, x1:x2].copy()
             else:
-                pil_img = Image.new("RGB", (640, 480), (30, 30, 30))
-            pil_img.save(filepath, "JPEG", quality=85)
+                # Privacy safeguard: crop central 60% of frame, never save full wide frame
+                cx1 = int(w * 0.20)
+                cy1 = int(h * 0.20)
+                cx2 = int(w * 0.80)
+                cy2 = int(h * 0.80)
+                cropped_product = image_bgr[cy1:cy2, cx1:cx2].copy()
+
+            if cropped_product.size == 0:
+                cropped_product = np.zeros((120, 120, 3), dtype=np.uint8)
+
+            cv2.imwrite(filepath, cropped_product, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        else:
+            if isinstance(image_bgr, Image.Image):
+                pil_img = image_bgr
+            elif isinstance(image_bgr, np.ndarray):
+                pil_img = Image.fromarray(image_bgr)
+            else:
+                pil_img = Image.new("RGB", (224, 224), (30, 30, 30))
+
+            # Crop product area from PIL if box provided
+            if box:
+                x1, y1, x2, y2 = box
+                pil_crop = pil_img.crop((x1, y1, x2, y2))
+            else:
+                pw, ph = pil_img.size
+                pil_crop = pil_img.crop((int(pw * 0.2), int(ph * 0.2), int(pw * 0.8), int(ph * 0.8)))
+            pil_crop.save(filepath, "JPEG", quality=85)
 
         return f"/uploads/evidence/{filename}"
+
+
+def cleanup_expired_evidence(retention_days: Optional[int] = None) -> int:
+    """
+    Automatic cleanup job: deletes evidence snapshot crops older than retention policy.
+    Default retention: 14 days (from settings.EVIDENCE_RETENTION_DAYS).
+    """
+    days = retention_days if retention_days is not None else getattr(settings, "EVIDENCE_RETENTION_DAYS", 14)
+    cutoff_time = time.time() - (days * 86400)
+    deleted_count = 0
+
+    evidence_dir = Path(settings.EVIDENCE_DIR)
+    if not evidence_dir.exists():
+        return 0
+
+    try:
+        for file_path in evidence_dir.glob("*.jpg"):
+            try:
+                if file_path.stat().st_mtime < cutoff_time:
+                    file_path.unlink()
+                    deleted_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete expired evidence file {file_path.name}: {e}")
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} expired evidence snapshot(s) older than {days} days.")
+    except Exception as e:
+        logger.error(f"Error during evidence cleanup: {e}")
+
+    return deleted_count
+
 
 object_detector = ObjectDetector()

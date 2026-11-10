@@ -18,9 +18,11 @@ class AlertService:
         create_review_case: bool = False,
         scanned_barcode: Optional[str] = None,
         predicted_product_id: Optional[str] = None,
-        confidence: float = 0.5
+        confidence: float = 0.5,
+        top_candidates: Optional[list] = None
     ) -> Alert:
         """Create a real-time alert and notify admin channels instantly."""
+        import json
         alert = Alert(
             cart_id=cart_id,
             session_id=session_id,
@@ -48,6 +50,7 @@ class AlertService:
                 predicted_product_id=predicted_product_id,
                 confidence=confidence,
                 evidence_image_url=evidence_url or "https://images.unsplash.com/photo-1542838132-92c53300491e?w=600&auto=format&fit=crop&q=80",
+                top_candidates_json=json.dumps(top_candidates) if top_candidates else None,
                 status="PENDING"
             )
             db.add(case)

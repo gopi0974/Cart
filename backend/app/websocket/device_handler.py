@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
-from app.models.product import Product
 from app.models.transaction import AuditLog
 from app.websocket.manager import ws_manager
 from app.services.session_service import SessionService
@@ -33,8 +32,12 @@ class CartVisionTracker:
         self.hand_in_frame: bool = False
         self.hand_left_time: float = 0.0
         self.stable_frame_count: int = 0
+        self.stable_start_time: float = 0.0
+        self.last_motion_time: float = 0.0
+        self.last_judged_time: float = 0.0
+        self.face_seen_start_time: float = 0.0
         self.ref_background: Optional[np.ndarray] = None
-        self.last_evaluated_time: float = 0.0
+        self.last_stable_frame: Optional[np.ndarray] = None
 
 cart_trackers: Dict[str, CartVisionTracker] = {}
 
@@ -49,45 +52,124 @@ async def process_camera_frame(
     cart_number: str,
     image_data: Any,
     websocket: WebSocket,
-    hand_present: bool = False
+    hand_present: bool = False,
+    face_present: bool = False,
+    motion: bool = False
 ):
     """
     Process incoming camera frame from cart device (Laptop webcam or ESP32-CAM).
     Derives cart context solely from authenticated token.
-    Tracks hand presence sent from client MediaPipe, waits for hand withdrawal and frame stabilization (~1s),
-    and executes tiered ONNX INT8 CLIP cosine verification against claimed or unscanned items.
+    Rules:
+      1. Empty-cart reference stored from "Capture empty cart reference" or first stable frame.
+      2. Judge ONLY when hand_present=False, face_present=False, and frame stable for ~1 second.
+      3. Faces on packaging: if face_present stays true for stable object, frame withheld and
+         shopper alerted "We can't check this item. Please ask staff" + Admin review case.
+      4. Detect changed region and run recognition matching enrollment pipeline.
     """
     try:
-        img_bgr, _ = verification_engine._decode_to_cv2(image_data)
         tracker = get_tracker(cart_id)
         now = time.time()
 
-        # 1. Hand Occlusion Gate: Wait for hand to withdraw before judging
-        if hand_present:
-            tracker.hand_in_frame = True
+        # 1. PRIVACY CHECK: Faces on Packaging or in Frame
+        if face_present:
+            if tracker.face_seen_start_time == 0.0:
+                tracker.face_seen_start_time = now
             tracker.stable_frame_count = 0
+            tracker.stable_start_time = 0.0
+
+            # If face_present stays true for about 1 second on a stable object:
+            if (now - tracker.face_seen_start_time) >= 1.0:
+                active_session = db.query(CartSession).filter(
+                    CartSession.cart_id == cart_id,
+                    CartSession.status == "ACTIVE"
+                ).first()
+                if active_session:
+                    pending_item = db.query(CartItem).join(CartItem.product).filter(
+                        CartItem.session_id == active_session.id,
+                        CartItem.status == "PENDING"
+                    ).order_by(CartItem.scanned_at.desc()).first()
+
+                    if pending_item:
+                        pending_item.status = "WARNING"
+                        pending_item.warning_reason = "FACE_DETECTED"
+                        db.commit()
+
+                        # Shopper notice
+                        await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                            "item_id": pending_item.id,
+                            "product_name": pending_item.product.name,
+                            "barcode": pending_item.product.barcode,
+                            "status": "WARNING",
+                            "reason": "FACE_DETECTED",
+                            "message": "We can't check this item. Please ask staff"
+                        })
+
+                        # Admin review case: "frame withheld (face detected)"
+                        await AlertService.create_alert(
+                            db=db,
+                            cart_id=cart_id,
+                            session_id=active_session.id,
+                            alert_type="FACE_IN_PACKAGING_WITHHELD",
+                            severity="MEDIUM",
+                            message=f"frame withheld (face detected) for '{pending_item.product.name}'.",
+                            evidence_url=None,
+                            create_review_case=True,
+                            scanned_barcode=pending_item.product.barcode,
+                            confidence=0.0
+                        )
+
             await websocket.send_json({
-                "type": "vision_status",
-                "status": "HAND_IN_FRAME",
-                "message": "Hand in frame: item placement in progress..."
+                "type": "frame_ack",
+                "status": "FACE_REDACTED",
+                "message": "Face detected. Frame withheld for privacy."
             })
             return
 
-        # 2. Hand just exited - begin stabilization period
-        if tracker.hand_in_frame:
-            tracker.hand_in_frame = False
-            tracker.hand_left_time = now
-            tracker.stable_frame_count = 1
+        tracker.face_seen_start_time = 0.0
+
+        # 2. Hand Occlusion & Motion Gate: Ignore frames with motion or hands
+        if hand_present or motion:
+            tracker.hand_in_frame = hand_present
+            tracker.stable_frame_count = 0
+            tracker.stable_start_time = 0.0
+            tracker.last_motion_time = now
+            status_text = "HAND_IN_FRAME" if hand_present else "MOTION_DETECTED"
+            msg_text = "Hand in frame: item placement in progress..." if hand_present else "Cart motion: waiting for basket to steady..."
+            await websocket.send_json({
+                "type": "vision_status",
+                "status": status_text,
+                "message": msg_text
+            })
+            return
+
+        # 3. Stabilization: Frame must be steady for about 1 second
+        if tracker.stable_start_time == 0.0:
+            tracker.stable_start_time = now
+        tracker.stable_frame_count += 1
+        duration_stable = now - tracker.stable_start_time
+
+        if duration_stable < 1.0 or tracker.stable_frame_count < 2:
             await websocket.send_json({
                 "type": "vision_status",
                 "status": "STABILIZING",
-                "message": "Hand withdrawn. Stabilizing basket image..."
+                "message": "Stabilizing basket image..."
             })
             return
 
-        tracker.stable_frame_count += 1
+        # Prevent duplicate judgments on the exact same static scene
+        if tracker.last_judged_time >= tracker.last_motion_time:
+            await websocket.send_json({
+                "type": "frame_ack",
+                "status": "VERIFIED_ALL",
+                "message": "Basket is steady."
+            })
+            return
+        tracker.last_judged_time = now
 
-        # 3. Check active session on this cart
+        # Decode frame
+        img_bgr, _ = verification_engine._decode_to_cv2(image_data)
+
+        # 4. Check active session on this cart
         active_session = db.query(CartSession).filter(
             CartSession.cart_id == cart_id,
             CartSession.status == "ACTIVE"
@@ -102,8 +184,64 @@ async def process_camera_frame(
             })
             return
 
-        # 4. Check for pending item scanned on mobile waiting for camera confirmation
-        pending_item = db.query(CartItem).join(Product).filter(
+        # Auto-initialize empty-cart reference from first stable frame of session with no items
+        active_items_count = db.query(CartItem).filter(
+            CartItem.session_id == active_session.id,
+            CartItem.status != "REMOVED"
+        ).count()
+        if active_items_count == 0 and tracker.ref_background is None:
+            tracker.ref_background = img_bgr.copy()
+            logger.info(f"[{cart_number}] Empty cart reference auto-initialized from first stable frame.")
+
+        # 5. Check for item in REMOVING status (verified item being taken out)
+        removing_item = db.query(CartItem).join(CartItem.product).filter(
+            CartItem.session_id == active_session.id,
+            CartItem.status == "REMOVING"
+        ).first()
+
+        if removing_item:
+            claimed_barcode = removing_item.product.barcode
+            eval_rem = verification_engine.evaluate_item_removal(
+                db=db,
+                target_barcode=claimed_barcode,
+                image_data=img_bgr,
+                ref_background=tracker.ref_background,
+                cart_id=cart_id,
+                session_id=active_session.id,
+                item_id=removing_item.id
+            )
+            decision = eval_rem.get("decision")
+            if decision == "CONFIRMED_REMOVED":
+                removing_item.status = "REMOVED_PENDING_RESCAN"
+                removing_item.verification_evidence_url = eval_rem.get("evidence_url")
+                db.commit()
+
+                # Persistent warning: "Rescan the barcode to remove this item"
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_REMOVED_AWAITING_RESCAN", {
+                    "item_id": removing_item.id,
+                    "product_name": removing_item.product.name,
+                    "barcode": claimed_barcode,
+                    "status": "REMOVED_PENDING_RESCAN",
+                    "message": "Rescan the barcode to remove this item",
+                    "evidence_url": eval_rem.get("evidence_url")
+                })
+                await websocket.send_json({
+                    "type": "verification_result",
+                    "action": "ITEM_REMOVED_AWAITING_RESCAN",
+                    "product_name": removing_item.product.name,
+                    "status": "REMOVED_PENDING_RESCAN"
+                })
+            elif decision == "STILL_IN_CART":
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                    "item_id": removing_item.id,
+                    "product_name": removing_item.product.name,
+                    "status": "REMOVING",
+                    "message": "We still see this item in the cart. Please take it out."
+                })
+            return
+
+        # 6. Check for pending item scanned on mobile waiting for camera confirmation
+        pending_item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
             CartItem.status == "PENDING"
         ).order_by(CartItem.scanned_at.desc()).first()
@@ -114,13 +252,15 @@ async def process_camera_frame(
                 db=db,
                 claimed_barcode=claimed_barcode,
                 image_data=img_bgr,
-                ref_background=tracker.ref_background
+                ref_background=tracker.ref_background,
+                cart_id=cart_id,
+                session_id=active_session.id,
+                item_id=pending_item.id
             )
-            tracker.ref_background = img_bgr.copy()
-            tracker.last_evaluated_time = now
+            tracker.last_stable_frame = img_bgr.copy()
 
             decision = eval_result.get("decision")
-            confidence = float(eval_result.get("confidence", 0.95))
+            confidence = float(eval_result.get("confidence", 0.0))
             evidence_url = eval_result.get("evidence_url")
 
             if decision == "AUTO_APPROVE":
@@ -141,41 +281,79 @@ async def process_camera_frame(
                 })
                 logger.info(f"[{cart_number}] Item '{pending_item.product.name}' VERIFIED (Confidence: {confidence*100:.1f}%).")
 
-            elif decision == "RESCAN_PROMPT":
-                # Uncertain confidence: ask shopper to reposition/rescan
-                await ws_manager.broadcast_to_cart(cart_id, "ITEM_UNCERTAIN", {
-                    "message": eval_result.get("message"),
+            elif decision == "REPOSITION_PROMPT":
+                pending_item.status = "WARNING"
+                pending_item.warning_reason = "REPOSITION"
+                pending_item.confidence_score = confidence
+                pending_item.verification_evidence_url = evidence_url
+                db.commit()
+
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                    "item_id": pending_item.id,
+                    "product_name": pending_item.product.name,
                     "barcode": claimed_barcode,
-                    "confidence": confidence
+                    "status": "WARNING",
+                    "reason": "REPOSITION",
+                    "confidence": confidence,
+                    "message": eval_result.get("message")
                 })
                 await websocket.send_json({
                     "type": "verification_result",
-                    "action": "UNCERTAIN_RESCAN",
+                    "action": "UNCERTAIN_REPOSITION",
                     "product_name": pending_item.product.name,
                     "confidence": confidence,
                     "message": eval_result.get("message")
                 })
 
             elif decision == "WRONG_ITEM":
-                detected_name = eval_result.get("detected_product_name", "Different Item")
-                await SessionService.flag_mismatch(
+                wrong_match = eval_result.get("top_match")
+                wrong_name = wrong_match.get("product_name") if wrong_match else "Different Item"
+                pending_item.status = "WARNING"
+                pending_item.warning_reason = "MISMATCH"
+                pending_item.confidence_score = confidence
+                pending_item.verification_evidence_url = evidence_url
+                db.commit()
+
+                await AlertService.create_alert(
                     db=db,
+                    cart_id=cart_id,
                     session_id=active_session.id,
-                    scanned_barcode=claimed_barcode,
-                    detected_product_name=detected_name,
+                    alert_type="MISMATCH_ITEM",
+                    message=f"Scanned '{pending_item.product.name}' but detected '{wrong_name}'.",
+                    severity="HIGH",
                     evidence_url=evidence_url,
-                    confidence=confidence
+                    create_review_case=True,
+                    scanned_barcode=claimed_barcode,
+                    predicted_product_id=wrong_match.get("id") if wrong_match else None,
+                    confidence=confidence,
+                    top_candidates=eval_result.get("top_candidates")
                 )
+
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                    "item_id": pending_item.id,
+                    "product_name": pending_item.product.name,
+                    "barcode": claimed_barcode,
+                    "status": "WARNING",
+                    "reason": "MISMATCH",
+                    "detected_as": wrong_name,
+                    "confidence": confidence,
+                    "message": eval_result.get("message")
+                })
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "ITEM_MISMATCH",
                     "scanned_barcode": claimed_barcode,
-                    "detected_as": detected_name,
+                    "detected_as": wrong_name,
                     "confidence": confidence
                 })
 
             elif decision == "ESCALATE_ADMIN_REVIEW":
-                # Low similarity: forward to Admin review queue
+                pending_item.status = "WARNING"
+                pending_item.warning_reason = "LOW_CONFIDENCE"
+                pending_item.confidence_score = confidence
+                pending_item.verification_evidence_url = evidence_url
+                db.commit()
+
                 await AlertService.create_alert(
                     db=db,
                     cart_id=cart_id,
@@ -186,8 +364,18 @@ async def process_camera_frame(
                     evidence_url=evidence_url,
                     create_review_case=True,
                     scanned_barcode=claimed_barcode,
-                    confidence=confidence
+                    confidence=confidence,
+                    top_candidates=eval_result.get("top_candidates")
                 )
+                await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                    "item_id": pending_item.id,
+                    "product_name": pending_item.product.name,
+                    "barcode": claimed_barcode,
+                    "status": "WARNING",
+                    "reason": "LOW_CONFIDENCE",
+                    "confidence": confidence,
+                    "message": eval_result.get("message")
+                })
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "ESCALATE_ADMIN_REVIEW",
@@ -196,7 +384,7 @@ async def process_camera_frame(
                 })
 
         else:
-            # 5. No pending item: Check for Unscanned Item Placement
+            # 7. No pending item: Check for Unscanned Item Placement
             motion_box = object_detector.compute_motion_box(tracker.ref_background, img_bgr)
 
             if motion_box is not None:
@@ -204,10 +392,12 @@ async def process_camera_frame(
                     db=db,
                     claimed_barcode=None,
                     image_data=img_bgr,
-                    ref_background=tracker.ref_background
+                    ref_background=tracker.ref_background,
+                    cart_id=cart_id,
+                    session_id=active_session.id
                 )
-                tracker.ref_background = img_bgr.copy()
-                detected_prod = eval_result.get("detected_product")
+                tracker.last_stable_frame = img_bgr.copy()
+                detected_prod = eval_result.get("top_match")
 
                 await SessionService.flag_unscanned_item(
                     db=db,
@@ -218,11 +408,10 @@ async def process_camera_frame(
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "UNSCANNED_ITEM_DETECTED",
-                    "detected_as": detected_prod["name"] if detected_prod else "Unidentified Item",
+                    "detected_as": detected_prod["product_name"] if detected_prod else "Unidentified Item",
                     "confidence": eval_result.get("confidence", 0.88)
                 })
             else:
-                tracker.ref_background = img_bgr.copy()
                 await websocket.send_json({
                     "type": "frame_ack",
                     "status": "VERIFIED_ALL",
@@ -455,7 +644,19 @@ async def handle_device_websocket(
                         })
                         continue
 
-                    if frame_data:
+                    if face_present:
+                        # Privacy: frame image is withheld (None), metadata sent to processor
+                        await process_camera_frame(
+                            db,
+                            cart_id,
+                            cart_number,
+                            None,
+                            websocket,
+                            hand_present=hand_present,
+                            face_present=True,
+                            motion=bool(payload.get("motion", False))
+                        )
+                    elif frame_data:
                         # Process frame if not a face and under limit
                         await process_camera_frame(
                             db,
@@ -463,12 +664,14 @@ async def handle_device_websocket(
                             cart_number,
                             frame_data,
                             websocket,
-                            hand_present=hand_present
+                            hand_present=hand_present,
+                            face_present=False,
+                            motion=bool(payload.get("motion", False))
                         )
                     else:
                         await websocket.send_json({
                             "type": "frame_ack",
-                            "status": "FACE_REDACTED" if face_present else "METADATA_ONLY",
+                            "status": "METADATA_ONLY",
                             "frames_per_minute": get_frames_per_minute(cart_id)
                         })
 

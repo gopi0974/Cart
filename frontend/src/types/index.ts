@@ -1,4 +1,4 @@
-export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'REMOVED' | 'REMOVING' | 'REMOVED_PENDING_RESCAN';
+export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'REMOVED' | 'REMOVING' | 'REMOVED_PENDING_RESCAN';
 
 export interface CartItem {
   id: string;
@@ -11,14 +11,17 @@ export interface CartItem {
   quantity: number;
   unit_price: number;
   status: ItemStatus;
+  warning_reason?: string;
   scanned_at: string;
   verified_at?: string;
   confidence_score?: number;
+  top1_score?: number;
+  top2_score?: number;
   verification_evidence_url?: string;
 }
 
 export interface ActiveWarning {
-  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN';
+  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN' | 'WARNING_ITEM' | 'PENDING_ITEM' | 'FACE_IN_PACKAGING_WITHHELD';
   message: string;
   target_barcode?: string;
   action_required: string;
@@ -133,6 +136,12 @@ export interface ReviewCase {
   predicted_product_name?: string;
   confidence: number;
   evidence_image_url: string;
+  top_candidates?: Array<{
+    id?: string;
+    product_name?: string;
+    barcode?: string;
+    similarity: number;
+  }>;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
   created_at: string;
 }

@@ -54,6 +54,9 @@ async def lifespan(app: FastAPI):
             from app.services.scan_worker import cleanup_orphaned_jobs_on_startup
             cleanup_orphaned_jobs_on_startup()
 
+            from app.ai.object_detector import cleanup_expired_evidence
+            cleanup_expired_evidence()
+
             if SessionLocal:
                 db = SessionLocal()
                 try:

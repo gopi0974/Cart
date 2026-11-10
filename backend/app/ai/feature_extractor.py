@@ -302,6 +302,9 @@ class VisualFeatureExtractor:
     def extract_embedding(self, image_input: Any) -> List[float]:
         return get_embedding(image_input)
 
+    def get_embedding(self, image_input: Any) -> List[float]:
+        return get_embedding(image_input)
+
     def extract_embeddings_batch(self, images: List[Any]) -> List[List[float]]:
         return get_embeddings_batch(images)
 

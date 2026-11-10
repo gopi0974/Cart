@@ -35,7 +35,7 @@ class Product(Base):
     # Relationships
     images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
     embeddings = relationship("ProductEmbedding", back_populates="product", cascade="all, delete-orphan")
-    cart_items = relationship("CartItem", back_populates="product")
+    cart_items = relationship("CartItem", back_populates="product", foreign_keys="CartItem.product_id")
 
 class ProductImage(Base):
     """Catalog and multi-angle 360-scan image captures."""

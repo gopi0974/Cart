@@ -112,7 +112,8 @@ class Settings(BaseModel):
     # AI / Vision Thresholds
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))
     CONFIDENCE_MEDIUM: float = float(os.getenv("CONFIDENCE_MEDIUM", "0.65"))
-    CONFIDENCE_LOW: float = float(os.getenv("CONFIDENCE_LOW", "0.50"))
+    CONFIDENCE_LOW: float = float(os.getenv("CONFIDENCE_LOW", "0.65"))
+    EVIDENCE_RETENTION_DAYS: int = int(os.getenv("EVIDENCE_RETENTION_DAYS", "14"))
     
     # Payment Gateway (Test mode only)
     PAYMENT_MODE: str = os.getenv("PAYMENT_MODE", "TEST")

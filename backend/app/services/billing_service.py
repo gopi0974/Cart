@@ -23,18 +23,30 @@ class BillingService:
         session_details = SessionService.get_session_details(db, session_id)
         session: CartSession = session_details["session"]
         cart: Cart = session_details["cart"]
+        items = session_details["items"]
+
+        # Server-side checkout enforcement (Rule A.5)
+        if len(items) == 0:
+            raise ValueError("Checkout blocked: Your cart is empty.")
+
+        if cart and cart.camera_status != "ONLINE":
+            raise ValueError("Checkout blocked: This cart's camera is not connected. Verification is paused. Please ask staff for assistance.")
+
+        for itm in items:
+            if itm.status == "PENDING":
+                raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is scanned but not yet placed in cart. (PENDING)")
+            if itm.status in ["WARNING", "WARNING_MISMATCH", "WARNING_UNSCANNED"]:
+                raise ValueError(f"Checkout blocked: Item '{itm.product.name}' has an active warning. Please resolve it before checkout. (WARNING)")
+            if itm.status in ["REMOVING", "REMOVED_PENDING_RESCAN"]:
+                raise ValueError(f"Checkout blocked: Item '{itm.product.name}' was removed. Rescan the barcode to remove this item before checking out. (REMOVED_PENDING_RESCAN)")
+            if itm.status != "VERIFIED":
+                raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is {itm.status}. All items must be VERIFIED by the cart camera before checkout.")
+
+        if len(session_details.get("active_warnings", [])) > 0:
+            first_w = session_details["active_warnings"][0]["message"]
+            raise ValueError(f"Checkout blocked: Unresolved warning - {first_w}")
 
         if not session_details["can_checkout"]:
-            if cart and cart.camera_status != "ONLINE":
-                raise ValueError("Checkout blocked: This cart's camera is not connected. Verification is paused. Please ask staff for assistance.")
-            for itm in session_details["items"]:
-                if itm.status in ["REMOVING", "REMOVED_PENDING_RESCAN"]:
-                    raise ValueError("Please complete the item removal before checking out.")
-            if len(session_details["active_warnings"]) > 0:
-                raise ValueError("Checkout blocked: You have unresolved alerts or warnings in your cart.")
-            for itm in session_details["items"]:
-                if itm.status != "VERIFIED":
-                    raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is still {itm.status}. Must be VERIFIED by cart camera.")
             raise ValueError("Checkout blocked: Cannot complete checkout at this time.")
 
         # Deduct purchased quantities from product inventory & trigger low-stock alerts

@@ -35,6 +35,7 @@ class ReviewCase(Base):
     predicted_product_id = Column(String(36), ForeignKey("products.id"), nullable=True)
     confidence = Column(Float, nullable=False)
     evidence_image_url = Column(Text, nullable=False)
+    top_candidates_json = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="PENDING")  # PENDING, APPROVED, REJECTED
     assigned_to = Column(String(36), ForeignKey("users.id"), nullable=True)
     feedback_saved_for_training = Column(Boolean, default=False)

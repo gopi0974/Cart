@@ -36,6 +36,7 @@ class ReviewCaseResponse(BaseModel):
     predicted_product_name: Optional[str] = None
     confidence: float
     evidence_image_url: str
+    top_candidates: Optional[list] = None
     status: str
     created_at: datetime
 

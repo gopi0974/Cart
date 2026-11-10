@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { Check, X, ShieldQuestion, ArrowRight, Sparkles, RefreshCw, Layers } from 'lucide-react';
+import { Check, X, ShieldQuestion, ArrowRight, Sparkles, RefreshCw, Layers, Tag, Eye } from 'lucide-react';
 import { ReviewCase } from '../types';
 import { api } from '../services/api';
+
+type FeedbackReason = 'true match' | 'wrong item' | 'bad crop' | 'lighting';
 
 export const ReviewQueueView: React.FC = () => {
   const [cases, setCases] = useState<ReviewCase[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCaseIdx, setActiveCaseIdx] = useState(0);
+  const [staffFeedback, setStaffFeedback] = useState<FeedbackReason>('true match');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const fetchQueue = async () => {
     try {
@@ -26,7 +30,7 @@ export const ReviewQueueView: React.FC = () => {
   // Keyboard shortcuts [A] Approve, [R] Reject
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (cases.length === 0) return;
+      if (cases.length === 0 || isSubmitting) return;
       const current = cases[activeCaseIdx];
       if (!current) return;
 
@@ -39,15 +43,20 @@ export const ReviewQueueView: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [cases, activeCaseIdx]);
+  }, [cases, activeCaseIdx, staffFeedback, isSubmitting]);
 
-  const handleDecision = async (caseId: string, decision: 'APPROVE' | 'REJECT') => {
+  const handleDecision = async (caseId: string, decision: 'APPROVE' | 'REJECT', customFeedback?: FeedbackReason) => {
+    const feedback = customFeedback || (decision === 'APPROVE' && staffFeedback === 'wrong item' ? 'true match' : staffFeedback);
+    setIsSubmitting(true);
     try {
-      await api.submitReviewDecision(caseId, decision, 'Staff hotkey decision.');
+      await api.submitReviewDecision(caseId, decision, `Staff feedback: ${feedback}`);
       await fetchQueue();
       setActiveCaseIdx(0);
+      setStaffFeedback('true match');
     } catch (e) {
       alert('Failed to submit decision.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -67,15 +76,17 @@ export const ReviewQueueView: React.FC = () => {
             )}
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-            Cases where AI visual confidence fell below auto-approval cutoff. Staff decisions retrain model embeddings.
+            Visual inspection cases requiring staff validation. Top 3 embedding matches and crops presented below.
           </p>
         </div>
 
         {/* Keyboard shortcut hint */}
         <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-slate-400 bg-slate-100 dark:bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800">
           <span>Shortcuts:</span>
-          <kbd className="px-1.5 py-0.5 bg-white dark:bg-slate-800 rounded border border-slate-300 dark:border-slate-700 font-bold text-emerald-600">A</kbd> Approve
-          <kbd className="px-1.5 py-0.5 bg-white dark:bg-slate-800 rounded border border-slate-300 dark:border-slate-700 font-bold text-red-500 ml-1">R</kbd> Reject
+          <kbd className="bg-white dark:bg-slate-800 px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 font-bold text-slate-700 dark:text-slate-300">[A]</kbd>
+          <span>Approve</span>
+          <kbd className="bg-white dark:bg-slate-800 px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 font-bold text-slate-700 dark:text-slate-300">[R]</kbd>
+          <span>Reject</span>
         </div>
       </div>
 
@@ -112,83 +123,176 @@ export const ReviewQueueView: React.FC = () => {
             {/* Confidence Score Pill */}
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-400">Match Confidence:</span>
-              <span className="font-mono text-sm font-bold px-3 py-1 bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 rounded-xl border border-amber-300 dark:border-amber-800/40">
-                {(currentCase.confidence * 100).toFixed(1)}% (Threshold: 85.0%)
+              <span className={`font-mono text-sm font-bold px-3 py-1 rounded-xl border ${
+                currentCase.confidence >= 0.85
+                  ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border-emerald-300 dark:border-emerald-800/40'
+                  : currentCase.confidence >= 0.70
+                  ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800/40'
+                  : 'bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-400 border-red-300 dark:border-red-800/40'
+              }`}>
+                {(currentCase.confidence * 100).toFixed(1)}%
               </span>
             </div>
           </div>
 
           {/* Side-by-Side Visual Inspection Comparison */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Left: Cart Camera Evidence */}
+            {/* Left: Cart Camera Evidence (Crop of Product Area) */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                <span>1. Overhead Cart Camera Capture</span>
-                <span className="text-red-500">Live Frame</span>
+                <span>1. Overhead Evidence Crop</span>
+                <span className="text-red-500 font-mono text-[11px]">Product Area Crop</span>
               </div>
-              <div className="aspect-video bg-black rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 relative shadow-inner">
-                <img
-                  src={currentCase.evidence_image_url}
-                  alt="Cart Camera Evidence"
-                  className="w-full h-full object-cover"
-                />
-                <div className="absolute bottom-2 left-2 bg-black/70 px-2.5 py-1 rounded-lg text-[11px] font-mono text-white">
-                  Hand Occlusion Detected
+              <div className="aspect-video bg-black rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 relative shadow-inner flex items-center justify-center">
+                {currentCase.evidence_image_url ? (
+                  <img
+                    src={currentCase.evidence_image_url}
+                    alt="Cart Camera Evidence Crop"
+                    className="w-full h-full object-contain bg-slate-950"
+                  />
+                ) : (
+                  <div className="text-slate-500 text-xs flex items-center gap-1.5">
+                    <Eye className="w-4 h-4" />
+                    <span>No evidence crop recorded</span>
+                  </div>
+                )}
+                <div className="absolute bottom-2 left-2 bg-black/70 px-2.5 py-1 rounded-lg text-[10px] font-mono text-white">
+                  Cropped Target Region
                 </div>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                Customer placed item into cart basket. Hand partially masked the label causing lower visual match confidence.
+                Privacy-preserving snapshot: cropped strictly to item bounding box. Full camera frames and faces are never stored.
               </p>
             </div>
 
-            {/* Right: Catalog Product Reference */}
+            {/* Right: Scanned Product Reference */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                <span>2. Registered Catalog Reference</span>
-                <span className="text-emerald-500">Claimed Barcode</span>
+                <span>2. Scanned Product (Claimed)</span>
+                <span className="text-emerald-500 font-mono text-[11px]">Barcode Match</span>
               </div>
               <div className="aspect-video bg-slate-100 dark:bg-slate-900 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 relative shadow-inner flex items-center justify-center">
                 {currentCase.scanned_product_image ? (
                   <img
                     src={currentCase.scanned_product_image}
                     alt="Catalog Reference"
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                   />
                 ) : (
                   <Layers className="w-12 h-12 text-slate-400" />
                 )}
-                <div className="absolute bottom-2 left-2 bg-black/70 px-2.5 py-1 rounded-lg text-[11px] font-mono text-white">
-                  360° Enrolled Embedding Model
+                <div className="absolute bottom-2 left-2 bg-black/70 px-2.5 py-1 rounded-lg text-[10px] font-mono text-white">
+                  Catalog Reference
                 </div>
               </div>
               <div className="text-xs">
                 <strong className="text-slate-800 dark:text-slate-200 block text-sm">
-                  {currentCase.scanned_product_name || 'Item'}
+                  {currentCase.scanned_product_name || 'Unregistered Product'}
                 </strong>
-                <span className="font-mono text-slate-400">Barcode: {currentCase.scanned_barcode}</span>
+                <span className="font-mono text-slate-400">Barcode: {currentCase.scanned_barcode || 'N/A'}</span>
               </div>
             </div>
           </div>
 
-          {/* Decision Bar */}
+          {/* Top 3 Product Matches with Similarity Scores */}
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                <Layers className="w-4 h-4 text-primary-500" />
+                <span>Top 3 Visual Embedding Matches (CLIP ViT-B/32)</span>
+              </h4>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {currentCase.top_candidates && currentCase.top_candidates.length > 0 ? (
+                currentCase.top_candidates.slice(0, 3).map((candidate, idx) => {
+                  const score = candidate.similarity;
+                  const isTop = idx === 0;
+                  return (
+                    <div
+                      key={candidate.id || idx}
+                      className={`p-3 rounded-2xl border transition-all ${
+                        isTop
+                          ? 'bg-primary-50/50 dark:bg-primary-950/20 border-primary-200 dark:border-primary-800'
+                          : 'bg-slate-50 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs mb-1.5">
+                        <span className="font-bold text-[11px] text-slate-500 font-mono">
+                          Rank #{idx + 1} {isTop && '• Top Candidate'}
+                        </span>
+                        <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-md ${
+                          score >= 0.85
+                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                            : score >= 0.70
+                            ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                            : 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+                        }`}>
+                          {(score * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="font-semibold text-xs text-slate-800 dark:text-slate-200 truncate" title={candidate.product_name}>
+                        {candidate.product_name || 'Unknown Product'}
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                        {candidate.barcode ? `Barcode: ${candidate.barcode}` : 'ID: ' + (candidate.id?.slice(0, 8) || 'N/A')}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="col-span-3 text-xs text-slate-400 italic py-2">
+                  No top candidate list recorded for this decision. (Confidence: {(currentCase.confidence * 100).toFixed(1)}%)
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Staff Feedback Selection Bar */}
+          <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+            <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+              <Tag className="w-3.5 h-3.5" />
+              <span>Select Staff Feedback Reason:</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {(['true match', 'wrong item', 'bad crop', 'lighting'] as FeedbackReason[]).map((reason) => (
+                <button
+                  key={reason}
+                  type="button"
+                  onClick={() => setStaffFeedback(reason)}
+                  className={`text-xs px-3 py-1.5 rounded-xl border capitalize font-medium transition-all ${
+                    staffFeedback === reason
+                      ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 border-transparent shadow-sm'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-400'
+                  }`}
+                >
+                  {reason}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Decision Action Buttons */}
           <div className="border-t border-slate-100 dark:border-slate-800 pt-5 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-              <Sparkles className="w-4 h-4" />
-              <span>Decisions automatically save positive & negative feedback to fine-tune vector embeddings.</span>
+              <Sparkles className="w-4 h-4 shrink-0" />
+              <span>Decisions automatically save staff feedback reason into audit records.</span>
             </div>
 
             <div className="flex gap-3 w-full sm:w-auto">
               <button
+                disabled={isSubmitting}
                 onClick={() => handleDecision(currentCase.id, 'REJECT')}
-                className="flex-1 sm:flex-initial bg-red-50 hover:bg-red-100 dark:bg-red-950/40 text-red-600 border border-red-200 dark:border-red-900/60 font-semibold px-5 py-2.5 rounded-2xl flex items-center justify-center gap-2 text-xs active:scale-95 transition-all"
+                className="flex-1 sm:flex-initial bg-red-50 hover:bg-red-100 dark:bg-red-950/40 text-red-600 border border-red-200 dark:border-red-900/60 font-semibold px-5 py-2.5 rounded-2xl flex items-center justify-center gap-2 text-xs active:scale-95 transition-all disabled:opacity-50"
               >
                 <X className="w-4 h-4" />
                 Reject Match (R)
               </button>
 
               <button
+                disabled={isSubmitting}
                 onClick={() => handleDecision(currentCase.id, 'APPROVE')}
-                className="flex-1 sm:flex-initial bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-2.5 rounded-2xl shadow-md shadow-emerald-600/30 flex items-center justify-center gap-2 text-xs active:scale-95 transition-all"
+                className="flex-1 sm:flex-initial bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-6 py-2.5 rounded-2xl shadow-md shadow-emerald-600/30 flex items-center justify-center gap-2 text-xs active:scale-95 transition-all disabled:opacity-50"
               >
                 <Check className="w-4 h-4" />
                 Approve Match (A)

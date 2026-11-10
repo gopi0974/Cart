@@ -828,6 +828,13 @@ def get_review_queue(db: Session = Depends(get_db)):
             scanned_prod = db.query(Product).filter(Product.barcode == c.scanned_barcode).first()
         
         cart = db.query(Cart).filter(Cart.id == c.cart_id).first()
+        top_cands = None
+        if getattr(c, "top_candidates_json", None):
+            try:
+                top_cands = json.loads(c.top_candidates_json)
+            except Exception:
+                top_cands = None
+
         result.append(ReviewCaseResponse(
             id=c.id,
             alert_id=c.alert_id,
@@ -840,6 +847,7 @@ def get_review_queue(db: Session = Depends(get_db)):
             predicted_product_name=c.predicted_product.name if c.predicted_product else None,
             confidence=c.confidence,
             evidence_image_url=c.evidence_image_url,
+            top_candidates=top_cands,
             status=c.status,
             created_at=c.created_at
         ))

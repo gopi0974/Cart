@@ -312,3 +312,4 @@ class PrivacyDetectorService {
 }
 
 export const privacyDetector = new PrivacyDetectorService();
+

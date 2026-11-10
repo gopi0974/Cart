@@ -160,6 +160,30 @@ export const AlertFeedView: React.FC = () => {
                         </span>
                       )}
 
+                      {alert.alert_type.includes('UNSCANNED') && (
+                        <span className="bg-purple-100 dark:bg-purple-950 text-purple-700 dark:text-purple-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-purple-300 dark:border-purple-800">
+                          UNSCANNED ITEM
+                        </span>
+                      )}
+
+                      {alert.alert_type.includes('MISMATCH') && (
+                        <span className="bg-red-100 dark:bg-red-950 text-red-700 dark:text-red-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-red-300 dark:border-red-800">
+                          MISMATCH
+                        </span>
+                      )}
+
+                      {alert.alert_type.includes('FACE') && (
+                        <span className="bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-300 dark:border-blue-800">
+                          FACE WITHHELD
+                        </span>
+                      )}
+
+                      {alert.alert_type.includes('LOW_CONFIDENCE') && (
+                        <span className="bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-300 dark:border-amber-800">
+                          LOW CONFIDENCE
+                        </span>
+                      )}
+
                       <h3 className="font-semibold text-sm text-slate-900 dark:text-white">
                         {alert.message}
                       </h3>

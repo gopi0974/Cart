@@ -97,7 +97,7 @@ def _ensure_baseline_pieces_idempotent(bind_or_conn) -> None:
                 else:
                     conn.execute(sa.text("ALTER TABLE products ADD COLUMN is_deleted BOOLEAN DEFAULT 0;"))
         
-        if is_connection and not conn.in_transaction():
+        if is_connection and conn.in_transaction():
             conn.commit()
     finally:
         if not is_connection:

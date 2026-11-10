@@ -79,7 +79,9 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             evtType === 'ITEM_MISMATCH' ||
             evtType === 'UNSCANNED_ITEM_DETECTED' ||
             evtType === 'ITEM_REMOVAL_DETECTED' ||
-            evtType === 'ITEM_REMOVAL_INITIATED'
+            evtType === 'ITEM_REMOVAL_INITIATED' ||
+            evtType === 'ITEM_WARNING' ||
+            evtType === 'ALERT_TRIGGERED'
           ) {
             audioFeedback.playWarning();
             refreshSession();
@@ -169,6 +171,16 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   // 1. Shopper clicks "Remove" on an item
   const handleInitiateRemove = async (item: CartItem) => {
     try {
+      if (item.status === 'PENDING') {
+        // A.2 Remove on a PENDING item (scanned but never placed): delete immediately, with no camera check and no rescan.
+        await api.initiateItemRemove(session.id, item.id);
+        setRemovalToast(`${item.product_name} removed.`);
+        setTimeout(() => setRemovalToast(null), 3000);
+        audioFeedback.playItemVerified();
+        await refreshSession();
+        return;
+      }
+
       setActiveRemovalItem(item);
       setRemovalStep('TAKE_OUT');
       setRemovalStatusMsg('Take this item out of the cart, then rescan its barcode.');
@@ -178,8 +190,9 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
       await refreshSession();
 
       // Trigger AI camera check after giving user a moment to reach in
+      const targetId = updatedItem?.id || item.id;
       setTimeout(() => {
-        triggerRemovalVerification(updatedItem.id);
+        triggerRemovalVerification(targetId);
       }, 1600);
     } catch (err: any) {
       alert(err.message || 'Failed to initiate item removal');
@@ -558,7 +571,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                       {item.status === 'VERIFIED' && (
                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800/40">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                          {t.verifiedStatus}
+                          Verified by camera
                           {item.confidence_score && (
                             <span className="opacity-75 font-mono text-[10px]">
                               ({(item.confidence_score * 100).toFixed(0)}%)
@@ -570,35 +583,38 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                       {isItemRemoving && (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/60 px-2.5 py-0.5 rounded-md border border-amber-300 dark:border-amber-700 animate-pulse">
                           <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                          {t.removingStatus || 'REMOVING • Take out of cart'}
+                          Take out of cart, then rescan barcode
                         </span>
                       )}
 
                       {isItemRemovedPending && (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-800 dark:text-blue-300 bg-blue-100 dark:bg-blue-950/60 px-2.5 py-0.5 rounded-md border border-blue-300 dark:border-blue-700">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
-                          {t.removedPendingRescanStatus || 'REMOVED • Rescan barcode to drop'}
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-800 dark:text-red-300 bg-red-100 dark:bg-red-950/60 px-2.5 py-0.5 rounded-md border border-red-300 dark:border-red-700">
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                          Item taken out • Rescan barcode to remove from bill
                         </span>
                       )}
 
                       {item.status === 'PENDING' && (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
                           <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                          {t.pendingStatus}
+                          Scanned • Place item in cart
                         </span>
                       )}
 
-                      {item.status === 'WARNING_MISMATCH' && (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
-                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                          {t.mismatchStatus}
-                        </span>
-                      )}
-
-                      {item.status === 'WARNING_UNSCANNED' && (
-                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2 py-0.5 rounded-md border border-red-300 dark:border-red-700/60">
-                          <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
-                          {t.unscannedStatus}
+                      {(item.status === 'WARNING' || item.status === 'WARNING_MISMATCH' || item.status === 'WARNING_UNSCANNED') && (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700/60">
+                          <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                          <span>
+                            {item.warning_reason === 'MISMATCH' || item.status === 'WARNING_MISMATCH'
+                              ? 'Wrong item detected • Take this out or scan its barcode'
+                              : item.warning_reason === 'REPOSITION'
+                              ? 'Please reposition item or show label'
+                              : item.warning_reason === 'FACE_WITHHELD' || item.warning_reason === 'FACE_IN_PACKAGING' || item.warning_reason === 'LOW_CONFIDENCE'
+                              ? "We can't check this item. Please ask staff"
+                              : item.status === 'WARNING_UNSCANNED'
+                              ? 'Wrong item detected • Take this out or scan its barcode'
+                              : (item.warning_reason || 'Warning • Please check item')}
+                          </span>
                         </span>
                       )}
                     </div>
@@ -710,10 +726,14 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
         {checkoutBlocked && session.items.length > 0 && (
           <p className="text-[11px] text-center text-amber-600 dark:text-amber-400 mt-2 font-medium">
             {hasPendingRemoval
-              ? 'Please complete the item removal before checking out.'
+              ? 'Item removal in progress: please rescan the removed item or cancel before checkout.'
               : session.camera_status === 'OFFLINE'
                 ? "This cart's camera is not connected. Verification is paused. Please ask staff for assistance."
-                : "Checkout opens once all items are placed and verified in cart."}
+                : session.items.some((i) => i.status === 'WARNING' || i.status === 'WARNING_MISMATCH' || i.status === 'WARNING_UNSCANNED')
+                  ? 'Please resolve item warnings or ask staff before checkout.'
+                  : session.items.some((i) => i.status === 'PENDING')
+                    ? 'Place scanned item(s) in cart to verify before checkout.'
+                    : "Checkout opens once all items are placed and verified in cart."}
           </p>
         )}
       </div>
