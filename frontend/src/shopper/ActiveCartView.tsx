@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck,
-  LogOut, ChevronRight, ShoppingCart, RefreshCw, Trash2, X, AlertCircle
+  LogOut, ChevronRight, ShoppingCart, RefreshCw, Trash2, X, AlertCircle, RotateCcw
 } from 'lucide-react';
 import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
@@ -123,6 +123,17 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     const confirmMessage = hasItems
       ? `You have ${session.items.length} item(s) in your basket (₹${session.total_amount.toFixed(2)}). Exiting will end this session and free the cart for other shoppers. Are you sure you want to exit?`
       : 'Exit shopping session and release this cart?';
+
+    if (window.confirm(confirmMessage)) {
+      onDisconnect();
+    }
+  };
+
+  const handleSwitchCart = () => {
+    const hasItems = session.items && session.items.length > 0;
+    const confirmMessage = hasItems
+      ? `You have ${session.items.length} item(s) in your basket. Switching carts will end this session and return to the scanner. Proceed?`
+      : 'End session and switch to a different cart?';
 
     if (window.confirm(confirmMessage)) {
       onDisconnect();
@@ -251,38 +262,55 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
       )}
 
       {/* Top Cart Status Header */}
-      <div className="sticky top-0 z-20 glass-panel border-b border-slate-200 dark:border-slate-800 px-4 py-3 flex items-center justify-between shadow-sm">
-        <div className="flex items-center gap-2.5">
-          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></div>
-          <div>
-            <div className="font-display font-bold text-sm text-slate-900 dark:text-white flex items-center gap-1.5">
-              <span>{session.cart_number}</span>
-              <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">
-                ACTIVE
-              </span>
+      <div className="sticky top-0 z-20 glass-panel border-b border-slate-200 dark:border-slate-800 px-4 py-3 space-y-2 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="font-display font-black text-lg sm:text-xl text-slate-900 dark:text-white tracking-tight">
+                  Connected to {session.cart_number.replace(/^CART-0*/i, 'Cart ')}
+                </h1>
+                <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">
+                  ACTIVE
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-400">
+                Session #{session.id.slice(0, 8)} • Cart ID: {session.cart_number}
+              </div>
             </div>
-            <div className="text-[11px] text-slate-400">
-              Session #{session.id.slice(0, 8)}
-            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={refreshSession}
+              className={`p-2 rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${isRefreshing ? 'animate-spin text-emerald-600' : ''
+                }`}
+              title="Refresh Cart"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleExitClick}
+              className="text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 px-2.5 py-1.5 rounded-xl border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all"
+              title="Exit session and release cart"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Exit
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        {/* Switch Cart Bar */}
+        <div className="flex items-center justify-between pt-1.5 border-t border-slate-200/60 dark:border-slate-800/60 text-xs">
+          <span className="text-slate-500 dark:text-slate-400 text-[11px]">Paired via official QR code</span>
           <button
-            onClick={refreshSession}
-            className={`p-2 rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors ${isRefreshing ? 'animate-spin text-emerald-600' : ''
-              }`}
-            title="Refresh Cart"
+            onClick={handleSwitchCart}
+            className="text-[11px] font-bold text-amber-700 dark:text-amber-300 hover:text-amber-800 dark:hover:text-amber-200 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 px-2.5 py-1 rounded-xl border border-amber-300 dark:border-amber-800/60 flex items-center gap-1.5 active:scale-95 transition-all shadow-sm"
+            title="End this session and switch to another cart"
           >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleExitClick}
-            className="text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 px-2.5 py-1.5 rounded-xl border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all"
-            title="Exit session and release cart"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            Exit
+            <RotateCcw className="w-3 h-3 text-amber-500" />
+            <span>Wrong cart? Switch cart</span>
           </button>
         </div>
       </div>
@@ -296,7 +324,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             <div className="text-xs">
               <div className="font-bold text-sm">Cart Camera Disconnected</div>
               <p className="mt-0.5 leading-relaxed font-medium text-amber-700 dark:text-amber-300">
-                This cart's camera is not connected. Verification is paused. Please ask staff for assistance.
+                This cart's camera is not connected. Verification is paused.
               </p>
             </div>
           </div>

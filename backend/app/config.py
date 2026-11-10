@@ -1,6 +1,7 @@
 import os
 from typing import Optional
 from pathlib import Path
+from urllib.parse import urlparse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -19,7 +20,52 @@ def _normalize_db_url(url: Optional[str]) -> Optional[str]:
         clean_url = clean_url.replace("postgres://", "postgresql://", 1)
     return clean_url
 
+def is_valid_base_url(url: Optional[str], demo_mode: bool = False) -> bool:
+    """
+    Validate public BASE_URL for QR link generation.
+    In production (demo_mode=False), BASE_URL must:
+      1. Be present and non-empty.
+      2. Start with https://
+      3. NOT contain localhost, 127.0.0.1, or 0.0.0.0.
+    In demo mode, http:// and localhost are permitted for local development.
+    """
+    if not url or not str(url).strip():
+        return False
+    clean = str(url).strip()
+    clean_lower = clean.lower()
+    if not demo_mode:
+        if "localhost" in clean_lower or "127.0.0.1" in clean_lower or "0.0.0.0" in clean_lower:
+            return False
+        if not clean_lower.startswith("https://"):
+            return False
+    else:
+        if not (clean_lower.startswith("http://") or clean_lower.startswith("https://")):
+            return False
+    try:
+        parsed = urlparse(clean)
+        return bool(parsed.hostname)
+    except Exception:
+        return False
+
+def get_base_url_host(url: Optional[str]) -> Optional[str]:
+    """
+    Extract host only (no scheme, no port, no credentials/secrets, no paths).
+    Example: 'https://cart-9tds.vercel.app' -> 'cart-9tds.vercel.app'
+    """
+    if not url or not str(url).strip():
+        return None
+    try:
+        clean = str(url).strip()
+        if not clean.startswith(("http://", "https://")):
+            clean = f"https://{clean}"
+        parsed = urlparse(clean)
+        return parsed.hostname
+    except Exception:
+        return None
+
 raw_db_url = os.getenv("DATABASE_URL")
+
+_is_demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
 
 class Settings(BaseModel):
     BASE_DIR: Path = BASE_DIR
@@ -37,14 +83,14 @@ class Settings(BaseModel):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 8  # 8 hours for staff
     
     # Environment & Flags (default: false in production)
-    DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
+    DEMO_MODE: bool = _is_demo_mode
     USE_MOCK: bool = os.getenv("USE_MOCK", "false").lower() in ("true", "1", "yes")
     
     # Cart QR HMAC Signing Secret
     QR_SIGNING_SECRET: str = os.getenv("QR_SIGNING_SECRET", "smartcart-qr-hmac-secret-key-production-2026")
     
     # Public URLs for QR Connect Links & CORS
-    BASE_URL: str = os.getenv("BASE_URL", "http://localhost:5173").rstrip("/")
+    BASE_URL: str = os.getenv("BASE_URL", "http://localhost:5173" if _is_demo_mode else "").rstrip("/")
     API_BASE_URL: str = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "*")
     

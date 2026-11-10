@@ -46,23 +46,29 @@ class SessionService:
     @staticmethod
     async def pair_cart(
         db: Session,
-        qr_token: str,
+        qr_token: Optional[str] = None,
         customer_phone: Optional[str] = None,
         signature: Optional[str] = None,
         cart_number: Optional[str] = None
     ) -> CartSession:
         """Pair mobile phone with a physical cart, verifying HMAC signature and single active session policy."""
         # 1. Lookup cart
-        cart = db.query(Cart).filter(Cart.qr_code_token == qr_token).first()
-        if not cart:
-            c_num = (cart_number or qr_token).upper().strip()
+        cart = None
+        if cart_number:
+            c_num = cart_number.upper().strip()
             cart = db.query(Cart).filter(Cart.cart_number == c_num).first()
+        if not cart and qr_token:
+            cart = db.query(Cart).filter(Cart.qr_code_token == qr_token).first()
             if not cart:
-                raise ValueError("Invalid QR code or Cart Number.")
+                c_num = qr_token.upper().strip()
+                cart = db.query(Cart).filter(Cart.cart_number == c_num).first()
+
+        if not cart:
+            raise ValueError("Cart not found. Please verify the cart number.")
 
         # 2. Reject disabled carts
         if not cart.is_enabled:
-            raise ValueError(f"Cart '{cart.cart_number}' is currently disabled by store management.")
+            raise ValueError(f"Cart '{cart.cart_number}' is currently disabled. Please use another cart.")
 
         # 3. Cryptographic HMAC signature check
         if signature:
@@ -72,7 +78,7 @@ class SessionService:
                 hashlib.sha256
             ).hexdigest()[:16]
             if not hmac.compare_digest(signature, expected_sig):
-                raise ValueError("Security verification failed: Invalid or tampered cart QR signature.")
+                raise ValueError("This cart QR code is invalid or has expired. Please scan the current code on the cart.")
         else:
             if not settings.DEMO_MODE:
                 raise ValueError(

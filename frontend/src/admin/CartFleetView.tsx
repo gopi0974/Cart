@@ -20,6 +20,7 @@ export const CartFleetView: React.FC = () => {
   const [tokenModalData, setTokenModalData] = useState<CartRegistrationResult | null>(null);
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
 
   // Single Cart Print Modal
   const [printCart, setPrintCart] = useState<CartFleetItem | null>(null);
@@ -44,18 +45,19 @@ export const CartFleetView: React.FC = () => {
         setNewCartNumber('CART-001');
       }
 
-      // Generate visual QR data URLs for all carts
+      // Generate visual QR data URLs strictly from server signed_connect_url (never silently use localhost)
       const qrMap: Record<string, string> = {};
       for (const c of data) {
-        const link = c.signed_connect_url || `${window.location.origin}/user?cart=${c.cart_number}&token=${c.qr_code_token}`;
-        try {
-          qrMap[c.id] = await QRCode.toDataURL(link, { 
-            width: 320, 
-            margin: 1,
-            color: { dark: '#0F172A', light: '#FFFFFF' }
-          });
-        } catch (e) {
-          console.error('Failed to generate QR for cart', c.cart_number, e);
+        if (c.signed_connect_url) {
+          try {
+            qrMap[c.id] = await QRCode.toDataURL(c.signed_connect_url, { 
+              width: 320, 
+              margin: 1,
+              color: { dark: '#0F172A', light: '#FFFFFF' }
+            });
+          } catch (e) {
+            console.error('Failed to generate QR for cart', c.cart_number, e);
+          }
         }
       }
       setQrImages(qrMap);
@@ -242,8 +244,24 @@ export const CartFleetView: React.FC = () => {
     }
   };
 
+  const handleCopyLink = (cartId: string, url: string) => {
+    navigator.clipboard.writeText(url);
+    setCopiedLinkId(cartId);
+    setTimeout(() => setCopiedLinkId(null), 2000);
+  };
+
   return (
     <div className="space-y-6 animate-fade-in pb-12">
+      {/* Missing BASE_URL Warning Banner */}
+      {carts.some(c => !c.signed_connect_url) && (
+        <div className="p-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/30 text-amber-800 dark:text-amber-200 flex items-center gap-3 text-xs font-medium print:hidden">
+          <AlertTriangle className="w-5 h-5 flex-shrink-0 text-amber-500" />
+          <div>
+            <span className="font-bold">Set BASE_URL to your public https address</span> (e.g. <code className="bg-amber-500/20 px-1.5 py-0.5 rounded font-mono font-bold">https://cart-9tds.vercel.app</code>) in your environment variables to generate pairing QR codes. Localhost links are strictly blocked in production.
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-800 print:hidden">
         <div>
@@ -385,23 +403,34 @@ export const CartFleetView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Scannable Real QR Graphic */}
+                {/* Scannable Real QR Graphic or BASE_URL Warning */}
                 <div className="bg-slate-50 dark:bg-slate-900/80 rounded-2xl p-4 flex flex-col items-center justify-center border border-slate-100 dark:border-slate-800/80 group relative">
-                  {qrUrl ? (
-                    <img 
-                      src={qrUrl} 
-                      alt={`QR Code for ${c.cart_number}`} 
-                      className="w-44 h-44 rounded-xl shadow-sm bg-white p-2"
-                    />
+                  {c.signed_connect_url && qrUrl ? (
+                    <>
+                      <img 
+                        src={qrUrl} 
+                        alt={`QR Code for ${c.cart_number}`} 
+                        className="w-44 h-44 rounded-xl shadow-sm bg-white p-2"
+                      />
+                      {/* Full link as text under the QR */}
+                      <div className="w-full mt-3 space-y-1.5">
+                        <div className="text-[10px] font-mono text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-950 p-2 rounded-xl break-all select-all border border-slate-200 dark:border-slate-800 text-left leading-tight">
+                          {c.signed_connect_url}
+                        </div>
+                        <div className="text-[10px] font-medium text-slate-500 text-center">
+                          🔒 HMAC Signature Verified
+                        </div>
+                      </div>
+                    </>
                   ) : (
-                    <div className="w-44 h-44 flex items-center justify-center text-slate-400">
-                      <QrCode className="w-16 h-16 animate-pulse" />
+                    <div className="w-full py-8 px-3 flex flex-col items-center justify-center text-center space-y-2 text-amber-600 dark:text-amber-400">
+                      <AlertTriangle className="w-10 h-10 text-amber-500 animate-pulse" />
+                      <div className="font-bold text-xs uppercase tracking-wider">QR Code Blocked</div>
+                      <p className="text-xs font-semibold max-w-[200px]">
+                        Set BASE_URL to your public https address
+                      </p>
                     </div>
                   )}
-
-                  <div className="text-[10px] font-medium text-slate-500 mt-2 text-center max-w-[200px] truncate">
-                    🔒 HMAC Signature Verified
-                  </div>
                 </div>
 
                 {/* Telemetry Strip */}
@@ -437,15 +466,26 @@ export const CartFleetView: React.FC = () => {
                   )}
                 </div>
 
-                {/* Action Buttons Toolbar */}
-                <div className="grid grid-cols-3 gap-2 pt-1">
+                {/* Action Buttons Toolbar: Copy link, Download PNG, Print, Regen */}
+                <div className="grid grid-cols-4 gap-1.5 pt-1">
+                  <button
+                    onClick={() => c.signed_connect_url && handleCopyLink(c.id, c.signed_connect_url)}
+                    disabled={!c.signed_connect_url}
+                    className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all disabled:opacity-40"
+                    title="Copy full pairing link"
+                  >
+                    {copiedLinkId === c.id ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span className="truncate">{copiedLinkId === c.id ? 'Copied' : 'Copy'}</span>
+                  </button>
+
                   <button
                     onClick={() => handleDownloadQR(c)}
-                    className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all"
+                    disabled={!qrUrl}
+                    className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium flex items-center justify-center gap-1 transition-all disabled:opacity-40"
                     title="Download PNG sticker"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Download</span>
+                    <span>PNG</span>
                   </button>
 
                   <button
@@ -687,19 +727,32 @@ export const CartFleetView: React.FC = () => {
 
       {/* Print-Only Handle Sticker Sheet */}
       <div className="hidden print:block p-8">
-        <h1 className="text-xl font-bold mb-4 text-center">SmartCart Official Handle QR Stickers</h1>
+        <h1 className="text-xl font-bold mb-6 text-center">SmartCart Official Handle QR Stickers</h1>
         <div className="grid grid-cols-2 gap-8">
-          {(printCart ? [printCart] : carts).map((c) => (
-            <div key={c.id} className="border-4 border-black rounded-3xl p-6 text-center space-y-3 page-break-inside-avoid">
-              <div className="text-2xl font-black tracking-wider uppercase">{c.cart_number}</div>
-              <div className="text-xs text-slate-600 font-bold uppercase">SmartCart AI Autonomous System</div>
-              {qrImages[c.id] && (
-                <img src={qrImages[c.id]} alt={c.cart_number} className="w-56 h-56 mx-auto border-2 border-black p-2" />
-              )}
-              <div className="text-xs font-mono font-bold">{c.qr_code_token}</div>
-              <div className="text-[11px] font-semibold text-slate-700">Scan with your phone camera to start shopping</div>
-            </div>
-          ))}
+          {(printCart ? [printCart] : carts).map((c) => {
+            const displayNumber = c.cart_number.replace(/^CART-0*/i, 'CART ');
+            return (
+              <div key={c.id} className="border-4 border-black rounded-3xl p-6 text-center space-y-4 page-break-inside-avoid">
+                <div className="text-5xl font-black tracking-wider uppercase">{displayNumber}</div>
+                <div className="text-xs text-slate-700 font-bold uppercase tracking-wider">SmartCart Autonomous Retail System</div>
+                {qrImages[c.id] ? (
+                  <img src={qrImages[c.id]} alt={c.cart_number} className="w-64 h-64 mx-auto border-2 border-black p-2 my-2" />
+                ) : (
+                  <div className="w-64 h-64 mx-auto border-2 border-dashed border-black flex flex-col items-center justify-center p-4 text-xs font-bold text-slate-800">
+                    <div>Set BASE_URL to your public https address</div>
+                  </div>
+                )}
+                <div className="text-base font-extrabold text-slate-900">
+                  Scan with your phone camera to start shopping
+                </div>
+                {c.signed_connect_url && (
+                  <div className="text-[10px] font-mono text-slate-600 break-all pt-1">
+                    {c.signed_connect_url}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

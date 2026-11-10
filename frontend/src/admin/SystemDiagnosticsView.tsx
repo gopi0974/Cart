@@ -188,6 +188,20 @@ export const SystemDiagnosticsView: React.FC<Props> = ({
         </div>
       )}
 
+      {/* Public BASE_URL & QR Warning Banner */}
+      {data?.base_url_warning && (
+        <div className="p-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/30 text-amber-800 dark:text-amber-200 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="text-xs">
+            <div className="font-bold text-sm uppercase tracking-wider">{data.base_url_warning}</div>
+            <p className="mt-1 leading-relaxed">
+              Cart pairing QR generation is disabled because <code>BASE_URL</code> is missing or contains localhost.
+              In your Render service environment variables, set <code className="bg-amber-500/20 px-1.5 py-0.5 rounded font-mono font-bold">BASE_URL=https://cart-9tds.vercel.app</code> (no trailing slash).
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* 2. Main Status Overview Card */}
       <div className="p-5 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3.5">
@@ -598,6 +612,55 @@ export const SystemDiagnosticsView: React.FC<Props> = ({
                 {data?.head_revision || 'None'}
               </span>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* 6. Public Domain & QR Pairing Configuration */}
+      <div className="p-4 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+            <Zap className="w-4 h-4 text-emerald-500" />
+            Public Base URL & QR Pairing Engine
+          </span>
+          {error ? (
+            <span className="text-[11px] font-bold text-red-500 flex items-center gap-1">
+              <XCircle className="w-3.5 h-3.5" /> Could not load
+            </span>
+          ) : loading ? (
+            <span className="text-[11px] font-bold text-slate-400 animate-pulse">Loading...</span>
+          ) : data?.base_url_valid ? (
+            <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 className="w-3.5 h-3.5" /> Configured & Ready
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 text-[11px] font-bold text-amber-500">
+              <AlertTriangle className="w-3.5 h-3.5" /> Configuration Required
+            </span>
+          )}
+        </div>
+
+        {error ? (
+          <div className="py-2 text-center">
+            <p className="text-xs text-slate-400">Could not load base URL state.</p>
+          </div>
+        ) : loading ? (
+          <div className="space-y-2 py-2 animate-pulse">
+            <div className="h-3 bg-slate-100 dark:bg-slate-800 rounded w-1/2" />
+          </div>
+        ) : (
+          <div className="space-y-2 text-xs">
+            <div className="flex justify-between items-center p-2 bg-slate-50 dark:bg-slate-900/50 rounded-xl">
+              <span className="text-slate-500">Public Base URL Host:</span>
+              <span className="font-mono text-slate-800 dark:text-slate-200 font-bold">
+                {data?.base_url_host ? data.base_url_host : 'None (Set BASE_URL)'}
+              </span>
+            </div>
+            {data?.base_url_warning && (
+              <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[11px] font-medium">
+                {data.base_url_warning} (e.g. <code>https://cart-9tds.vercel.app</code>)
+              </div>
+            )}
           </div>
         )}
       </div>

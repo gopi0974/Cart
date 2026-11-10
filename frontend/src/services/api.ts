@@ -235,20 +235,35 @@ export const api = {
   },
 
   // Shopper Mobile Endpoints
-  async pairCart(qrToken: string, phone?: string, signature?: string, cartNumber?: string): Promise<CartSession> {
-    return request<CartSession>('/shopper/pair', {
-      method: 'POST',
-      body: JSON.stringify({ 
-        qr_token: qrToken, 
+  async getShopperConfig(): Promise<{ demo_mode: boolean; base_url?: string | null }> {
+    return request('/shopper/config');
+  },
+
+  async pairCart(
+    cartNumberOrToken: string | { cart_number?: string; qr_token?: string; signature?: string; customer_phone?: string },
+    phone?: string,
+    signature?: string,
+    cartNumber?: string
+  ): Promise<CartSession> {
+    let body: any = {};
+    if (typeof cartNumberOrToken === 'object') {
+      body = cartNumberOrToken;
+    } else {
+      body = {
+        cart_number: cartNumber || cartNumberOrToken,
+        qr_token: cartNumberOrToken.startsWith('QR-') ? cartNumberOrToken : undefined,
         customer_phone: phone,
         signature: signature,
-        cart_number: cartNumber
-      }),
+      };
+    }
+    return request<CartSession>('/shopper/pair', {
+      method: 'POST',
+      body: JSON.stringify(body),
     });
   },
 
-  async connectViaQR(cartNumber: string, qrToken: string, sig?: string, phone?: string): Promise<CartSession> {
-    const params = new URLSearchParams({ cart: cartNumber, token: qrToken });
+  async connectViaQR(cartNumber: string, sig?: string, phone?: string): Promise<CartSession> {
+    const params = new URLSearchParams({ cart: cartNumber });
     if (sig) params.append('sig', sig);
     if (phone) params.append('phone', phone);
     return request<CartSession>(`/shopper/connect?${params.toString()}`);

@@ -4,6 +4,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.config import settings
 from app.models.cart import Cart
 from app.models.session import CartSession
 from app.models.user import User
@@ -88,11 +89,19 @@ async def pair_cart(req: PairSessionRequest, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/config")
+def get_shopper_config():
+    """Public shopper application configuration."""
+    return {
+        "demo_mode": settings.DEMO_MODE,
+        "base_url": settings.BASE_URL if settings.DEMO_MODE else None,
+    }
+
 @router.get("/connect", response_model=SessionResponse)
 async def connect_cart_via_qr(
     cart: str,
-    token: str,
     sig: Optional[str] = None,
+    token: Optional[str] = None,
     phone: Optional[str] = None,
     db: Session = Depends(get_db)
 ):

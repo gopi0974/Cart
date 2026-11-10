@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import settings, is_valid_base_url, get_base_url_host
 from app.database import init_db, SessionLocal, check_db_health, get_db
 from app.utils.seed_data import seed_database
 from app.utils.perf import reset_query_count, get_query_count, db_query_counter
@@ -320,6 +320,10 @@ def _get_detailed_health_data(fresh: bool = False):
     except Exception:
         pass
 
+    base_url_host = get_base_url_host(settings.BASE_URL)
+    base_url_valid = is_valid_base_url(settings.BASE_URL, demo_mode=settings.DEMO_MODE)
+    base_url_warning = None if base_url_valid else "Set BASE_URL to your public https address"
+
     return {
         "status": overall_status,
         "database_ok": db_ok,
@@ -342,6 +346,9 @@ def _get_detailed_health_data(fresh: bool = False):
         "ram_budget_mb": 512.0,
         "demo_mode": settings.DEMO_MODE,
         "use_mock": settings.USE_MOCK,
+        "base_url_host": base_url_host,
+        "base_url_valid": base_url_valid,
+        "base_url_warning": base_url_warning,
     }
 
 

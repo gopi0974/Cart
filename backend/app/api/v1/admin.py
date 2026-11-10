@@ -14,7 +14,7 @@ import json
 import secrets
 import hashlib
 import hmac
-from app.config import settings
+from app.config import settings, is_valid_base_url
 from app.models.user import User
 from app.api.v1.auth import get_current_user, require_admin_or_manager
 from app.schemas.cart import CartResponse, CartCreate, CartRegistrationResponse, CartStatusUpdate
@@ -71,10 +71,17 @@ def generate_cart_hmac(cart_number: str, qr_token: str) -> str:
     msg = f"{cart_number}:{qr_token}".encode("utf-8")
     return hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
 
-def build_signed_connect_url(cart_number: str, qr_token: str) -> str:
-    """Build full live public URL for shopper QR pairing with HMAC verification signature."""
+def build_signed_connect_url(cart_number: str, qr_token: str) -> Optional[str]:
+    """
+    Build full live public URL for shopper QR pairing with HMAC verification signature.
+    Format: BASE_URL/user/connect?cart=<cart_number>&sig=<HMAC signature>
+    Returns None if BASE_URL is missing or contains localhost/127.0.0.1 in production.
+    """
+    base_url = (settings.BASE_URL or "").strip().rstrip("/")
+    if not is_valid_base_url(base_url, demo_mode=settings.DEMO_MODE):
+        return None
     sig = generate_cart_hmac(cart_number, qr_token)
-    return f"{settings.BASE_URL}/user/connect?cart={cart_number}&token={qr_token}&sig={sig}"
+    return f"{base_url}/user/connect?cart={cart_number}&sig={sig}"
 
 @router.get("/carts", response_model=List[CartResponse])
 def list_carts(db: Session = Depends(get_db)):
@@ -87,9 +94,9 @@ def list_carts(db: Session = Depends(get_db)):
             CartSession.status == "ACTIVE"
         ).first()
         
-        # Ensure signed connect url is populated
-        signed_url = c.signed_connect_url or build_signed_connect_url(c.cart_number, c.qr_code_token)
-        if not c.signed_connect_url:
+        # Build signed connect url dynamically using current settings.BASE_URL
+        signed_url = build_signed_connect_url(c.cart_number, c.qr_code_token)
+        if c.signed_connect_url != signed_url:
             c.signed_connect_url = signed_url
             db.commit()
 

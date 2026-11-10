@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 class PairSessionRequest(BaseModel):
-    qr_token: str
+    qr_token: Optional[str] = None
     customer_phone: Optional[str] = None
     signature: Optional[str] = None
     cart_number: Optional[str] = None
