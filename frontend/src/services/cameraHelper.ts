@@ -5,7 +5,7 @@
  * Enforces HTTPS security checks, graceful constraint fallbacks, torch/zoom capabilities, and track cleanup.
  */
 
-export type CameraStatus = 'IDLE' | 'REQUESTING' | 'ACTIVE' | 'BLOCKED' | 'NOT_FOUND' | 'IN_USE' | 'INSECURE' | 'ERROR';
+export type CameraStatus = 'IDLE' | 'REQUESTING' | 'ACTIVE' | 'BLOCKED' | 'NOT_FOUND' | 'IN_USE' | 'INSECURE' | 'NO_PICTURE' | 'ERROR';
 export type CameraPermissionState = 'granted' | 'denied' | 'prompt' | 'unsupported';
 
 export interface CameraErrorResult {
@@ -13,6 +13,11 @@ export interface CameraErrorResult {
   status: CameraStatus;
   message: string;
   originalError?: any;
+}
+
+export interface AttachStreamOptions {
+  checkTimeoutMs?: number;
+  onNoPicture?: (readyState: number) => void;
 }
 
 export class CameraHelper {
@@ -40,15 +45,16 @@ export class CameraHelper {
 
   /**
    * Open the camera stream with concurrency protection:
-   * Immediately stops any existing camera streams first so no two cameras run concurrently.
+   * Stops previous camera streams first, optionally preserving a specified stream.
    */
   static async openCamera(options?: {
     idealWidth?: number;
     idealHeight?: number;
     facingMode?: 'environment' | 'user';
+    preserveStream?: MediaStream | null;
   }): Promise<MediaStream> {
-    // 1. Strict concurrency enforcement: stop all previous streams first
-    this.stopAllStreams();
+    // 1. Strict concurrency enforcement: stop all previous streams except any specified
+    this.stopAllStreams(options?.preserveStream);
 
     // 2. Request fresh back-camera stream
     const stream = await this.getBackCameraStream(options);
@@ -67,19 +73,25 @@ export class CameraHelper {
   }
 
   /**
-   * Immediately stops all active camera tracks across the application
-   * and clears srcObject on all DOM video elements (used on logout/session-expiry).
+   * Immediately stops active camera tracks across the application
+   * and clears srcObject on DOM video elements, optionally preserving one specific stream.
    */
-  static stopAllStreams(): void {
+  static stopAllStreams(exceptStream?: MediaStream | null): void {
     this.activeStreams.forEach((stream) => {
-      this.stopStream(stream);
+      if (stream !== exceptStream) {
+        this.stopStream(stream);
+      }
     });
-    this.activeStreams.clear();
+    if (exceptStream) {
+      this.activeStreams = new Set([exceptStream]);
+    } else {
+      this.activeStreams.clear();
+    }
 
     if (typeof document !== 'undefined') {
       try {
         document.querySelectorAll('video').forEach((video) => {
-          if (video.srcObject instanceof MediaStream) {
+          if (video.srcObject instanceof MediaStream && video.srcObject !== exceptStream) {
             this.stopStream(video.srcObject);
             video.srcObject = null;
           }
@@ -88,6 +100,94 @@ export class CameraHelper {
         console.warn('Error clearing video element streams:', err);
       }
     }
+  }
+
+  /**
+   * Safely attaches a MediaStream to an HTMLVideoElement:
+   * 1. Enforces autoPlay, muted, playsInline, webkit-playsinline attributes.
+   * 2. Sets video.srcObject = stream.
+   * 3. Waits for 'loadedmetadata' event before resolving.
+   * 4. Calls video.play() and safely handles promise rejection.
+   * 5. Checks if videoWidth is 0 after checkTimeoutMs (default 3s).
+   *    If so, logs readyState and calls onNoPicture(readyState).
+   */
+  static async attachStreamToVideo(
+    video: HTMLVideoElement,
+    stream: MediaStream,
+    options?: AttachStreamOptions
+  ): Promise<{ width: number; height: number; readyState: number }> {
+    if (!video) {
+      throw new Error('Video element is required to attach camera stream.');
+    }
+
+    // 1. Set mobile playback attributes
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+
+    // 2. Assign stream to srcObject
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    // 3. Await loadedmetadata event (with 2500ms fallback)
+    await new Promise<void>((resolve) => {
+      if (video.readyState >= 1) {
+        resolve();
+        return;
+      }
+      let resolved = false;
+      const handleMetadata = () => {
+        if (!resolved) {
+          resolved = true;
+          video.removeEventListener('loadedmetadata', handleMetadata);
+          resolve();
+        }
+      };
+      video.addEventListener('loadedmetadata', handleMetadata, { once: true });
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          video.removeEventListener('loadedmetadata', handleMetadata);
+          resolve();
+        }
+      }, 2500);
+    });
+
+    // 4. Await video.play() and catch rejection safely
+    try {
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        await playPromise;
+      }
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.warn('[CameraHelper] video.play() rejected:', err);
+      }
+    }
+
+    // 5. Check videoWidth after 3000ms
+    const checkTimeout = options?.checkTimeoutMs ?? 3000;
+    setTimeout(() => {
+      if (video.srcObject === stream) {
+        if (video.videoWidth === 0 || video.videoHeight === 0) {
+          console.error(
+            `[CameraHelper] Camera is on but videoWidth is 0 after ${checkTimeout}ms. readyState: ${video.readyState}, networkState: ${video.networkState}`
+          );
+          if (options?.onNoPicture) {
+            options.onNoPicture(video.readyState);
+          }
+        }
+      }
+    }, checkTimeout);
+
+    return {
+      width: video.videoWidth || 0,
+      height: video.videoHeight || 0,
+      readyState: video.readyState,
+    };
   }
 
   /**

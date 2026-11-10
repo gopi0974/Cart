@@ -51,6 +51,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
   const streamRef = useRef<MediaStream | null>(null);
   const zxingControlsRef = useRef<any>(null);
   const isStoppingRef = useRef<boolean>(false);
+  const mountSessionIdRef = useRef<number>(0);
 
   // 2 consecutive identical reads debouncing & 2s cooldown
   const pendingCodeRef = useRef<string | null>(null);
@@ -121,6 +122,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
 
   // Start real camera and ZXing reader
   const startRealCamera = useCallback(async () => {
+    const currentSessionId = ++mountSessionIdRef.current;
     isStoppingRef.current = false;
     setCameraStatus('REQUESTING');
     setStatus('STARTING');
@@ -135,11 +137,32 @@ export const BarcodeScannerModal: React.FC<Props> = ({
         idealHeight: 720,
         facingMode: 'environment',
       });
+
+      // Guard React StrictMode double mounts / unmount race
+      if (mountSessionIdRef.current !== currentSessionId) {
+        CameraHelper.stopStream(stream);
+        return;
+      }
+
       streamRef.current = stream;
 
+      // 2. Attach stream to permanently mounted video element
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+        await CameraHelper.attachStreamToVideo(videoRef.current, stream, {
+          checkTimeoutMs: 3000,
+          onNoPicture: (readyState) => {
+            if (mountSessionIdRef.current === currentSessionId) {
+              setCameraStatus('NO_PICTURE');
+              setStatus('ERROR');
+              setErrorMessage(`Camera is on but no picture. Tap to retry. (readyState: ${readyState})`);
+            }
+          },
+        });
+      }
+
+      // Check again after async attach
+      if (mountSessionIdRef.current !== currentSessionId) {
+        return;
       }
 
       // Check hardware capabilities (torch, zoom)
@@ -149,7 +172,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
       setZoomCaps(zCaps);
       if (zCaps) setZoomLevel(zCaps.current);
 
-      // 2. Configure ZXing Multi-Format Reader with all required retail formats
+      // 3. Configure ZXing Multi-Format Reader with all required retail formats
       const hints = new Map<DecodeHintType, any>();
       hints.set(DecodeHintType.POSSIBLE_FORMATS, [
         BarcodeFormat.EAN_13,
@@ -167,7 +190,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
         delayBetweenScanAttempts: 100, // ~10 scans per second
       });
 
-      // 3. Optional speedup: Native BarcodeDetector if available
+      // 4. Optional speedup: Native BarcodeDetector if available
       let nativeDetector: any = null;
       if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
         try {
@@ -196,7 +219,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
         }, 120);
       }
 
-      // 4. Start ZXing continuous video stream decoding
+      // 5. Start ZXing continuous video stream decoding ONLY after video is ready
       if (videoRef.current) {
         const controls = await reader.decodeFromVideoElement(
           videoRef.current,
@@ -225,6 +248,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
       }, 8000);
 
     } catch (err: any) {
+      if (mountSessionIdRef.current !== currentSessionId) return;
       console.error('Failed to initialize barcode camera scanner:', err);
       const parsed = CameraHelper.parseCameraError(err);
       setCameraStatus(parsed.status);
@@ -238,6 +262,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
 
   // Teardown scanner and release hardware
   const stopScanner = useCallback(() => {
+    mountSessionIdRef.current++;
     isStoppingRef.current = true;
     if (tipTimerRef.current) {
       clearTimeout(tipTimerRef.current);
@@ -434,10 +459,21 @@ export const BarcodeScannerModal: React.FC<Props> = ({
       {/* Main Viewfinder Center */}
       <div 
         onClick={handleViewfinderTap}
-        className="relative flex-1 flex flex-col items-center justify-center p-4 overflow-hidden cursor-crosshair"
+        className="relative flex-1 w-full min-h-[300px] flex flex-col items-center justify-center p-4 overflow-hidden cursor-crosshair bg-black"
       >
+        {/* Real Live Video Camera Feed - ALWAYS MOUNTED IN DOM */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${
+            cameraStatus === 'ACTIVE' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+        />
+
         {cameraStatus === 'REQUESTING' ? (
-          <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in">
+          <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in bg-black/80 rounded-2xl backdrop-blur-sm">
             <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
             <div className="font-bold text-sm">Connecting to camera...</div>
             <div className="text-xs text-white/70 mt-1 max-w-xs leading-relaxed">
@@ -458,14 +494,6 @@ export const BarcodeScannerModal: React.FC<Props> = ({
           </div>
         ) : (
           <>
-            {/* Real Live Video Camera Feed */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-            />
 
             {/* Viewfinder Dark Overlay Shroud */}
             <div className="absolute inset-0 bg-black/40 pointer-events-none" />

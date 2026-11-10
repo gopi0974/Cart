@@ -43,6 +43,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   const streamRef = useRef<MediaStream | null>(null);
   const controlsRef = useRef<any>(null);
   const unregisterStreamRef = useRef<(() => void) | null>(null);
+  const mountSessionIdRef = useRef<number>(0);
 
   const { t } = useTranslation();
   const hasAutoAttempted = useRef(false);
@@ -227,6 +228,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   };
 
   const startRealCamera = async () => {
+    const currentSessionId = ++mountSessionIdRef.current;
     setCameraStatus('REQUESTING');
     try {
       const stream = await CameraHelper.openCamera({
@@ -234,6 +236,12 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
         idealWidth: 1280,
         idealHeight: 720,
       });
+
+      if (mountSessionIdRef.current !== currentSessionId) {
+        CameraHelper.stopStream(stream);
+        return;
+      }
+
       streamRef.current = stream;
       unregisterStreamRef.current = CameraHelper.registerStream(stream);
 
@@ -246,9 +254,26 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
         }
       }
 
+      // Attach stream to permanently mounted video element
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+        await CameraHelper.attachStreamToVideo(videoRef.current, stream, {
+          checkTimeoutMs: 3000,
+          onNoPicture: (readyState) => {
+            if (mountSessionIdRef.current === currentSessionId) {
+              setCameraStatus('NO_PICTURE');
+              setError({
+                title: 'Camera is on but no picture',
+                message: `The camera is active but video frames are not rendering (readyState: ${readyState}). Tap retry.`,
+                type: 'generic',
+                canRetry: true,
+              });
+            }
+          },
+        });
+      }
+
+      if (mountSessionIdRef.current !== currentSessionId) {
+        return;
       }
 
       // Initialize ZXing reader for QR Codes
@@ -269,6 +294,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
       }
       setCameraStatus('ACTIVE');
     } catch (err: any) {
+      if (mountSessionIdRef.current !== currentSessionId) return;
       console.error('[ConnectCartView] Scanner start error:', err);
       const parsed = CameraHelper.parseCameraError(err);
       setCameraStatus(parsed.status);
@@ -279,6 +305,7 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
   };
 
   const stopScanner = () => {
+    mountSessionIdRef.current++;
     if (controlsRef.current) {
       try {
         controlsRef.current.stop();
@@ -618,9 +645,20 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
           </div>
 
           {/* Viewport: Explainer vs Real Camera Viewfinder */}
-          <div className="relative flex-1 flex items-center justify-center overflow-hidden p-4">
+          <div className="relative flex-1 w-full min-h-[300px] flex items-center justify-center overflow-hidden p-4 bg-black">
+            {/* Real Live Video Camera Feed - ALWAYS MOUNTED IN DOM */}
+            <video
+              ref={videoRef}
+              playsInline
+              autoPlay
+              muted
+              className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-200 ${
+                cameraStatus === 'ACTIVE' ? 'opacity-100' : 'opacity-0 pointer-events-none'
+              }`}
+            />
+
             {cameraStatus === 'REQUESTING' ? (
-              <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in">
+              <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in bg-black/80 rounded-2xl backdrop-blur-sm">
                 <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
                 <div className="font-bold text-sm">Connecting to camera...</div>
                 <div className="text-xs text-white/70 mt-1 max-w-xs leading-relaxed">
@@ -641,14 +679,6 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
               </div>
             ) : (
               <>
-                <video
-                  ref={videoRef}
-                  playsInline
-                  autoPlay
-                  muted
-                  className="absolute inset-0 w-full h-full object-cover"
-                />
-
                 {/* Viewfinder Target Reticle */}
                 <div className="relative z-10 w-72 h-72 border-2 border-emerald-400 rounded-3xl overflow-hidden shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]">
                   {/* Animated Scan Line */}

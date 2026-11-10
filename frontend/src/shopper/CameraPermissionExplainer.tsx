@@ -146,8 +146,8 @@ export const CameraPermissionExplainer: React.FC<Props> = ({
     );
   }
 
-  // 2. CAMERA IN USE or NOT FOUND
-  if (status === 'IN_USE' || status === 'NOT_FOUND' || status === 'INSECURE' || status === 'ERROR') {
+  // 2. CAMERA IN USE, NOT FOUND, OR NO PICTURE (FRAME FAILURE)
+  if (status === 'IN_USE' || status === 'NOT_FOUND' || status === 'INSECURE' || status === 'NO_PICTURE' || status === 'ERROR') {
     return (
       <div className="p-6 bg-white dark:bg-[#131B2E] rounded-3xl max-w-md w-full mx-auto shadow-2xl border border-amber-200 dark:border-amber-900/60 text-slate-800 dark:text-slate-100 flex flex-col items-center text-center animate-in fade-in zoom-in-95 duration-200">
         <div className="w-14 h-14 rounded-2xl bg-amber-100 dark:bg-amber-950/60 flex items-center justify-center text-amber-600 dark:text-amber-400 mb-4 shadow-inner">
@@ -155,7 +155,9 @@ export const CameraPermissionExplainer: React.FC<Props> = ({
         </div>
 
         <h3 className="font-display font-bold text-lg text-slate-900 dark:text-white mb-1">
-          {status === 'IN_USE'
+          {status === 'NO_PICTURE'
+            ? 'Camera is on but no picture'
+            : status === 'IN_USE'
             ? 'Camera Is in Use'
             : status === 'NOT_FOUND'
             ? 'No Camera Detected'
@@ -165,7 +167,9 @@ export const CameraPermissionExplainer: React.FC<Props> = ({
         </h3>
 
         <p className="text-xs text-slate-600 dark:text-slate-400 mb-5 max-w-xs">
-          {status === 'IN_USE'
+          {status === 'NO_PICTURE'
+            ? 'The camera hardware is active, but video frames are not rendering. Tap retry to restart the camera stream.'
+            : status === 'IN_USE'
             ? 'Your camera is currently in use by another app or browser tab. Please close any other camera apps and tap retry.'
             : status === 'NOT_FOUND'
             ? 'No camera was found on this device. You can still type barcodes or cart numbers manually.'
@@ -181,7 +185,7 @@ export const CameraPermissionExplainer: React.FC<Props> = ({
             className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center justify-center gap-2 shadow-md shadow-emerald-600/20 active:scale-95 transition-all"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            Retry
+            {status === 'NO_PICTURE' ? 'Tap to retry' : 'Retry'}
           </button>
           <button
             type="button"

@@ -4,6 +4,7 @@ import { ShopperApp } from './shopper/ShopperApp';
 import { AdminPortal } from './admin/AdminPortal';
 import { CartDeviceView } from './device/CartDeviceView';
 import { ScannerTestView } from './shopper/ScannerTestView';
+import { CameraTestView } from './shopper/CameraTestView';
 import { LanguageProvider } from './services/i18n';
 
 export const App: React.FC = () => {
@@ -11,6 +12,7 @@ export const App: React.FC = () => {
     <LanguageProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/camera-test" element={<CameraTestView />} />
           <Route path="/scanner-test" element={<ScannerTestView />} />
           <Route path="/cart-device" element={<CartDeviceView />} />
           <Route path="/user" element={<ShopperApp />} />
