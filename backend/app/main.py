@@ -487,12 +487,16 @@ async def websocket_admin_endpoint(
         ws_manager.disconnect_admin(websocket)
 
 @app.websocket("/ws/device")
-async def websocket_device_endpoint(websocket: WebSocket, token: Optional[str] = None):
+async def websocket_device_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
     Dedicated authenticated hardware / webcam streaming channel.
     Authenticates via device token, derives cart context server-side.
     """
-    await handle_device_websocket(websocket, token=token)
+    await handle_device_websocket(websocket, token=token, db=db)
 
 @app.get("/")
 def root():

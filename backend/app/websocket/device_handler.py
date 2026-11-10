@@ -1,10 +1,11 @@
+import asyncio
 import json
 import hashlib
 import logging
 from datetime import datetime
 import numpy as np
 from typing import Optional, Any, Dict
-from fastapi import WebSocket, WebSocketDisconnect, status
+from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.cart import Cart
@@ -17,6 +18,12 @@ import time
 from app.ai.verification_engine import verification_engine
 from app.ai.object_detector import object_detector
 from app.services.alert_service import AlertService
+from app.services.device_watchdog import (
+    record_device_activity,
+    record_device_frame,
+    clear_device_activity,
+    get_frames_per_minute
+)
 
 logger = logging.getLogger("smartcart.device")
 
@@ -232,40 +239,67 @@ async def process_camera_frame(
         except Exception:
             pass
 
-async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = None):
+async def handle_device_websocket(
+    websocket: WebSocket,
+    token: Optional[str] = None,
+    db: Optional[Session] = None
+):
     """
     Dedicated WebSocket handler for Smart Cart Camera Hardware / Laptop Webcam.
-    Authenticates via device token, derives cart identity strictly from server database,
-    and handles heartbeats and motion-triggered frame streams.
-    Compatible with ESP32-CAM binary or JSON payloads.
+    Authenticates via device token in the FIRST MESSAGE (not in the URL).
+    The server derives the cart ID from the token hash only, never from the message body.
+    Rejects unknown or disabled tokens with close codes and log lines without secrets.
+    Limits: max frame size (200 KB), max rate, single connection per cart (replaces previous).
     """
-    # 1. Extract device token (from query string or headers)
-    if not token:
-        token = websocket.query_params.get("token") or websocket.headers.get("x-device-token")
-
-    if not token:
-        logger.warning("Device connection rejected: Missing device authentication token.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing device token")
+    # 1. STRICT URL SECURITY: Reject any token in URL query string or parameter
+    if websocket.query_params.get("token") or token:
+        logger.warning("Device connection rejected: Device token in URL query string is forbidden. Must authenticate via first message.")
+        await websocket.close(code=4003, reason="Token in URL forbidden. Use first-message auth.")
         return
 
-    # 2. Hash token and authenticate against database
-    token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
-    db = SessionLocal()
+    # 2. Accept WebSocket and await first message with 5s timeout
+    await websocket.accept()
+
+    try:
+        raw_first = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        first_payload = json.loads(raw_first)
+    except asyncio.TimeoutError:
+        logger.warning("Device connection rejected: Auth timeout (no first message within 5s).")
+        await websocket.close(code=4001, reason="Auth timeout")
+        return
+    except Exception:
+        logger.warning("Device connection rejected: Malformed first message.")
+        await websocket.close(code=4001, reason="Malformed auth message")
+        return
+
+    if not isinstance(first_payload, dict) or first_payload.get("type") != "auth" or not first_payload.get("token"):
+        logger.warning("Device connection rejected: First message must be type 'auth' with token.")
+        await websocket.close(code=4001, reason="First message must be type 'auth'")
+        return
+
+    raw_token = str(first_payload.get("token")).strip()
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+    # 3. Derive cart identity solely from token hash in database
+    created_db = False
+    if db is None:
+        db = SessionLocal()
+        created_db = True
     cart = None
 
     try:
         cart = db.query(Cart).filter(Cart.device_token_hash == token_hash).first()
 
         if not cart:
-            logger.warning(f"Security Alert: Unknown device token hash '{token_hash[:8]}...'")
+            logger.warning(f"Device auth failed: Unknown device token prefix '{raw_token[:4] if len(raw_token) >= 4 else '***'}...'")
             audit = AuditLog(
                 action="DEVICE_AUTH_FAILURE",
                 entity_type="CART_DEVICE",
-                details_json=json.dumps({"token_prefix": token[:6] if token else "none"})
+                details_json=json.dumps({"token_prefix": raw_token[:4] if len(raw_token) >= 4 else "none"})
             )
             db.add(audit)
             db.commit()
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unknown device token")
+            await websocket.close(code=4004, reason="Unknown device token")
             return
 
         if not cart.is_enabled:
@@ -278,20 +312,20 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
             )
             db.add(audit)
             db.commit()
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Cart is disabled by store staff")
+            await websocket.close(code=4005, reason="Cart is disabled by store staff")
             return
 
-        # 3. Connection approved - derive cart identity strictly from server record
         cart_id = cart.id
         cart_number = cart.cart_number
 
-        await websocket.accept()
+        # 4. Concurrency Policy: Single device connection per cart (new connection replaces previous)
+        await ws_manager.connect_device(cart_id, websocket)
+
         cart.camera_status = "ONLINE"
         cart.last_heartbeat = datetime.utcnow()
         db.commit()
 
         # Record activity timestamp in watchdog
-        from app.services.device_watchdog import record_device_activity, clear_device_activity
         record_device_activity(cart_id)
 
         logger.info(f"Cart camera device connected and verified: {cart_number} (ID: {cart_id})")
@@ -314,14 +348,17 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
 
         # Send welcome ACK to device
         await websocket.send_json({
-            "type": "connected",
+            "type": "auth_ok",
             "cart_id": cart_id,
             "cart_number": cart_number,
-            "status": "ONLINE",
+            "camera_status": "ONLINE",
             "server_time": datetime.utcnow().isoformat()
         })
 
-        # 4. Receive loop: binary frames (ESP32-CAM) and JSON messages (Heartbeats / Base64 frames)
+        # 5. Receive loop: limits (max frame size 200 KB, rate throttling, busy frame drops)
+        MAX_FRAME_CHARS = 200 * 1024 * 2  # base64 representation max
+        last_frame_processed_time = 0.0
+
         while True:
             try:
                 msg = await websocket.receive()
@@ -335,12 +372,15 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
             if msg.get("type") == "websocket.disconnect":
                 break
 
-            # Any incoming message counts as activity for watchdog
             record_device_activity(cart_id)
 
             # Binary JPEG payload (ESP32-CAM direct buffer stream)
             if "bytes" in msg and msg["bytes"]:
                 jpeg_bytes = msg["bytes"]
+                if len(jpeg_bytes) > 200 * 1024:
+                    await websocket.send_json({"type": "frame_error", "message": "Frame exceeds 200 KB limit"})
+                    continue
+                record_device_frame(cart_id)
                 await process_camera_frame(db, cart_id, cart_number, jpeg_bytes, websocket)
 
             # Text payload (JSON or ping)
@@ -358,7 +398,6 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
                 event_type = payload.get("type")
 
                 if event_type == "heartbeat":
-                    # Update heartbeat and battery
                     db_cart = db.query(Cart).filter(Cart.id == cart_id).first()
                     if db_cart:
                         db_cart.last_heartbeat = datetime.utcnow()
@@ -376,11 +415,62 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
                         "timestamp": datetime.utcnow().isoformat()
                     })
 
-                elif event_type == "frame":
-                    frame_data = payload.get("data") or payload.get("image")
+                elif event_type in ("frame", "reference_frame"):
+                    is_reference = event_type == "reference_frame" or bool(payload.get("is_reference", False))
+                    face_present = bool(payload.get("face_present", False))
                     hand_present = bool(payload.get("hand_present", False))
+                    frame_data = payload.get("data") or payload.get("image")
+
+                    # PRIVACY ENFORCEMENT: If face detected, image is discarded immediately
+                    if face_present:
+                        frame_data = None
+
+                    # Size check (200 KB)
+                    if frame_data and len(frame_data) > MAX_FRAME_CHARS:
+                        await websocket.send_json({"type": "frame_error", "message": "Frame exceeds 200 KB limit"})
+                        continue
+
+                    # Rate throttle: max 10 FPS (0.08s min gap)
+                    now_ts = time.time()
+                    if now_ts - last_frame_processed_time < 0.08:
+                        # Drop frame to protect server load
+                        continue
+                    last_frame_processed_time = now_ts
+
+                    # Record frame in watchdog (updates rolling frames per minute & in-memory preview)
+                    record_device_frame(cart_id, frame_data, is_reference=is_reference)
+
+                    if is_reference and frame_data:
+                        try:
+                            img_bgr, _ = verification_engine._decode_to_cv2(frame_data)
+                            tracker = get_tracker(cart_id)
+                            tracker.ref_background = img_bgr.copy()
+                        except Exception:
+                            pass
+                        await websocket.send_json({
+                            "type": "reference_ack",
+                            "status": "REFERENCE_SAVED",
+                            "cart_number": cart_number,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        continue
+
                     if frame_data:
-                        await process_camera_frame(db, cart_id, cart_number, frame_data, websocket, hand_present=hand_present)
+                        # Process frame if not a face and under limit
+                        await process_camera_frame(
+                            db,
+                            cart_id,
+                            cart_number,
+                            frame_data,
+                            websocket,
+                            hand_present=hand_present
+                        )
+                    else:
+                        await websocket.send_json({
+                            "type": "frame_ack",
+                            "status": "FACE_REDACTED" if face_present else "METADATA_ONLY",
+                            "frames_per_minute": get_frames_per_minute(cart_id)
+                        })
 
                 elif event_type == "motion":
                     state = payload.get("state")
@@ -397,7 +487,7 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
     finally:
         if cart:
             try:
-                from app.services.device_watchdog import clear_device_activity
+                ws_manager.disconnect_device(cart.id, websocket)
                 clear_device_activity(cart.id)
                 db_cart = db.query(Cart).filter(Cart.id == cart.id).first()
                 if db_cart:
@@ -416,4 +506,5 @@ async def handle_device_websocket(websocket: WebSocket, token: Optional[str] = N
                     })
             except Exception as ex:
                 logger.error(f"Error updating cart offline status: {ex}")
-        db.close()
+        if created_db and db:
+            db.close()

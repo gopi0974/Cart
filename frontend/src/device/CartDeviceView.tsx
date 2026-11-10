@@ -3,20 +3,20 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Camera,
   CameraOff,
-  Radio,
+  Cpu,
   Wifi,
   WifiOff,
-  Cpu,
-  Activity,
-  Terminal,
-  ShieldCheck,
-  ShieldAlert,
-  Layers,
-  Sparkles,
   RefreshCw,
   Eye,
   EyeOff,
-  Trash2
+  Layers,
+  ShieldCheck,
+  ShieldAlert,
+  Trash2,
+  AlertTriangle,
+  Activity,
+  UserCheck,
+  Hand
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
 import { getApiBaseUrl } from '../services/api';
@@ -30,23 +30,32 @@ interface LogEntry {
 
 export const CartDeviceView: React.FC = () => {
   const [searchParams] = useSearchParams();
-  const initialCart = searchParams.get('cart') || 'CART-001';
+  const initialCart = searchParams.get('cart') || 'CART-003';
   
   const [selectedCart, setSelectedCart] = useState(initialCart);
-  const [deviceToken, setDeviceToken] = useState(() => {
-    return sessionStorage.getItem(`device_token_${initialCart}`) || 'CART001_SECRET_TOKEN_2026';
-  });
-  const [showToken, setShowToken] = useState(false);
+  
+  // STRICT SECURITY RULE: Device token is typed/pasted once and kept in React MEMORY ONLY.
+  // Never stored in localStorage, sessionStorage, URL or logs.
+  const [deviceToken, setDeviceToken] = useState<string>('');
+  const [showToken, setShowToken] = useState<boolean>(false);
   const [availableCarts, setAvailableCarts] = useState<Array<{ id: string; cart_number: string }>>([]);
 
-  const [isRunning, setIsRunning] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<'CONNECTING' | 'ONLINE' | 'OFFLINE'>('OFFLINE');
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<'CONNECTING' | 'ONLINE' | 'OFFLINE' | 'RECONNECTING'>('OFFLINE');
   const [statusMessage, setStatusMessage] = useState<string>('');
-  const [isMotion, setIsMotion] = useState(false);
-  const [telemetry, setTelemetry] = useState<{ fps: number; sizeKb: number; count: number }>({
+  const [isMotion, setIsMotion] = useState<boolean>(false);
+  const [motionLevel, setMotionLevel] = useState<number>(0);
+  
+  // Vision flags
+  const [handPresent, setHandPresent] = useState<boolean>(false);
+  const [facePresent, setFacePresent] = useState<boolean>(false);
+  const [faceWithheldCount, setFaceWithheldCount] = useState<number>(0);
+
+  const [telemetry, setTelemetry] = useState<{ fps: number; sizeKb: number; count: number; lastHeartbeat: string }>({
     fps: 0,
     sizeKb: 0,
-    count: 0
+    count: 0,
+    lastHeartbeat: 'Never'
   });
 
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -63,14 +72,14 @@ export const CartDeviceView: React.FC = () => {
     ]);
   };
 
-  // Auto-scroll logs
+  // Auto-scroll event log
   useEffect(() => {
     if (logContainerRef.current) {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [logs]);
 
-  // Load available carts from API
+  // Load available carts list
   useEffect(() => {
     fetch(`${getApiBaseUrl()}/shopper/available-carts`)
       .then((res) => res.json())
@@ -80,7 +89,6 @@ export const CartDeviceView: React.FC = () => {
         }
       })
       .catch(() => {
-        // Fallback default list
         setAvailableCarts([
           { id: '1', cart_number: 'CART-001' },
           { id: '2', cart_number: 'CART-002' },
@@ -89,23 +97,6 @@ export const CartDeviceView: React.FC = () => {
       });
   }, []);
 
-  // Update token when cart changes
-  const handleCartChange = (cartNum: string) => {
-    setSelectedCart(cartNum);
-    const saved = sessionStorage.getItem(`device_token_${cartNum}`);
-    if (saved) {
-      setDeviceToken(saved);
-    } else if (cartNum === 'CART-001') {
-      setDeviceToken('CART001_SECRET_TOKEN_2026');
-    } else if (cartNum === 'CART-002') {
-      setDeviceToken('CART002_SECRET_TOKEN_2026');
-    } else if (cartNum === 'CART-003') {
-      setDeviceToken('CART003_SECRET_TOKEN_2026');
-    } else {
-      setDeviceToken('');
-    }
-  };
-
   const handleStart = async () => {
     if (!deviceToken.trim()) {
       addLog('Error: Please enter or paste the Cart Device Token.', 'error');
@@ -113,11 +104,9 @@ export const CartDeviceView: React.FC = () => {
     }
     if (!videoRef.current) return;
 
-    // Save token in session memory
-    sessionStorage.setItem(`device_token_${selectedCart}`, deviceToken.trim());
-
     addLog(`Initializing camera device for ${selectedCart}...`, 'info');
     setIsRunning(true);
+    setConnectionStatus('CONNECTING');
 
     const manager = new CartCameraManager({
       token: deviceToken.trim(),
@@ -125,25 +114,36 @@ export const CartDeviceView: React.FC = () => {
       onStatusChange: (status, msg) => {
         setConnectionStatus(status);
         if (msg) setStatusMessage(msg);
-        if (status === 'OFFLINE' && msg?.toLowerCase().includes('token')) {
+        if (status === 'OFFLINE' && (msg?.toLowerCase().includes('token') || msg?.toLowerCase().includes('disabled'))) {
           setIsRunning(false);
         }
       },
-      onMotionChange: (motion) => {
+      onMotionChange: (motion, level) => {
         setIsMotion(motion);
+        setMotionLevel(level || 0);
+      },
+      onVisionFlagsChange: (flags) => {
+        setHandPresent(flags.handPresent);
+        setFacePresent(flags.facePresent);
       },
       onLog: (text, level) => {
         addLog(text, level);
       },
-      onFrameSent: ({ fps, sizeKb }) => {
+      onFrameSent: ({ fps, sizeKb, faceWithheld }) => {
+        const now = new Date();
+        const timeStr = now.toTimeString().split(' ')[0];
         setTelemetry((prev) => ({
           fps,
           sizeKb,
-          count: prev.count + 1
+          count: prev.count + 1,
+          lastHeartbeat: timeStr
         }));
+        if (faceWithheld) {
+          setFaceWithheldCount((c) => c + 1);
+        }
       },
       onVerificationResult: (res) => {
-        addLog(`AI Camera Match: ${res.product_name} (${res.barcode}) CONFIRMED`, 'success');
+        addLog(`AI Verification Event: ${res.product_name || 'Item'} (${res.action || 'MATCH'})`, 'success');
       }
     });
 
@@ -151,7 +151,7 @@ export const CartDeviceView: React.FC = () => {
 
     try {
       await manager.start();
-    } catch (err) {
+    } catch {
       setIsRunning(false);
       cameraManagerRef.current = null;
     }
@@ -165,8 +165,22 @@ export const CartDeviceView: React.FC = () => {
     setIsRunning(false);
     setConnectionStatus('OFFLINE');
     setIsMotion(false);
-    setTelemetry({ fps: 0, sizeKb: 0, count: 0 });
+    setMotionLevel(0);
+    setHandPresent(false);
+    setFacePresent(false);
+    setTelemetry((prev) => ({ ...prev, fps: 0, sizeKb: 0 }));
     addLog('Camera streaming stopped by operator.', 'info');
+  };
+
+  const handleCaptureReference = () => {
+    if (!cameraManagerRef.current) {
+      addLog('Cannot capture reference: Camera is not running.', 'warn');
+      return;
+    }
+    const ok = cameraManagerRef.current.captureReferenceFrame();
+    if (ok) {
+      addLog('Empty cart reference captured and sent to server.', 'success');
+    }
   };
 
   useEffect(() => {
@@ -179,6 +193,7 @@ export const CartDeviceView: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#070A12] text-slate-100 flex flex-col font-sans select-none">
+      
       {/* Top Telemetry Header */}
       <header className="border-b border-slate-800/80 bg-[#0B0F19]/90 backdrop-blur-md px-6 py-3.5 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -188,31 +203,36 @@ export const CartDeviceView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <span className="font-display font-bold text-sm tracking-wide text-white uppercase">
-                SmartCart Device Simulator
+                Cart Camera Device Console
               </span>
               <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950/80 border border-cyan-800/60 text-cyan-300">
-                ESP32-CAM Mode
+                Overhead Vision Streamer
               </span>
             </div>
             <p className="text-xs text-slate-400 font-mono">
-              Webcam overhead camera & motion detector
+              Webcam overhead camera & motion detector for {selectedCart}
             </p>
           </div>
         </div>
 
         {/* Live Status Indicator */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border font-mono text-xs font-semibold bg-slate-900/60">
+          <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl border font-mono text-xs font-semibold bg-slate-900/60">
             {connectionStatus === 'ONLINE' ? (
               <>
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
                 <Wifi className="w-4 h-4 text-emerald-400" />
-                <span className="text-emerald-400">ONLINE</span>
+                <span className="text-emerald-400 font-bold">ONLINE</span>
               </>
             ) : connectionStatus === 'CONNECTING' ? (
               <>
                 <RefreshCw className="w-4 h-4 text-amber-400 animate-spin" />
                 <span className="text-amber-400">CONNECTING...</span>
+              </>
+            ) : connectionStatus === 'RECONNECTING' ? (
+              <>
+                <RefreshCw className="w-4 h-4 text-amber-400 animate-spin" />
+                <span className="text-amber-400">RECONNECTING...</span>
               </>
             ) : (
               <>
@@ -226,16 +246,17 @@ export const CartDeviceView: React.FC = () => {
 
       {/* Main Hardware Console Grid */}
       <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 max-w-7xl mx-auto w-full">
+        
         {/* Left Column: Camera Preview & Viewfinder */}
         <div className="lg:col-span-7 flex flex-col gap-4">
           <div className="relative bg-[#0D1322] border border-slate-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col items-center justify-center min-h-[420px] aspect-[4/3]">
-            {/* Live Video Element */}
+            {/* Live Video Element - ALWAYS MOUNTED */}
             <video
               ref={videoRef}
               autoPlay
               playsInline
               muted
-              className={`w-full h-full object-cover ${isRunning ? 'block' : 'hidden'}`}
+              className={`w-full h-full object-cover transition-opacity duration-200 ${isRunning ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
             />
 
             {/* Offline / Idle Placeholder */}
@@ -248,199 +269,204 @@ export const CartDeviceView: React.FC = () => {
                   Camera Feed Inactive
                 </h3>
                 <p className="text-xs text-slate-500 max-w-sm mt-1">
-                  Click 'Start Camera' below to initialize laptop webcam overhead stream and calibrate motion detection.
+                  Enter device token and tap &ldquo;Start Camera Stream&rdquo; to connect this laptop webcam as {selectedCart}&rsquo;s overhead camera.
                 </p>
               </div>
             )}
 
-            {/* Viewfinder Overlays (HUD) */}
+            {/* Live Overlays when active */}
             {isRunning && (
               <>
-                {/* Viewfinder Corner Reticles */}
-                <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-cyan-400/80 pointer-events-none"></div>
-                <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-cyan-400/80 pointer-events-none"></div>
-                <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-cyan-400/80 pointer-events-none"></div>
-                <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-cyan-400/80 pointer-events-none"></div>
-
-                {/* Overhead Crosshair Center */}
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-30">
-                  <div className="w-12 h-12 border border-dashed border-white/60 rounded-full"></div>
-                </div>
-
-                {/* Top Overlay Badges */}
-                <div className="absolute top-4 inset-x-4 flex items-center justify-between pointer-events-none">
-                  <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-cyan-300 flex items-center gap-1.5 shadow-lg">
-                    <Radio className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                    <span>640×480 • 75% Q</span>
-                  </div>
-
-                  {/* Motion Sensor Dynamic Pill */}
-                  <div className={`px-3 py-1 rounded-lg backdrop-blur-md border text-[11px] font-mono font-bold flex items-center gap-2 transition-all ${
-                    isMotion
-                      ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 shadow-lg shadow-emerald-500/20 animate-pulse'
-                      : 'bg-black/60 border-white/10 text-slate-400'
+                {/* Vision Feature Badges */}
+                <div className="absolute top-4 left-4 flex flex-col gap-2 z-10">
+                  <div className={`px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold flex items-center gap-1.5 backdrop-blur-md border ${
+                    isMotion 
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-lg shadow-emerald-500/20' 
+                      : 'bg-black/60 text-slate-400 border-white/10'
                   }`}>
-                    <Activity className={`w-3.5 h-3.5 ${isMotion ? 'text-emerald-400' : 'text-slate-500'}`} />
-                    <span>{isMotion ? 'MOTION DETECTED (STREAMING)' : 'IDLE (STANDBY)'}</span>
+                    <Activity className={`w-3.5 h-3.5 ${isMotion ? 'animate-pulse text-emerald-400' : ''}`} />
+                    <span>MOTION: {isMotion ? `ACTIVE (${(motionLevel * 100).toFixed(0)}%)` : 'IDLE (10s Keep-Alive)'}</span>
                   </div>
+
+                  <div className={`px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold flex items-center gap-1.5 backdrop-blur-md border ${
+                    handPresent 
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' 
+                      : 'bg-black/60 text-slate-500 border-white/10'
+                  }`}>
+                    <Hand className="w-3.5 h-3.5" />
+                    <span>HAND: {handPresent ? 'PRESENT' : 'CLEAR'}</span>
+                  </div>
+
+                  {facePresent && (
+                    <div className="px-2.5 py-1 rounded-xl text-[11px] font-mono font-bold flex items-center gap-1.5 backdrop-blur-md bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                      <UserCheck className="w-3.5 h-3.5 text-amber-400" />
+                      <span>FACE DETECTED: IMAGE WITHHELD</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Bottom Telemetry HUD */}
-                <div className="absolute bottom-4 inset-x-4 flex items-center justify-between pointer-events-none">
-                  <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-slate-300">
-                    Target: <span className="text-white font-bold">{selectedCart}</span>
+                <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between text-[11px] font-mono text-white/90 bg-black/70 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-white/10 z-10">
+                  <div>
+                    <span className="text-slate-400">FPS:</span> <span className="font-bold text-cyan-400">{telemetry.fps}</span>
+                    <span className="mx-2 text-slate-600">|</span>
+                    <span className="text-slate-400">Size:</span> <span className="font-bold">{telemetry.sizeKb} KB</span>
+                    <span className="mx-2 text-slate-600">|</span>
+                    <span className="text-slate-400">Frames:</span> <span className="font-bold text-emerald-400">{telemetry.count}</span>
                   </div>
-
-                  <div className="px-2.5 py-1 rounded-lg bg-black/60 backdrop-blur-md border border-white/10 text-[11px] font-mono text-slate-300 flex items-center gap-3">
-                    <span>Rate: <strong className="text-cyan-300">{telemetry.fps} FPS</strong></span>
-                    <span>Frame: <strong className="text-cyan-300">{telemetry.sizeKb} KB</strong></span>
-                    <span>Sent: <strong className="text-cyan-300">{telemetry.count}</strong></span>
+                  <div>
+                    <span className="text-slate-400">Heartbeat:</span> <span className="text-slate-200">{telemetry.lastHeartbeat}</span>
                   </div>
                 </div>
               </>
             )}
           </div>
 
-          {/* Action Control Bar */}
-          <div className="bg-[#0D1322] border border-slate-800 rounded-2xl p-4 flex items-center justify-between gap-4">
-            <div className="text-xs text-slate-400">
-              {isRunning ? (
-                <span className="flex items-center gap-2 text-emerald-400 font-mono">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                  Stream active • Frames sent only on motion
-                </span>
-              ) : (
-                <span>Webcam idle. Start camera to connect.</span>
-              )}
+          {/* Privacy Note Banner */}
+          <div className="p-4 bg-emerald-950/20 border border-emerald-500/30 rounded-2xl text-xs text-emerald-200 flex items-start gap-3">
+            <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <div className="font-bold text-emerald-300">Privacy Protection Active</div>
+              <p className="text-[11px] text-emerald-400/90 leading-relaxed">
+                In-device vision analysis runs entirely in your local browser. If any shopper or staff face enters the camera view, image frames are automatically withheld on this device and are never sent to the server.
+                {faceWithheldCount > 0 && <span className="font-bold ml-1 text-white">({faceWithheldCount} frames withheld so far)</span>}
+              </p>
             </div>
-
-            <button
-              onClick={isRunning ? handleStop : handleStart}
-              className={`px-6 py-2.5 rounded-xl font-medium text-sm transition-all flex items-center gap-2 font-display ${
-                isRunning
-                  ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-lg shadow-rose-600/30 active:scale-95'
-                  : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-600/30 active:scale-95'
-              }`}
-            >
-              {isRunning ? (
-                <>
-                  <CameraOff className="w-4 h-4" />
-                  Stop Camera
-                </>
-              ) : (
-                <>
-                  <Camera className="w-4 h-4" />
-                  Start Camera
-                </>
-              )}
-            </button>
           </div>
         </div>
 
-        {/* Right Column: Configuration & Real-Time Event Log */}
+        {/* Right Column: Controls, Credentials & Log */}
         <div className="lg:col-span-5 flex flex-col gap-4">
-          {/* Cart & Device Token Credentials Card */}
-          <div className="bg-[#0D1322] border border-slate-800 rounded-3xl p-5 shadow-xl">
-            <div className="flex items-center gap-2.5 mb-4">
-              <ShieldCheck className="w-5 h-5 text-cyan-400" />
-              <h3 className="font-semibold text-sm text-slate-200 uppercase tracking-wider font-display">
-                Device Authentication
-              </h3>
+          
+          {/* Hardware Configuration Card */}
+          <div className="bg-[#0D1322] border border-slate-800 rounded-3xl p-5 shadow-xl space-y-4">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-cyan-400" />
+              Cart Device Settings
+            </h2>
+
+            {/* Cart Selector */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
+                Cart Assignment
+              </label>
+              <select
+                value={selectedCart}
+                onChange={(e) => setSelectedCart(e.target.value)}
+                disabled={isRunning}
+                className="w-full bg-[#131B2E] border border-slate-700 text-white rounded-xl px-3.5 py-2.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50"
+              >
+                {availableCarts.map((c) => (
+                  <option key={c.cart_number} value={c.cart_number}>
+                    {c.cart_number}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div className="space-y-4">
-              {/* Cart Selection */}
-              <div>
-                <label className="block text-xs font-mono text-slate-400 uppercase tracking-wider mb-1.5">
-                  Assigned Cart Number
+            {/* Device Token Input (Memory only, never stored in localStorage) */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  Device Authentication Token
                 </label>
-                <select
-                  value={selectedCart}
-                  onChange={(e) => handleCartChange(e.target.value)}
-                  disabled={isRunning}
-                  className="w-full bg-[#080C16] border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50 cursor-pointer"
-                >
-                  {availableCarts.map((c) => (
-                    <option key={c.id} value={c.cart_number}>
-                      {c.cart_number}
-                    </option>
-                  ))}
-                </select>
+                <span className="text-[10px] text-amber-400 font-mono">Kept in memory only</span>
               </div>
 
-              {/* Device Token */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-mono text-slate-400 uppercase tracking-wider">
-                    Secret Device Token
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setShowToken(!showToken)}
-                    className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
-                  >
-                    {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    <span>{showToken ? 'Hide' : 'Reveal'}</span>
-                  </button>
-                </div>
+              <div className="relative">
                 <input
                   type={showToken ? 'text' : 'password'}
                   value={deviceToken}
                   onChange={(e) => setDeviceToken(e.target.value)}
+                  placeholder="Paste cart device token from Admin > Carts..."
                   disabled={isRunning}
-                  placeholder="Paste cart device token..."
-                  className="w-full bg-[#080C16] border border-slate-700 text-slate-200 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50"
+                  className="w-full bg-[#131B2E] border border-slate-700 text-white rounded-xl px-3.5 py-2.5 pr-10 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-cyan-500 disabled:opacity-50"
                 />
-                <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                  Stored strictly in memory. Server authenticates via SHA-256 hash.
-                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  title={showToken ? 'Hide token' : 'Show token'}
+                >
+                  {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
+              <p className="text-[10px] text-slate-500 mt-1">
+                Obtain this token from <strong>Admin &gt; Carts &gt; Device Token</strong>. It is sent in the first WebSocket message and never stored.
+              </p>
+            </div>
+
+            {/* Main Action Buttons */}
+            <div className="flex gap-2 pt-2">
+              {!isRunning ? (
+                <button
+                  onClick={handleStart}
+                  className="flex-1 py-3 px-4 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-600/30 active:scale-95 transition-all"
+                >
+                  <Camera className="w-4 h-4" />
+                  Start Camera Stream
+                </button>
+              ) : (
+                <button
+                  onClick={handleStop}
+                  className="flex-1 py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-600/30 active:scale-95 transition-all"
+                >
+                  <CameraOff className="w-4 h-4" />
+                  Stop Camera Stream
+                </button>
+              )}
+
+              {isRunning && (
+                <button
+                  onClick={handleCaptureReference}
+                  className="py-3 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95"
+                  title="Capture empty cart reference frame"
+                >
+                  <Layers className="w-4 h-4" />
+                  <span>Capture Ref</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Real-Time Terminal Event Log */}
-          <div className="bg-[#0D1322] border border-slate-800 rounded-3xl p-5 shadow-xl flex-1 flex flex-col min-h-[300px]">
-            <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
-                <Terminal className="w-4 h-4 text-cyan-400" />
-                <span className="font-semibold text-xs text-slate-300 font-mono uppercase tracking-wider">
-                  Hardware Event Log
-                </span>
-              </div>
+          {/* Event Log Console Card */}
+          <div className="bg-[#0D1322] border border-slate-800 rounded-3xl p-5 shadow-xl flex-1 flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Hardware Event Log
+              </span>
               <button
                 onClick={() => setLogs([])}
-                className="text-slate-500 hover:text-slate-300 transition-colors p-1"
-                title="Clear Log"
+                className="text-slate-500 hover:text-slate-300 text-xs flex items-center gap-1"
+                title="Clear log"
               >
                 <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear</span>
               </button>
             </div>
 
-            {/* Scrollable Log Container */}
             <div
               ref={logContainerRef}
-              className="flex-1 bg-[#050811] rounded-2xl p-3 font-mono text-xs overflow-y-auto space-y-1.5 border border-slate-900 max-h-[340px]"
+              className="flex-1 min-h-[220px] max-h-[320px] overflow-y-auto space-y-1.5 pt-3 font-mono text-[11px]"
             >
               {logs.length === 0 ? (
-                <div className="text-slate-600 text-center py-8">
-                  Ready. Start camera to stream telemetry.
+                <div className="text-slate-600 italic text-center py-6">
+                  No events yet. Start the stream to begin session logging.
                 </div>
               ) : (
                 logs.map((log) => (
-                  <div key={log.id} className="flex items-start gap-2 leading-relaxed">
-                    <span className="text-slate-500 flex-shrink-0 text-[10px]">
-                      [{log.time}]
-                    </span>
+                  <div key={log.id} className="flex items-start gap-2">
+                    <span className="text-slate-500 shrink-0">{log.time}</span>
                     <span
-                      className={
-                        log.level === 'success'
-                          ? 'text-emerald-400'
+                      className={`break-all ${
+                        log.level === 'error'
+                          ? 'text-rose-400 font-bold'
                           : log.level === 'warn'
                           ? 'text-amber-400'
-                          : log.level === 'error'
-                          ? 'text-rose-400 font-semibold'
+                          : log.level === 'success'
+                          ? 'text-emerald-400'
                           : 'text-slate-300'
-                      }
+                      }`}
                     >
                       {log.text}
                     </span>
@@ -449,8 +475,10 @@ export const CartDeviceView: React.FC = () => {
               )}
             </div>
           </div>
+
         </div>
       </main>
+
     </div>
   );
 };

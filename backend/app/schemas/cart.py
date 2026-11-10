@@ -22,6 +22,8 @@ class CartResponse(BaseModel):
     battery_level: int
     camera_status: str
     last_heartbeat: datetime
+    last_seen: Optional[datetime] = None
+    frames_per_minute: Optional[int] = 0
     active_session_id: Optional[str] = None
     item_count: Optional[int] = 0
     total_amount: Optional[float] = 0.0

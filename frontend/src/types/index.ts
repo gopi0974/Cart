@@ -95,6 +95,8 @@ export interface CartFleetItem {
   battery_level: number;
   camera_status: 'ONLINE' | 'DEGRADED' | 'OFFLINE';
   last_heartbeat: string;
+  last_seen?: string;
+  frames_per_minute?: number;
   active_session_id?: string;
   item_count: number;
   total_amount: number;

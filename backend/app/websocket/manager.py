@@ -11,6 +11,35 @@ class ConnectionManager:
         self.cart_connections: Dict[str, List[WebSocket]] = {}
         # Active staff admin portal connections
         self.admin_connections: List[WebSocket] = []
+        # Dedicated cart camera hardware/laptop connections (single connection per cart_id)
+        self.device_connections: Dict[str, WebSocket] = {}
+
+    async def connect_device(self, cart_id: str, websocket: WebSocket) -> None:
+        """Register a cart device WebSocket, disconnecting any previous device on this cart."""
+        if cart_id in self.device_connections:
+            old_ws = self.device_connections[cart_id]
+            if old_ws != websocket:
+                try:
+                    await old_ws.close(code=4009, reason="Replaced by new device connection")
+                except Exception:
+                    pass
+        self.device_connections[cart_id] = websocket
+
+    def disconnect_device(self, cart_id: str, websocket: WebSocket = None):
+        """Unregister a cart device WebSocket."""
+        if cart_id in self.device_connections:
+            if websocket is None or self.device_connections[cart_id] == websocket:
+                del self.device_connections[cart_id]
+
+    async def close_device_connection(self, cart_id: str, code: int = 4005, reason: str = "Device disconnected"):
+        """Explicitly disconnect active camera device for a cart (e.g. on token regeneration or disable)."""
+        if cart_id in self.device_connections:
+            ws = self.device_connections.pop(cart_id, None)
+            if ws:
+                try:
+                    await ws.close(code=code, reason=reason)
+                except Exception:
+                    pass
 
     async def connect_cart(self, websocket: WebSocket, cart_id: str):
         if websocket.client_state == WebSocketState.CONNECTING:

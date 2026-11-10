@@ -462,6 +462,21 @@ export const api = {
     return request<CartFleetItem[]>('/admin/carts');
   },
 
+  async getCartCameraPreview(cartId: string): Promise<{
+    cart_id: string;
+    cart_number: string;
+    camera_status: string;
+    has_frame: boolean;
+    frame_data?: string | null;
+    captured_at?: string | null;
+    is_reference?: boolean;
+    frames_per_minute: number;
+    last_seen?: string | null;
+    warning?: string | null;
+  }> {
+    return request(`/admin/carts/${cartId}/camera-preview`);
+  },
+
   async registerCart(cartNumber: string): Promise<CartRegistrationResult> {
     return request<CartRegistrationResult>('/admin/carts', {
       method: 'POST',

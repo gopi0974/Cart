@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Plus, Printer, QrCode, Download, RefreshCw, Key, ShieldCheck, 
-  Copy, Check, AlertTriangle, Power, ShoppingCart, ExternalLink, Battery, Camera,
+  Copy, Check, AlertTriangle, Power, ShoppingCart, ExternalLink, Battery, Camera, CameraOff,
   Edit3, RotateCcw, X, Unlock, Save
 } from 'lucide-react';
 import QRCode from 'qrcode';
@@ -24,6 +24,11 @@ export const CartFleetView: React.FC = () => {
 
   // Single Cart Print Modal
   const [printCart, setPrintCart] = useState<CartFleetItem | null>(null);
+
+  // Test Camera Modal State
+  const [testingCameraCart, setTestingCameraCart] = useState<CartFleetItem | null>(null);
+  const [cameraPreviewData, setCameraPreviewData] = useState<any | null>(null);
+  const [cameraPreviewLoading, setCameraPreviewLoading] = useState<boolean>(false);
 
   // Edit Cart Modal State
   const [editingCart, setEditingCart] = useState<CartFleetItem | null>(null);
@@ -87,7 +92,7 @@ export const CartFleetView: React.FC = () => {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.event === 'CART_STATUS_CHANGE' && msg.data) {
+          if ((msg.event === 'CART_STATUS_CHANGE' || msg.event === 'CART_CAMERA_STATUS') && msg.data) {
             const data = msg.data;
             setCarts((prev) =>
               prev.map((c) =>
@@ -96,6 +101,8 @@ export const CartFleetView: React.FC = () => {
                       ...c,
                       camera_status: data.camera_status || c.camera_status,
                       status: data.status || c.status,
+                      last_seen: data.last_seen || c.last_seen,
+                      frames_per_minute: data.frames_per_minute !== undefined ? data.frames_per_minute : c.frames_per_minute,
                       last_heartbeat: data.last_heartbeat || c.last_heartbeat
                     }
                   : c
@@ -115,6 +122,42 @@ export const CartFleetView: React.FC = () => {
       if (ws) ws.close();
     };
   }, []);
+
+  // Poll camera preview while Test Camera modal is open
+  useEffect(() => {
+    if (!testingCameraCart) {
+      setCameraPreviewData(null);
+      return;
+    }
+
+    let isMounted = true;
+    setCameraPreviewLoading(true);
+
+    const loadPreview = async () => {
+      try {
+        const data = await api.getCartCameraPreview(testingCameraCart.id);
+        if (isMounted) {
+          setCameraPreviewData(data);
+        }
+      } catch (err: any) {
+        if (isMounted) {
+          console.warn('Failed to load camera preview:', err);
+        }
+      } finally {
+        if (isMounted) {
+          setCameraPreviewLoading(false);
+        }
+      }
+    };
+
+    loadPreview();
+    const interval = setInterval(loadPreview, 1500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [testingCameraCart]);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -441,9 +484,27 @@ export const CartFleetView: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-400">
                     <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                    <span>Camera: <strong>{c.camera_status}</strong></span>
+                    <span>Camera: <strong className={isOnline ? 'text-emerald-500' : 'text-slate-400'}>{c.camera_status}</strong></span>
+                    {c.frames_per_minute !== undefined && c.frames_per_minute > 0 && (
+                      <span className="text-[10px] text-cyan-500 font-mono">({c.frames_per_minute} fpm)</span>
+                    )}
                   </div>
                 </div>
+
+                {/* Test Camera Button */}
+                <button
+                  type="button"
+                  onClick={() => setTestingCameraCart(c)}
+                  className="w-full text-center text-xs font-semibold py-1.5 px-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 transition-all flex items-center justify-center gap-1.5 active:scale-95"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Test camera</span>
+                  {c.last_seen && (
+                    <span className="text-[10px] text-slate-400 font-normal ml-auto">
+                      Seen {new Date(c.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </span>
+                  )}
+                </button>
 
                 {/* Active Session Indicator & Quick Release */}
                 <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/50 text-[11px] flex items-center justify-between">
@@ -721,6 +782,105 @@ export const CartFleetView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Test Camera Preview Modal (Staff Only) */}
+      {testingCameraCart && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-lg w-full shadow-2xl space-y-4">
+            
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-500">
+                  <Camera className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                    <span>Camera Live Test: {testingCameraCart.cart_number}</span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      testingCameraCart.camera_status === 'ONLINE'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400'
+                        : 'bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-400'
+                    }`}>
+                      {testingCameraCart.camera_status}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Overhead basket verification frame stream (polling every 1.5s)
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setTestingCameraCart(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Live Frame Screen */}
+            <div className="relative aspect-[4/3] bg-black rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
+              {cameraPreviewData?.has_frame && cameraPreviewData.frame_data ? (
+                <>
+                  <img
+                    src={cameraPreviewData.frame_data}
+                    alt={`Live feed from ${testingCameraCart.cart_number}`}
+                    className="w-full h-full object-cover"
+                  />
+                  {cameraPreviewData.is_reference && (
+                    <div className="absolute top-3 left-3 bg-cyan-600/90 text-white font-mono text-[10px] font-bold px-2 py-0.5 rounded-md backdrop-blur-md shadow-md">
+                      EMPTY CART REFERENCE
+                    </div>
+                  )}
+                  <div className="absolute bottom-3 left-3 right-3 bg-black/70 backdrop-blur-md text-white font-mono text-[10px] px-3 py-1.5 rounded-xl border border-white/10 flex items-center justify-between">
+                    <span>Captured: {cameraPreviewData.captured_at ? new Date(cameraPreviewData.captured_at).toLocaleTimeString() : 'Recent'}</span>
+                    <span className="text-cyan-400 font-bold">{cameraPreviewData.frames_per_minute || 0} fpm</span>
+                  </div>
+                </>
+              ) : (
+                <div className="p-6 text-center text-slate-400 space-y-2">
+                  <CameraOff className="w-12 h-12 mx-auto opacity-30 text-slate-500" />
+                  <div className="text-xs font-bold text-slate-300">No frames received recently</div>
+                  <p className="text-[11px] text-slate-500 max-w-xs mx-auto leading-relaxed">
+                    Open <code className="text-cyan-400 font-mono">/cart-device</code> on the cart laptop, enter the device token, and tap Start Camera Stream.
+                  </p>
+                </div>
+              )}
+
+              {cameraPreviewLoading && !cameraPreviewData && (
+                <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                  <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin" />
+                </div>
+              )}
+            </div>
+
+            {/* Warning Banner if no frames */}
+            {cameraPreviewData && !cameraPreviewData.has_frame && (
+              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-600 dark:text-amber-400 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>No frames arriving. Ensure device is streaming and motion is active.</span>
+              </div>
+            )}
+
+            {/* Metadata Footer */}
+            <div className="flex items-center justify-between text-xs font-mono text-slate-500 pt-1 border-t border-slate-100 dark:border-slate-800">
+              <div>
+                Rate: <strong className="text-slate-700 dark:text-slate-300">{cameraPreviewData?.frames_per_minute || 0} frames/min</strong>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTestingCameraCart(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all"
+              >
+                Done
+              </button>
+            </div>
+
           </div>
         </div>
       )}
