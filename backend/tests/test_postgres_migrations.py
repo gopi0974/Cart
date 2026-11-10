@@ -292,6 +292,8 @@ def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service)
     settings.DATABASE_URL = PG_URL
     app_db.engine = engine
     app_db.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    app_db._last_db_check_time = 0.0
+    app_db.database_ok = True
 
     try:
         # Step 6: Run run_db_migrations("head")

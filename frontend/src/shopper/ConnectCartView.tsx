@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   QrCode, ShoppingCart, ShieldCheck, Zap, ArrowRight, AlertTriangle,
   ShieldAlert, Lock, RefreshCw, Loader2, Camera, X, Flashlight
@@ -9,7 +9,8 @@ import { DecodeHintType } from '@zxing/library';
 import { api } from '../services/api';
 import { CartSession } from '../types';
 import { useTranslation } from '../services/i18n';
-import { CameraHelper } from '../services/cameraHelper';
+import { CameraHelper, CameraStatus, CameraPermissionState } from '../services/cameraHelper';
+import { CameraPermissionExplainer } from './CameraPermissionExplainer';
 
 interface Props {
   onConnected: (session: CartSession) => void;
@@ -23,7 +24,8 @@ interface ConnectionError {
 }
 
 export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const [cartInput, setCartInput] = useState('CART-001');
   const [phoneInput, setPhoneInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -33,6 +35,8 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
 
   // In-App QR Camera Scanner State
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('IDLE');
+  const [permissionState, setPermissionState] = useState<CameraPermissionState>('prompt');
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [torchSupported, setTorchSupported] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -183,7 +187,11 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
         customer_phone: phoneParam,
       })
       .then((session) => {
-        window.history.replaceState({}, '', '/user');
+        setSearchParams({});
+        navigate('/user', { replace: true });
+        if (typeof window !== 'undefined' && window.history) {
+          window.history.replaceState({}, '', '/user');
+        }
         onConnected(session);
       })
       .catch((err: any) => {
@@ -193,17 +201,35 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
         setLoading(false);
       });
     }
-  }, [searchParams, onConnected]);
+  }, [searchParams, setSearchParams, navigate, onConnected]);
 
-  // Start in-app camera scanner for cart QR
+  // Start in-app camera scanner for cart QR (respecting browser permissions)
   const startScanner = async () => {
     setError(null);
-    setScannerOpen(true);
     setTorchEnabled(false);
     setTorchSupported(false);
 
+    const perm = await CameraHelper.checkPermission();
+    setPermissionState(perm);
+
+    if (perm === 'granted') {
+      setCameraStatus('REQUESTING');
+      setScannerOpen(true);
+      await startRealCamera();
+    } else if (perm === 'denied') {
+      setCameraStatus('BLOCKED');
+      setScannerOpen(true);
+    } else {
+      // 'prompt' or 'unsupported' -> show pre-permission explainer first!
+      setCameraStatus('IDLE');
+      setScannerOpen(true);
+    }
+  };
+
+  const startRealCamera = async () => {
+    setCameraStatus('REQUESTING');
     try {
-      const stream = await CameraHelper.getBackCameraStream({
+      const stream = await CameraHelper.openCamera({
         facingMode: 'environment',
         idealWidth: 1280,
         idealHeight: 720,
@@ -241,10 +267,14 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
           }
         );
       }
+      setCameraStatus('ACTIVE');
     } catch (err: any) {
       console.error('[ConnectCartView] Scanner start error:', err);
-      stopScanner();
-      setError(categorizeError(err));
+      const parsed = CameraHelper.parseCameraError(err);
+      setCameraStatus(parsed.status);
+      if (parsed.status === 'BLOCKED') {
+        setPermissionState('denied');
+      }
     }
   };
 
@@ -263,10 +293,12 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
       CameraHelper.stopStream(streamRef.current);
       streamRef.current = null;
     }
+    CameraHelper.stopAllStreams();
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
     setScannerOpen(false);
+    setCameraStatus('IDLE');
   };
 
   const toggleTorch = async () => {
@@ -350,6 +382,11 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
       customer_phone: phoneInput || undefined,
     })
     .then((session) => {
+      setSearchParams({});
+      navigate('/user', { replace: true });
+      if (typeof window !== 'undefined' && window.history) {
+        window.history.replaceState({}, '', '/user');
+      }
       onConnected(session);
     })
     .catch((err: any) => {
@@ -520,15 +557,44 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
 
       {/* In-App Camera Scanner Modal */}
       {scannerOpen && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black flex flex-col justify-between animate-fadeIn select-none">
           {/* Header */}
           <div className="p-4 flex items-center justify-between bg-gradient-to-b from-black/80 to-transparent z-10 text-white">
             <div className="flex items-center gap-2">
               <Camera className="w-5 h-5 text-emerald-400" />
               <span className="font-bold text-sm">Scan Cart Handle QR</span>
             </div>
+
+            {/* Live Camera Status Badge */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 backdrop-blur-md">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  cameraStatus === 'ACTIVE'
+                    ? 'bg-emerald-400 animate-pulse'
+                    : cameraStatus === 'REQUESTING'
+                    ? 'bg-amber-400 animate-pulse'
+                    : cameraStatus === 'BLOCKED'
+                    ? 'bg-red-400'
+                    : 'bg-slate-400'
+                }`}
+              />
+              <span>
+                {cameraStatus === 'ACTIVE'
+                  ? 'Camera Active'
+                  : cameraStatus === 'REQUESTING'
+                  ? 'Requesting Camera...'
+                  : cameraStatus === 'BLOCKED'
+                  ? 'Camera Blocked'
+                  : cameraStatus === 'IN_USE'
+                  ? 'Camera in Use'
+                  : cameraStatus === 'NOT_FOUND'
+                  ? 'No Camera'
+                  : 'Ready'}
+              </span>
+            </div>
+
             <div className="flex items-center gap-2">
-              {torchSupported && (
+              {torchSupported && cameraStatus === 'ACTIVE' && (
                 <button
                   onClick={toggleTorch}
                   className={`p-2.5 rounded-xl border transition-all ${
@@ -551,38 +617,64 @@ export const ConnectCartView: React.FC<Props> = ({ onConnected }) => {
             </div>
           </div>
 
-          {/* Camera Viewport & Reticle */}
-          <div className="relative flex-1 flex items-center justify-center overflow-hidden">
-            <video
-              ref={videoRef}
-              playsInline
-              autoPlay
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-            />
+          {/* Viewport: Explainer vs Real Camera Viewfinder */}
+          <div className="relative flex-1 flex items-center justify-center overflow-hidden p-4">
+            {cameraStatus === 'REQUESTING' ? (
+              <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in">
+                <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
+                <div className="font-bold text-sm">Connecting to camera...</div>
+                <div className="text-xs text-white/70 mt-1 max-w-xs leading-relaxed">
+                  Please tap &ldquo;Allow&rdquo; if your browser prompts for camera access.
+                </div>
+              </div>
+            ) : cameraStatus !== 'ACTIVE' ? (
+              <div className="z-20 w-full max-w-sm">
+                <CameraPermissionExplainer
+                  status={cameraStatus}
+                  permissionState={permissionState}
+                  onRequestPermission={startRealCamera}
+                  onRetry={startRealCamera}
+                  onClose={stopScanner}
+                  title="Camera Needed to Connect"
+                  description="SmartCart needs camera access to scan the official QR code located on your cart handle."
+                />
+              </div>
+            ) : (
+              <>
+                <video
+                  ref={videoRef}
+                  playsInline
+                  autoPlay
+                  muted
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
 
-            {/* Viewfinder Target Reticle */}
-            <div className="relative z-10 w-72 h-72 border-2 border-emerald-400 rounded-3xl overflow-hidden shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]">
-              {/* Animated Scan Line */}
-              <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent animate-pulse" style={{ animationDuration: '1.8s' }} />
+                {/* Viewfinder Target Reticle */}
+                <div className="relative z-10 w-72 h-72 border-2 border-emerald-400 rounded-3xl overflow-hidden shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]">
+                  {/* Animated Scan Line */}
+                  <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent animate-pulse" style={{ animationDuration: '1.8s' }} />
 
-              {/* Corner Accents */}
-              <div className="absolute top-2 left-2 w-5 h-5 border-t-4 border-l-4 border-emerald-400 rounded-tl-xl" />
-              <div className="absolute top-2 right-2 w-5 h-5 border-t-4 border-r-4 border-emerald-400 rounded-tr-xl" />
-              <div className="absolute bottom-2 left-2 w-5 h-5 border-b-4 border-l-4 border-emerald-400 rounded-bl-xl" />
-              <div className="absolute bottom-2 right-2 w-5 h-5 border-b-4 border-r-4 border-emerald-400 rounded-br-xl" />
-            </div>
+                  {/* Corner Accents */}
+                  <div className="absolute top-2 left-2 w-5 h-5 border-t-4 border-l-4 border-emerald-400 rounded-tl-xl" />
+                  <div className="absolute top-2 right-2 w-5 h-5 border-t-4 border-r-4 border-emerald-400 rounded-tr-xl" />
+                  <div className="absolute bottom-2 left-2 w-5 h-5 border-b-4 border-l-4 border-emerald-400 rounded-bl-xl" />
+                  <div className="absolute bottom-2 right-2 w-5 h-5 border-b-4 border-r-4 border-emerald-400 rounded-br-xl" />
+                </div>
+              </>
+            )}
           </div>
 
           {/* Footer Instruction */}
-          <div className="p-6 bg-gradient-to-t from-black/90 to-transparent text-center z-10 space-y-2">
-            <p className="text-white text-xs font-semibold">
-              Point your camera steadily at the official QR code on your cart
-            </p>
-            <p className="text-slate-400 text-[11px]">
-              Accepts verified store QR codes only
-            </p>
-          </div>
+          {cameraStatus === 'ACTIVE' && (
+            <div className="p-6 bg-gradient-to-t from-black/90 to-transparent text-center z-10 space-y-2">
+              <p className="text-white text-xs font-semibold">
+                Point your camera steadily at the official QR code on your cart
+              </p>
+              <p className="text-slate-400 text-[11px]">
+                Accepts verified store QR codes only
+              </p>
+            </div>
+          )}
         </div>
       )}
 

@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   X, Flashlight, Barcode, Volume2, VolumeX, AlertCircle, 
-  CheckCircle2, ArrowRight, RefreshCw, ZoomIn, Info, HelpCircle
+  CheckCircle2, ArrowRight, RefreshCw, ZoomIn, Info, HelpCircle, Loader2
 } from 'lucide-react';
 import { BrowserMultiFormatReader, BarcodeFormat } from '@zxing/browser';
 import { DecodeHintType } from '@zxing/library';
 import { audioFeedback } from '../services/audioFeedback';
-import { CameraHelper, CameraErrorResult } from '../services/cameraHelper';
+import { CameraHelper, CameraErrorResult, CameraStatus, CameraPermissionState } from '../services/cameraHelper';
+import { CameraPermissionExplainer } from './CameraPermissionExplainer';
 
 interface Props {
   isOpen: boolean;
@@ -27,6 +28,8 @@ export const BarcodeScannerModal: React.FC<Props> = ({
 }) => {
   // Scanner state
   const [status, setStatus] = useState<ScannerStatus>('STARTING');
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('IDLE');
+  const [permissionState, setPermissionState] = useState<CameraPermissionState>('prompt');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [decodedValue, setDecodedValue] = useState<string | null>(null);
   const [decodedFormat, setDecodedFormat] = useState<string | null>(null);
@@ -117,16 +120,17 @@ export const BarcodeScannerModal: React.FC<Props> = ({
   }, [onBarcodeDetected, onClose]);
 
   // Start real camera and ZXing reader
-  const startScanner = useCallback(async () => {
+  const startRealCamera = useCallback(async () => {
     isStoppingRef.current = false;
+    setCameraStatus('REQUESTING');
     setStatus('STARTING');
     setErrorMessage(null);
     setDecodedValue(null);
     setShowTips(false);
 
     try {
-      // 1. Obtain real back camera stream (1280x720 ideal, continuous focus)
-      const stream = await CameraHelper.getBackCameraStream({
+      // 1. Obtain real back camera stream (1280x720 ideal, continuous focus, concurrency safe)
+      const stream = await CameraHelper.openCamera({
         idealWidth: 1280,
         idealHeight: 720,
         facingMode: 'environment',
@@ -212,6 +216,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
         };
       }
 
+      setCameraStatus('ACTIVE');
       setStatus('SCANNING');
 
       // Start 8-second tip timer if no barcode is read
@@ -221,8 +226,12 @@ export const BarcodeScannerModal: React.FC<Props> = ({
 
     } catch (err: any) {
       console.error('Failed to initialize barcode camera scanner:', err);
+      const parsed = CameraHelper.parseCameraError(err);
+      setCameraStatus(parsed.status);
+      if (parsed.status === 'BLOCKED') {
+        setPermissionState('denied');
+      }
       setStatus('ERROR');
-      const parsed = err?.message ? err : CameraHelper.parseCameraError(err);
       setErrorMessage(parsed.message || 'Unable to access camera for barcode scanning.');
     }
   }, [handleRawCandidate]);
@@ -244,23 +253,45 @@ export const BarcodeScannerModal: React.FC<Props> = ({
       CameraHelper.stopStream(streamRef.current);
       streamRef.current = null;
     }
+    CameraHelper.stopAllStreams();
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
     setTorchEnabled(false);
+    setCameraStatus('IDLE');
   }, []);
+
+  // Initiate scanner workflow with permission check
+  const initiateScannerWorkflow = useCallback(async () => {
+    isStoppingRef.current = false;
+    setErrorMessage(null);
+    setDecodedValue(null);
+    setShowTips(false);
+
+    const perm = await CameraHelper.checkPermission();
+    setPermissionState(perm);
+
+    if (perm === 'granted') {
+      await startRealCamera();
+    } else if (perm === 'denied') {
+      setCameraStatus('BLOCKED');
+    } else {
+      // 'prompt' or 'unsupported' -> show pre-permission explainer screen
+      setCameraStatus('IDLE');
+    }
+  }, [startRealCamera]);
 
   // Modal open/close lifecycle
   useEffect(() => {
     if (isOpen) {
-      startScanner();
+      initiateScannerWorkflow();
     } else {
       stopScanner();
     }
     return () => {
       stopScanner();
     };
-  }, [isOpen, startScanner, stopScanner]);
+  }, [isOpen, initiateScannerWorkflow, stopScanner]);
 
   // Toggle Hardware Flashlight / Torch
   const handleToggleTorch = async () => {
@@ -330,6 +361,34 @@ export const BarcodeScannerModal: React.FC<Props> = ({
           </p>
         </div>
 
+        {/* Live Camera Status Badge */}
+        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-white/10 backdrop-blur-md">
+          <span
+            className={`w-2 h-2 rounded-full ${
+              cameraStatus === 'ACTIVE'
+                ? 'bg-emerald-400 animate-pulse'
+                : cameraStatus === 'REQUESTING'
+                ? 'bg-amber-400 animate-pulse'
+                : cameraStatus === 'BLOCKED'
+                ? 'bg-red-400'
+                : 'bg-slate-400'
+            }`}
+          />
+          <span>
+            {cameraStatus === 'ACTIVE'
+              ? 'Camera Active'
+              : cameraStatus === 'REQUESTING'
+              ? 'Requesting Camera...'
+              : cameraStatus === 'BLOCKED'
+              ? 'Camera Blocked'
+              : cameraStatus === 'IN_USE'
+              ? 'Camera in Use'
+              : cameraStatus === 'NOT_FOUND'
+              ? 'No Camera'
+              : 'Ready'}
+          </span>
+        </div>
+
         <div className="flex items-center gap-2">
           {/* Sound Toggle */}
           <button
@@ -345,7 +404,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
           </button>
 
           {/* Torch Toggle */}
-          {torchSupported && (
+          {torchSupported && cameraStatus === 'ACTIVE' && (
             <button
               onClick={handleToggleTorch}
               className={`p-2.5 rounded-full transition-all active:scale-95 ${
@@ -358,7 +417,7 @@ export const BarcodeScannerModal: React.FC<Props> = ({
           )}
 
           {/* Zoom Toggle */}
-          {zoomCaps && zoomCaps.max > 1 && (
+          {zoomCaps && zoomCaps.max > 1 && cameraStatus === 'ACTIVE' && (
             <button
               onClick={handleToggleZoom}
               className={`p-2.5 rounded-full text-xs font-bold transition-all active:scale-95 ${
@@ -377,89 +436,112 @@ export const BarcodeScannerModal: React.FC<Props> = ({
         onClick={handleViewfinderTap}
         className="relative flex-1 flex flex-col items-center justify-center p-4 overflow-hidden cursor-crosshair"
       >
-        {/* Real Live Video Camera Feed */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="absolute inset-0 w-full h-full object-cover"
-        />
-
-        {/* Viewfinder Dark Overlay Shroud */}
-        <div className="absolute inset-0 bg-black/40 pointer-events-none" />
-
-        {/* Wide & Short Scan Box (84% width, ~2.4:1 ratio for retail barcodes) */}
-        <div className="relative w-[86%] max-w-sm h-36 border-2 border-emerald-400/90 rounded-2xl overflow-hidden shadow-2xl backdrop-contrast-125 z-10 flex items-center justify-center bg-black/10">
-          {/* Animated Red Laser Scanning Line */}
-          {status === 'SCANNING' && (
-            <div className="absolute left-0 right-0 h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444] animate-laser" />
-          )}
-
-          {/* High-Contrast Corner Framing Reticles */}
-          <div className="absolute top-2 left-2 w-5 h-5 border-t-3 border-l-3 border-emerald-400 rounded-tl-sm pointer-events-none" />
-          <div className="absolute top-2 right-2 w-5 h-5 border-t-3 border-r-3 border-emerald-400 rounded-tr-sm pointer-events-none" />
-          <div className="absolute bottom-2 left-2 w-5 h-5 border-b-3 border-l-3 border-emerald-400 rounded-bl-sm pointer-events-none" />
-          <div className="absolute bottom-2 right-2 w-5 h-5 border-b-3 border-r-3 border-emerald-400 rounded-br-sm pointer-events-none" />
-
-          {/* Decoded Confirmation Banner */}
-          {status === 'DECODED' && decodedValue && (
-            <div className="absolute inset-0 bg-emerald-600/90 flex flex-col items-center justify-center text-white p-3 text-center animate-fade-in z-20">
-              <CheckCircle2 className="w-8 h-8 text-white mb-1 animate-bounce" />
-              <div className="text-xs font-mono font-bold tracking-wider">{decodedValue}</div>
-              <div className="text-[10px] uppercase opacity-90">{decodedFormat}</div>
+        {cameraStatus === 'REQUESTING' ? (
+          <div className="z-20 flex flex-col items-center justify-center text-center text-white p-6 animate-in fade-in">
+            <Loader2 className="w-10 h-10 text-emerald-400 animate-spin mb-3" />
+            <div className="font-bold text-sm">Connecting to camera...</div>
+            <div className="text-xs text-white/70 mt-1 max-w-xs leading-relaxed">
+              Please tap &ldquo;Allow&rdquo; if your browser prompts for camera access.
             </div>
-          )}
+          </div>
+        ) : cameraStatus !== 'ACTIVE' ? (
+          <div className="z-20 w-full max-w-sm">
+            <CameraPermissionExplainer
+              status={cameraStatus}
+              permissionState={permissionState}
+              onRequestPermission={startRealCamera}
+              onRetry={startRealCamera}
+              onClose={onClose}
+              title={mode === 'REMOVE' ? 'Camera Needed to Rescan' : 'Camera Needed to Scan Items'}
+              description="SmartCart uses your camera to scan retail product barcodes. Your video stream stays on your device."
+            />
+          </div>
+        ) : (
+          <>
+            {/* Real Live Video Camera Feed */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 w-full h-full object-cover"
+            />
 
-          {/* Fallback Watermark */}
-          {status !== 'DECODED' && (
-            <Barcode className="w-16 h-16 text-white/15 pointer-events-none" />
-          )}
-        </div>
+            {/* Viewfinder Dark Overlay Shroud */}
+            <div className="absolute inset-0 bg-black/40 pointer-events-none" />
 
-        {/* Status Indicator Pill */}
-        <div className="mt-4 z-10 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-slate-900/80 backdrop-blur-md border border-white/10 text-xs text-white">
-          <span 
-            className={`w-2 h-2 rounded-full ${
-              status === 'SCANNING' ? 'bg-emerald-400 animate-pulse' :
-              status === 'DECODED' ? 'bg-emerald-500' :
-              status === 'STARTING' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'
-            }`} 
-          />
-          <span className="font-medium">
-            {status === 'STARTING' && 'Starting camera engine...'}
-            {status === 'SCANNING' && 'Scanning for barcode (ZXing + Native)...'}
-            {status === 'DECODED' && `Decoded: ${decodedValue}`}
-            {status === 'ERROR' && 'Scanner error'}
-          </span>
-        </div>
-
-        {/* 8-Second Helpful Diagnostic Tips */}
-        {showTips && status === 'SCANNING' && (
-          <div className="mt-3 z-10 max-w-xs bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-3 text-white text-xs space-y-1 animate-fade-in">
-            <div className="font-bold flex items-center gap-1 text-emerald-400 text-[11px] uppercase tracking-wider">
-              <HelpCircle className="w-3.5 h-3.5" />
-              <span>Scanning Tips</span>
-            </div>
-            <ul className="text-[11px] text-slate-300 list-disc list-inside space-y-0.5">
-              <li>Move camera back a little (4–8 inches away)</li>
-              <li>Hold steady & avoid harsh reflections/glare</li>
-              {torchSupported && !torchEnabled && (
-                <li>Turn on the flashlight in low light</li>
+            {/* Wide & Short Scan Box (84% width, ~2.4:1 ratio for retail barcodes) */}
+            <div className="relative w-[86%] max-w-sm h-36 border-2 border-emerald-400/90 rounded-2xl overflow-hidden shadow-2xl backdrop-contrast-125 z-10 flex items-center justify-center bg-black/10">
+              {/* Animated Red Laser Scanning Line */}
+              {status === 'SCANNING' && (
+                <div className="absolute left-0 right-0 h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444] animate-laser" />
               )}
-            </ul>
-          </div>
-        )}
 
-        {/* Error Notification Alert */}
-        {errorMessage && (
-          <div className="mt-3 z-10 max-w-xs bg-red-950/90 border border-red-500 text-red-200 text-xs px-3.5 py-2.5 rounded-2xl flex items-start gap-2 shadow-xl animate-fade-in">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-bold text-[11px]">Scan Warning</div>
-              <div className="text-[11px] leading-tight mt-0.5">{errorMessage}</div>
+              {/* High-Contrast Corner Framing Reticles */}
+              <div className="absolute top-2 left-2 w-5 h-5 border-t-3 border-l-3 border-emerald-400 rounded-tl-sm pointer-events-none" />
+              <div className="absolute top-2 right-2 w-5 h-5 border-t-3 border-r-3 border-emerald-400 rounded-tr-sm pointer-events-none" />
+              <div className="absolute bottom-2 left-2 w-5 h-5 border-b-3 border-l-3 border-emerald-400 rounded-bl-sm pointer-events-none" />
+              <div className="absolute bottom-2 right-2 w-5 h-5 border-b-3 border-r-3 border-emerald-400 rounded-br-sm pointer-events-none" />
+
+              {/* Decoded Confirmation Banner */}
+              {status === 'DECODED' && decodedValue && (
+                <div className="absolute inset-0 bg-emerald-600/90 flex flex-col items-center justify-center text-white p-3 text-center animate-fade-in z-20">
+                  <CheckCircle2 className="w-8 h-8 text-white mb-1 animate-bounce" />
+                  <div className="text-xs font-mono font-bold tracking-wider">{decodedValue}</div>
+                  <div className="text-[10px] uppercase opacity-90">{decodedFormat}</div>
+                </div>
+              )}
+
+              {/* Fallback Watermark */}
+              {status !== 'DECODED' && (
+                <Barcode className="w-16 h-16 text-white/15 pointer-events-none" />
+              )}
             </div>
-          </div>
+
+            {/* Status Indicator Pill */}
+            <div className="mt-4 z-10 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-slate-900/80 backdrop-blur-md border border-white/10 text-xs text-white">
+              <span 
+                className={`w-2 h-2 rounded-full ${
+                  status === 'SCANNING' ? 'bg-emerald-400 animate-pulse' :
+                  status === 'DECODED' ? 'bg-emerald-500' :
+                  status === 'STARTING' ? 'bg-amber-400 animate-pulse' : 'bg-red-500'
+                }`} 
+              />
+              <span className="font-medium">
+                {status === 'STARTING' && 'Starting camera engine...'}
+                {status === 'SCANNING' && 'Scanning for barcode (ZXing + Native)...'}
+                {status === 'DECODED' && `Decoded: ${decodedValue}`}
+                {status === 'ERROR' && 'Scanner error'}
+              </span>
+            </div>
+
+            {/* 8-Second Helpful Diagnostic Tips */}
+            {showTips && status === 'SCANNING' && (
+              <div className="mt-3 z-10 max-w-xs bg-slate-900/90 border border-emerald-500/30 rounded-2xl p-3 text-white text-xs space-y-1 animate-fade-in">
+                <div className="font-bold flex items-center gap-1 text-emerald-400 text-[11px] uppercase tracking-wider">
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  <span>Scanning Tips</span>
+                </div>
+                <ul className="text-[11px] text-slate-300 list-disc list-inside space-y-0.5">
+                  <li>Move camera back a little (4–8 inches away)</li>
+                  <li>Hold steady & avoid harsh reflections/glare</li>
+                  {torchSupported && !torchEnabled && (
+                    <li>Turn on the flashlight in low light</li>
+                  )}
+                </ul>
+              </div>
+            )}
+            {/* Error Notification Alert */}
+            {errorMessage && (
+              <div className="mt-3 z-10 max-w-xs bg-red-950/90 border border-red-500 text-red-200 text-xs px-3.5 py-2.5 rounded-2xl flex items-start gap-2 shadow-xl animate-fade-in">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-bold text-[11px]">Scan Warning</div>
+                  <div className="text-[11px] leading-tight mt-0.5">{errorMessage}</div>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 

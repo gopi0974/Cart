@@ -1,19 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import {
   Camera, CheckCircle2, Clock, AlertTriangle, ShieldCheck,
-  LogOut, ChevronRight, ShoppingCart, RefreshCw, Trash2, X, AlertCircle, RotateCcw
+  LogOut, ChevronRight, ShoppingCart, RefreshCw, Trash2, X, AlertCircle, RotateCcw, Loader2
 } from 'lucide-react';
 import { CartSession, CartItem } from '../types';
 import { WarningBanner } from './WarningBanner';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { CheckoutModal } from './CheckoutModal';
 import { api, getWsBaseUrl } from '../services/api';
+import { wsRegistry } from '../services/wsRegistry';
 import { audioFeedback } from '../services/audioFeedback';
 import { useTranslation } from '../services/i18n';
 
 interface Props {
   session: CartSession;
-  onDisconnect: () => void;
+  onDisconnect: () => Promise<void> | void;
   onCheckoutComplete: () => void;
 }
 
@@ -23,6 +24,8 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   const [scannerMode, setScannerMode] = useState<'ADD' | 'REMOVE'>('ADD');
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+  const [exitError, setExitError] = useState<string | null>(null);
 
   // User-Side Item Removal State
   const [activeRemovalItem, setActiveRemovalItem] = useState<CartItem | null>(null);
@@ -58,10 +61,12 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   // Sync state & connect to Cart WebSocket (authenticated with shopper session token)
   useEffect(() => {
     let ws: WebSocket | null = null;
+    let unregisterWs: (() => void) | null = null;
     const sessionToken = session.session_token || (typeof window !== 'undefined' ? localStorage.getItem('smartcart_session_token') : null);
     const tokenQuery = sessionToken ? `?token=${encodeURIComponent(sessionToken)}` : '';
     try {
       ws = new WebSocket(`${getWsBaseUrl()}/ws/cart/${session.cart_id}${tokenQuery}`);
+      unregisterWs = wsRegistry.register(ws);
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
@@ -102,6 +107,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
 
     return () => {
+      if (unregisterWs) unregisterWs();
       if (ws) ws.close();
     };
   }, [session.cart_id]);
@@ -118,25 +124,45 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   };
 
-  const handleExitClick = () => {
+  const handleExitClick = async () => {
+    if (isExiting) return;
     const hasItems = session.items && session.items.length > 0;
     const confirmMessage = hasItems
       ? `You have ${session.items.length} item(s) in your basket (₹${session.total_amount.toFixed(2)}). Exiting will end this session and free the cart for other shoppers. Are you sure you want to exit?`
       : 'Exit shopping session and release this cart?';
 
-    if (window.confirm(confirmMessage)) {
-      onDisconnect();
+    if (!window.confirm(confirmMessage)) return;
+
+    setIsExiting(true);
+    setExitError(null);
+    try {
+      await onDisconnect();
+    } catch (err: any) {
+      setIsExiting(false);
+      const msg = err?.message || 'Could not end session on server. Please try again.';
+      setExitError(msg);
+      alert(`Exit failed: ${msg}`);
     }
   };
 
-  const handleSwitchCart = () => {
+  const handleSwitchCart = async () => {
+    if (isExiting) return;
     const hasItems = session.items && session.items.length > 0;
     const confirmMessage = hasItems
       ? `You have ${session.items.length} item(s) in your basket. Switching carts will end this session and return to the scanner. Proceed?`
       : 'End session and switch to a different cart?';
 
-    if (window.confirm(confirmMessage)) {
-      onDisconnect();
+    if (!window.confirm(confirmMessage)) return;
+
+    setIsExiting(true);
+    setExitError(null);
+    try {
+      await onDisconnect();
+    } catch (err: any) {
+      setIsExiting(false);
+      const msg = err?.message || 'Could not end session on server. Please try again.';
+      setExitError(msg);
+      alert(`Switch cart failed: ${msg}`);
     }
   };
 
@@ -292,11 +318,12 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             </button>
             <button
               onClick={handleExitClick}
-              className="text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 px-2.5 py-1.5 rounded-xl border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all"
+              disabled={isExiting}
+              className="text-xs text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 px-2.5 py-1.5 rounded-xl border border-red-200 dark:border-red-900/50 flex items-center gap-1 active:scale-95 transition-all disabled:opacity-50 disabled:pointer-events-none"
               title="Exit session and release cart"
             >
-              <LogOut className="w-3.5 h-3.5" />
-              Exit
+              {isExiting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LogOut className="w-3.5 h-3.5" />}
+              {isExiting ? 'Ending...' : 'Exit'}
             </button>
           </div>
         </div>
@@ -306,13 +333,23 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           <span className="text-slate-500 dark:text-slate-400 text-[11px]">Paired via official QR code</span>
           <button
             onClick={handleSwitchCart}
-            className="text-[11px] font-bold text-amber-700 dark:text-amber-300 hover:text-amber-800 dark:hover:text-amber-200 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 px-2.5 py-1 rounded-xl border border-amber-300 dark:border-amber-800/60 flex items-center gap-1.5 active:scale-95 transition-all shadow-sm"
+            disabled={isExiting}
+            className="text-[11px] font-bold text-amber-700 dark:text-amber-300 hover:text-amber-800 dark:hover:text-amber-200 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 px-2.5 py-1 rounded-xl border border-amber-300 dark:border-amber-800/60 flex items-center gap-1.5 active:scale-95 transition-all shadow-sm disabled:opacity-50 disabled:pointer-events-none"
             title="End this session and switch to another cart"
           >
-            <RotateCcw className="w-3 h-3 text-amber-500" />
-            <span>Wrong cart? Switch cart</span>
+            {isExiting ? <Loader2 className="w-3 h-3 animate-spin text-amber-600" /> : <RotateCcw className="w-3 h-3 text-amber-500" />}
+            <span>{isExiting ? 'Ending session...' : 'Wrong cart? Switch cart'}</span>
           </button>
         </div>
+
+        {exitError && (
+          <div className="mt-2 p-2.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-xs text-red-600 dark:text-red-300 flex items-center justify-between">
+            <span>{exitError}</span>
+            <button onClick={() => setExitError(null)} className="p-1 hover:opacity-80">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Main Cart Body */}

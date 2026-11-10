@@ -226,10 +226,15 @@ async def end_session(session: CartSession = Depends(verify_shopper_session), db
     """
     Shopper ends session to leave or cancel.
     Frees the cart immediately (sets cart to IDLE) so other shoppers can occupy it.
+    Sets session status to ENDED.
+    Idempotent: calling multiple times on an already ended session succeeds without error.
     """
     cart = session.cart
     if session.status == "ACTIVE":
-        session.status = "ABANDONED"
+        session.status = "ENDED"
+        session.ended_at = datetime.utcnow()
+    elif session.status not in ("ENDED", "ABANDONED", "COMPLETED"):
+        session.status = "ENDED"
         session.ended_at = datetime.utcnow()
 
     if cart:

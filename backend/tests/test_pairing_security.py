@@ -16,6 +16,8 @@ from app.config import settings
 from app.database import Base, get_db
 from app.models.cart import Cart
 from app.models.user import User
+from app.models.product import Product
+from app.models.session import CartSession
 from app.api.v1.admin import build_signed_connect_url
 from app.utils.security import create_access_token, hash_password
 
@@ -59,7 +61,17 @@ def setup_test_cart():
             role="ADMIN",
             is_active=True
         )
-        db.add_all([cart, admin])
+        product = Product(
+            id="prod-sec-test-uuid",
+            barcode="8901234567890",
+            name="Organic Green Tea",
+            brand="EcoBrand",
+            category="Beverages",
+            price=4.99,
+            weight_grams=100,
+            stock_quantity=50
+        )
+        db.add_all([cart, admin, product])
         db.commit()
     finally:
         db.close()
@@ -262,3 +274,163 @@ def test_pairing_without_signature_permitted_when_demo_mode_true(monkeypatch):
     data = response.json()
     assert data["cart_number"] == "CART-SEC-01"
     assert data["status"] == "ACTIVE"
+
+
+def test_end_session_frees_cart_and_sets_status_ended(monkeypatch):
+    """
+    POST /shopper/{session_id}/end-session must:
+    1. Accept shopper session token via X-Session-Token.
+    2. Set session.status = "ENDED".
+    3. Set cart.status = "IDLE".
+    4. Return status 200 with SUCCESS.
+    """
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    client = TestClient(app)
+
+    msg = "CART-SEC-01:QR-SECRET-TOKEN-9876".encode("utf-8")
+    sig = hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
+
+    # Pair
+    pair_res = client.post("/api/v1/shopper/pair", json={
+        "cart_number": "CART-SEC-01",
+        "signature": sig
+    })
+    assert pair_res.status_code == 200
+    session_data = pair_res.json()
+    session_id = session_data["id"]
+    session_token = session_data["session_token"]
+
+    # Verify cart is ACTIVE in DB
+    db = TestingSessionLocal()
+    try:
+        cart = db.query(Cart).filter(Cart.cart_number == "CART-SEC-01").first()
+        assert cart.status == "ACTIVE"
+    finally:
+        db.close()
+
+    # Call end-session
+    end_res = client.post(
+        f"/api/v1/shopper/{session_id}/end-session",
+        headers={"X-Session-Token": session_token}
+    )
+    assert end_res.status_code == 200
+    assert end_res.json()["status"] == "SUCCESS"
+
+    # Verify in DB: session.status is ENDED, cart.status is IDLE
+    db = TestingSessionLocal()
+    try:
+        cart = db.query(Cart).filter(Cart.cart_number == "CART-SEC-01").first()
+        sess = db.query(CartSession).filter(CartSession.id == session_id).first()
+        assert cart.status == "IDLE"
+        assert sess.status == "ENDED"
+        assert sess.ended_at is not None
+    finally:
+        db.close()
+
+
+def test_end_session_is_idempotent(monkeypatch):
+    """
+    Calling end-session repeatedly on an already-ended session must return HTTP 200
+    without error, keeping session as ENDED and cart as IDLE.
+    """
+    monkeypatch.setattr(settings, "DEMO_MODE", True)
+    client = TestClient(app)
+
+    pair_res = client.post("/api/v1/shopper/pair", json={
+        "cart_number": "CART-SEC-01",
+        "qr_token": "QR-SECRET-TOKEN-9876"
+    })
+    session_id = pair_res.json()["id"]
+    session_token = pair_res.json()["session_token"]
+
+    # First end call
+    res1 = client.post(
+        f"/api/v1/shopper/{session_id}/end-session",
+        headers={"X-Session-Token": session_token}
+    )
+    assert res1.status_code == 200
+    assert res1.json()["status"] == "SUCCESS"
+
+    # Second end call (idempotent retry)
+    res2 = client.post(
+        f"/api/v1/shopper/{session_id}/end-session",
+        headers={"X-Session-Token": session_token}
+    )
+    assert res2.status_code == 200
+    assert res2.json()["status"] == "SUCCESS"
+
+    # Third end call
+    res3 = client.post(
+        f"/api/v1/shopper/{session_id}/end-session",
+        headers={"X-Session-Token": session_token}
+    )
+    assert res3.status_code == 200
+    assert res3.json()["status"] == "SUCCESS"
+
+
+def test_ended_session_cannot_scan_items(monkeypatch):
+    """
+    Attempting to scan items on an ENDED session must be rejected with HTTP 400.
+    """
+    monkeypatch.setattr(settings, "DEMO_MODE", True)
+    client = TestClient(app)
+
+    pair_res = client.post("/api/v1/shopper/pair", json={
+        "cart_number": "CART-SEC-01",
+        "qr_token": "QR-SECRET-TOKEN-9876"
+    })
+    session_id = pair_res.json()["id"]
+    session_token = pair_res.json()["session_token"]
+
+    # End the session
+    client.post(
+        f"/api/v1/shopper/{session_id}/end-session",
+        headers={"X-Session-Token": session_token}
+    )
+
+    # Attempt to scan an item on the ended session
+    scan_res = client.post(
+        f"/api/v1/shopper/{session_id}/scan-item",
+        headers={"X-Session-Token": session_token},
+        json={"barcode": "8901234567890"}
+    )
+    assert scan_res.status_code == 400
+    assert "No active shopping session found" in scan_res.json()["detail"]
+
+
+def test_freed_cart_can_be_paired_again_by_new_qr_scan(monkeypatch):
+    """
+    After a session is ended, the freed IDLE cart can be immediately paired
+    by a new QR scan, creating a distinct active session.
+    """
+    monkeypatch.setattr(settings, "DEMO_MODE", False)
+    client = TestClient(app)
+
+    msg = "CART-SEC-01:QR-SECRET-TOKEN-9876".encode("utf-8")
+    sig = hmac.new(settings.QR_SIGNING_SECRET.encode("utf-8"), msg, hashlib.sha256).hexdigest()[:16]
+
+    # Shopper 1 pairs
+    pair1 = client.post("/api/v1/shopper/pair", json={
+        "cart_number": "CART-SEC-01",
+        "signature": sig
+    })
+    sess1_id = pair1.json()["id"]
+    sess1_token = pair1.json()["session_token"]
+
+    # Shopper 1 ends session
+    end_res = client.post(
+        f"/api/v1/shopper/{sess1_id}/end-session",
+        headers={"X-Session-Token": sess1_token}
+    )
+    assert end_res.status_code == 200
+
+    # Shopper 2 now pairs with the same cart
+    pair2 = client.post("/api/v1/shopper/pair", json={
+        "cart_number": "CART-SEC-01",
+        "signature": sig
+    })
+    assert pair2.status_code == 200
+    sess2_id = pair2.json()["id"]
+    assert sess2_id != sess1_id
+    assert pair2.json()["status"] == "ACTIVE"
+

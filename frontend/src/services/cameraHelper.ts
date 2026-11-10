@@ -5,14 +5,56 @@
  * Enforces HTTPS security checks, graceful constraint fallbacks, torch/zoom capabilities, and track cleanup.
  */
 
+export type CameraStatus = 'IDLE' | 'REQUESTING' | 'ACTIVE' | 'BLOCKED' | 'NOT_FOUND' | 'IN_USE' | 'INSECURE' | 'ERROR';
+export type CameraPermissionState = 'granted' | 'denied' | 'prompt' | 'unsupported';
+
 export interface CameraErrorResult {
   code: 'INSECURE_CONTEXT' | 'PERMISSION_DENIED' | 'NOT_FOUND' | 'IN_USE' | 'NOT_SUPPORTED' | 'UNKNOWN';
+  status: CameraStatus;
   message: string;
   originalError?: any;
 }
 
 export class CameraHelper {
   private static activeStreams = new Set<MediaStream>();
+  public static hasEverBeenGranted: boolean = false;
+
+  /**
+   * Check browser camera permission using navigator.permissions.query where supported.
+   * In Safari or unsupported browsers, returns 'unsupported' (unless previously granted in session).
+   */
+  static async checkPermission(): Promise<CameraPermissionState> {
+    if (typeof navigator === 'undefined' || !navigator.permissions || !navigator.permissions.query) {
+      return this.hasEverBeenGranted ? 'granted' : 'unsupported';
+    }
+    try {
+      const status = await navigator.permissions.query({ name: 'camera' as any });
+      if (status.state === 'granted') {
+        this.hasEverBeenGranted = true;
+      }
+      return status.state as CameraPermissionState;
+    } catch {
+      return this.hasEverBeenGranted ? 'granted' : 'unsupported';
+    }
+  }
+
+  /**
+   * Open the camera stream with concurrency protection:
+   * Immediately stops any existing camera streams first so no two cameras run concurrently.
+   */
+  static async openCamera(options?: {
+    idealWidth?: number;
+    idealHeight?: number;
+    facingMode?: 'environment' | 'user';
+  }): Promise<MediaStream> {
+    // 1. Strict concurrency enforcement: stop all previous streams first
+    this.stopAllStreams();
+
+    // 2. Request fresh back-camera stream
+    const stream = await this.getBackCameraStream(options);
+    this.hasEverBeenGranted = true;
+    return stream;
+  }
 
   /**
    * Register an active MediaStream for global lifecycle tracking.
@@ -67,6 +109,7 @@ export class CameraHelper {
     if (!this.isSecureContext()) {
       const err: CameraErrorResult = {
         code: 'INSECURE_CONTEXT',
+        status: 'INSECURE',
         message: 'Camera access requires a secure HTTPS connection. Please load this page over HTTPS.',
       };
       throw err;
@@ -75,6 +118,7 @@ export class CameraHelper {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       const err: CameraErrorResult = {
         code: 'NOT_SUPPORTED',
+        status: 'ERROR',
         message: 'Camera access is not supported by this browser.',
       };
       throw err;
@@ -128,6 +172,7 @@ export class CameraHelper {
     if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
       return {
         code: 'PERMISSION_DENIED',
+        status: 'BLOCKED',
         message: 'Camera permission denied. Please allow camera access in your browser or device settings.',
         originalError: err,
       };
@@ -135,6 +180,7 @@ export class CameraHelper {
     if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
       return {
         code: 'NOT_FOUND',
+        status: 'NOT_FOUND',
         message: 'No camera found on this device.',
         originalError: err,
       };
@@ -142,6 +188,7 @@ export class CameraHelper {
     if (name === 'NotReadableError' || name === 'TrackStartError') {
       return {
         code: 'IN_USE',
+        status: 'IN_USE',
         message: 'Camera is in use by another app or browser tab. Please close other camera apps and refresh.',
         originalError: err,
       };
@@ -149,12 +196,14 @@ export class CameraHelper {
     if (name === 'SecurityError') {
       return {
         code: 'INSECURE_CONTEXT',
+        status: 'INSECURE',
         message: 'Camera access blocked due to insecure context (HTTPS required).',
         originalError: err,
       };
     }
     return {
       code: 'UNKNOWN',
+      status: 'ERROR',
       message: err?.message || 'Unable to access camera. Please check device permissions.',
       originalError: err,
     };
