@@ -7,6 +7,7 @@ import {
 import QRCode from 'qrcode';
 import { CartFleetItem, CartRegistrationResult } from '../types';
 import { api, getWsBaseUrl } from '../services/api';
+import { wsRegistry } from '../services/wsRegistry';
 
 export const CartFleetView: React.FC = () => {
   const [carts, setCarts] = useState<CartFleetItem[]>([]);
@@ -73,12 +74,14 @@ export const CartFleetView: React.FC = () => {
 
     // 2. Real-time fleet WebSocket connection (authenticated with staff JWT token)
     let ws: WebSocket | null = null;
+    let unregisterWs: (() => void) | null = null;
     const adminToken = localStorage.getItem('smartcart_admin_token');
     if (!adminToken) {
       console.warn('[CartFleetView] No staff admin token found; skipping /ws/admin connection.');
     } else {
       try {
         ws = new WebSocket(`${getWsBaseUrl()}/ws/admin?token=${encodeURIComponent(adminToken)}`);
+        unregisterWs = wsRegistry.register(ws);
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -106,6 +109,7 @@ export const CartFleetView: React.FC = () => {
 
     return () => {
       clearInterval(pollTimer);
+      if (unregisterWs) unregisterWs();
       if (ws) ws.close();
     };
   }, []);

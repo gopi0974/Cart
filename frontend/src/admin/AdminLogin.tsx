@@ -1,17 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Lock, Mail, ShieldCheck, ArrowRight, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { api } from '../services/api';
 
 interface Props {
   onLoginSuccess: (user: { email: string; full_name: string; role: string }) => void;
+  sessionExpiredMessage?: string | null;
 }
 
-export const AdminLogin: React.FC<Props> = ({ onLoginSuccess }) => {
+export const AdminLogin: React.FC<Props> = ({ onLoginSuccess, sessionExpiredMessage }) => {
   const [email, setEmail] = useState('admin@smartcart.ai');
   const [password, setPassword] = useState('Admin@123');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(sessionExpiredMessage || null);
+
+  useEffect(() => {
+    if (sessionExpiredMessage) {
+      setError(sessionExpiredMessage);
+    }
+  }, [sessionExpiredMessage]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

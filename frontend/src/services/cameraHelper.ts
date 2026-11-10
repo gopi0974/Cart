@@ -12,6 +12,42 @@ export interface CameraErrorResult {
 }
 
 export class CameraHelper {
+  private static activeStreams = new Set<MediaStream>();
+
+  /**
+   * Register an active MediaStream for global lifecycle tracking.
+   */
+  static registerStream(stream: MediaStream): () => void {
+    this.activeStreams.add(stream);
+    return () => {
+      this.activeStreams.delete(stream);
+    };
+  }
+
+  /**
+   * Immediately stops all active camera tracks across the application
+   * and clears srcObject on all DOM video elements (used on logout/session-expiry).
+   */
+  static stopAllStreams(): void {
+    this.activeStreams.forEach((stream) => {
+      this.stopStream(stream);
+    });
+    this.activeStreams.clear();
+
+    if (typeof document !== 'undefined') {
+      try {
+        document.querySelectorAll('video').forEach((video) => {
+          if (video.srcObject instanceof MediaStream) {
+            this.stopStream(video.srcObject);
+            video.srcObject = null;
+          }
+        });
+      } catch (err) {
+        console.warn('Error clearing video element streams:', err);
+      }
+    }
+  }
+
   /**
    * Check if running in a secure context (HTTPS or localhost).
    */
@@ -63,7 +99,9 @@ export class CameraHelper {
     };
 
     try {
-      return await navigator.mediaDevices.getUserMedia(primaryConstraints);
+      const stream = await navigator.mediaDevices.getUserMedia(primaryConstraints);
+      this.registerStream(stream);
+      return stream;
     } catch (primaryErr: any) {
       console.warn('Primary 720p camera constraints failed, attempting fallback:', primaryErr?.name || primaryErr);
 
@@ -73,7 +111,9 @@ export class CameraHelper {
           video: { facingMode: facing },
           audio: false,
         };
-        return await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        const stream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+        this.registerStream(stream);
+        return stream;
       } catch (fallbackErr: any) {
         throw this.parseCameraError(fallbackErr);
       }
@@ -125,6 +165,7 @@ export class CameraHelper {
    */
   static stopStream(stream: MediaStream | null | undefined): void {
     if (!stream) return;
+    this.activeStreams.delete(stream);
     try {
       stream.getTracks().forEach((track) => {
         try {

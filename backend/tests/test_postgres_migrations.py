@@ -124,28 +124,6 @@ def postgres_service():
         shutil.rmtree(PG_DATA, ignore_errors=True)
     except Exception:
         pass
-        pytest.fail("PostgreSQL test server failed to accept connections.")
-
-    yield {
-        "port": PG_PORT,
-        "user": PG_USER,
-        "base_url": POSTGRES_BASE_URL,
-        "test_db_url": PG_URL
-    }
-
-    # Teardown: Stop server and remove cluster data
-    stop_cmd = [
-        str(pg_ctl_exe),
-        "stop",
-        "-D", str(PG_DATA),
-        "-m", "fast",
-        "-w"
-    ]
-    subprocess.run(stop_cmd, capture_output=True, text=True)
-    try:
-        shutil.rmtree(PG_DATA, ignore_errors=True)
-    except Exception:
-        pass
 
 
 def test_real_postgres_migration_from_legacy_create_all_schema(postgres_service):

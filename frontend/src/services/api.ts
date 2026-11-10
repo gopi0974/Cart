@@ -98,7 +98,18 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
           detail: errorDetail || '(none)',
         });
 
-        // 1. HTTP 500: Internal server error (never say server is waking up)
+        // 1. HTTP 401: Unauthorized / Session expired -> Send admin to login
+        if (response.status === 401) {
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('smartcart:session-expired'));
+          }
+          const err: FriendlyApiError = new Error('Session expired');
+          err.statusCode = 401;
+          err.isWakingUp = false;
+          throw err;
+        }
+
+        // 2. HTTP 500: Internal server error (never say server is waking up)
         if (response.status === 500) {
           const err: FriendlyApiError = new Error('Something went wrong on our side. Please try again.');
           err.statusCode = 500;
@@ -106,7 +117,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
           throw err;
         }
 
-        // 2. Genuine wake-up situations on Render free tier (502, 503, 504)
+        // 3. Genuine wake-up situations on Render free tier (502, 503, 504)
         if ([502, 503, 504].includes(response.status)) {
           if (attempt < retries) {
             console.warn(`[SmartCart API] Server waking up (${response.status}) on ${endpoint}, retrying ${attempt}/${retries}...`);
@@ -119,7 +130,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
           throw wakeErr;
         }
 
-        // 3. User-facing client/auth error: sanitize any backend URLs
+        // 4. User-facing client/auth error: sanitize any backend URLs
         const cleanMsg = (errorDetail || `Request failed (HTTP ${response.status})`).replace(/https?:\/\/[^\s'"]+/g, 'server');
         const err: FriendlyApiError = new Error(cleanMsg);
         err.statusCode = response.status;
@@ -127,7 +138,19 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
         throw err;
       }
 
-      return response.json();
+      const responseTimeHeader = response.headers.get('X-Response-Time-Ms');
+      const dbQueriesHeader = response.headers.get('X-DB-Queries');
+
+      const data = await response.json();
+      if (data && typeof data === 'object') {
+        if (responseTimeHeader !== null && (data as any)._response_time_ms === undefined) {
+          (data as any)._response_time_ms = parseFloat(responseTimeHeader);
+        }
+        if (dbQueriesHeader !== null && (data as any)._db_queries === undefined) {
+          (data as any)._db_queries = parseInt(dbQueriesHeader, 10);
+        }
+      }
+      return data;
     } catch (err: any) {
       clearTimeout(timeoutId);
       lastError = err;
@@ -303,7 +326,15 @@ export const api = {
     return request('/health');
   },
 
-  async getSystemHealth(): Promise<{
+  clearAllCaches(): void {
+    if (typeof sessionStorage !== 'undefined') {
+      try {
+        sessionStorage.clear();
+      } catch {}
+    }
+  },
+
+  async getSystemHealth(fresh: boolean = false): Promise<{
     status: string;
     model_loaded: boolean;
     database_ok: boolean;
@@ -311,16 +342,39 @@ export const api = {
     current_revision?: string | null;
     head_revision?: string | null;
     migration_error?: string | null;
+    model_name?: string;
+    vector_dimension?: number;
     storage_ok?: boolean;
+    storage_type?: string;
+    total_products?: number;
     vectors_count?: number;
     products_enrolled?: number;
     embed_ms_last?: number | null;
     embed_ms_avg?: number | null;
     memory_rss_mb?: number;
+    ram_budget_mb?: number;
+    scan_worker_metrics?: {
+      download_storage_ms_total?: number;
+      download_storage_ms_avg?: number;
+      background_removal_ms_total?: number;
+      background_removal_ms_avg?: number;
+      crop_resize_ms_total?: number;
+      crop_resize_ms_avg?: number;
+      embedding_ms_total?: number;
+      embedding_ms_avg?: number;
+      database_save_ms_total?: number;
+      total_duration_ms?: number;
+      frames_processed?: number;
+      last_job_id?: string | null;
+      last_job_status?: string | null;
+      updated_at?: string | null;
+    };
     demo_mode?: boolean;
     use_mock?: boolean;
+    _response_time_ms?: number;
+    _db_queries?: number;
   }> {
-    return request('/admin/system-health');
+    return request(`/admin/system-health${fresh ? '?fresh=true' : ''}`);
   },
 
   // Products Master

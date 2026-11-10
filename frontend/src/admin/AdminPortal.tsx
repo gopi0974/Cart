@@ -19,6 +19,8 @@ import { StaffRolesView } from './StaffRolesView';
 import { AdminLogin } from './AdminLogin';
 import { Product } from '../types';
 import { api } from '../services/api';
+import { wsRegistry } from '../services/wsRegistry';
+import { CameraHelper } from '../services/cameraHelper';
 
 interface AuthUser {
   email: string;
@@ -47,13 +49,61 @@ export const AdminPortal: React.FC = () => {
   });
   const [healthData, setHealthData] = useState<any>(null);
   const [backendStatus, setBackendStatus] = useState<'CONNECTED' | 'WAKING_UP' | 'OFFLINE'>('WAKING_UP');
+  const [sessionExpiredMsg, setSessionExpiredMsg] = useState<string | null>(null);
+
+  const handleLogout = (expiredMsg?: string) => {
+    // 1. Clear tokens and auth storage
+    localStorage.removeItem('smartcart_admin_token');
+    localStorage.removeItem('smartcart_admin_user');
+
+    // 2. Clear cached data and stored page/filters
+    try {
+      sessionStorage.clear();
+    } catch {}
+    api.clearAllCaches();
+
+    // 3. Force close all active WebSockets
+    wsRegistry.closeAll();
+
+    // 4. Force stop all active camera tracks
+    CameraHelper.stopAllStreams();
+
+    // 5. Reset internal state
+    setAuthUser(null);
+    setCurrentTab('DASHBOARD'); // Reset to Overview page
+    setTargetProduct(null);
+    setProductList([]);
+    setHealthData(null);
+
+    // 6. Set expired message if applicable
+    if (expiredMsg) {
+      setSessionExpiredMsg(expiredMsg);
+    } else {
+      setSessionExpiredMsg(null);
+    }
+  };
+
+  useEffect(() => {
+    const handleExpiredEvent = () => {
+      handleLogout('Session expired');
+    };
+    window.addEventListener('smartcart:session-expired', handleExpiredEvent);
+    return () => window.removeEventListener('smartcart:session-expired', handleExpiredEvent);
+  }, []);
 
   const fetchHealth = async () => {
     try {
-      const data = await api.getSystemHealth().catch(() => api.checkHealth());
+      const data = await api.getSystemHealth().catch((e) => {
+        if (e?.statusCode === 401) throw e;
+        return api.checkHealth();
+      });
       setHealthData(data);
       setBackendStatus('CONNECTED');
     } catch (err: any) {
+      if (err?.statusCode === 401) {
+        handleLogout('Session expired');
+        return;
+      }
       if (err?.isWakingUp) {
         setBackendStatus('WAKING_UP');
       } else {
@@ -94,14 +144,17 @@ export const AdminPortal: React.FC = () => {
     setCurrentTab('SCAN_360');
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('smartcart_admin_token');
-    localStorage.removeItem('smartcart_admin_user');
-    setAuthUser(null);
-  };
-
   if (!authUser) {
-    return <AdminLogin onLoginSuccess={(u) => setAuthUser(u)} />;
+    return (
+      <AdminLogin
+        sessionExpiredMessage={sessionExpiredMsg}
+        onLoginSuccess={(u) => {
+          setAuthUser(u);
+          setSessionExpiredMsg(null);
+          setCurrentTab('DASHBOARD'); // "after every login open the Overview page"
+        }}
+      />
+    );
   }
 
   const NAV_ITEMS = [
@@ -185,7 +238,7 @@ export const AdminPortal: React.FC = () => {
             </div>
           </div>
           <button
-            onClick={handleLogout}
+            onClick={() => handleLogout()}
             className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
             title="Sign Out"
           >
@@ -283,7 +336,7 @@ export const AdminPortal: React.FC = () => {
             <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-between items-center px-3">
               <span className="text-xs text-slate-400 font-mono">{authUser.email}</span>
               <button
-                onClick={handleLogout}
+                onClick={() => handleLogout()}
                 className="text-xs text-red-500 font-semibold flex items-center gap-1"
               >
                 <LogOut className="w-3 h-3" /> Logout
@@ -339,6 +392,7 @@ export const AdminPortal: React.FC = () => {
             health={healthData}
             status={backendStatus}
             onRefresh={fetchHealth}
+            onSessionExpired={() => handleLogout('Session expired')}
           />
         )}
         {currentTab === 'REPORTS' && <ReportsView />}

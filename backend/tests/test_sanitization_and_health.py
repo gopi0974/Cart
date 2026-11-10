@@ -203,6 +203,24 @@ def test_admin_system_health_requires_authentication():
     assert "head_revision" in data
     assert "migration_error" in data
     assert "memory_rss_mb" in data
+    assert "storage_type" in data
+    assert "total_products" in data
+    assert "scan_worker_metrics" in data
+    assert "ram_budget_mb" in data
 
-    # 3. Assert no password or unmasked connection string appears in the response
+    # 3. Headers check: X-Response-Time-Ms and X-DB-Queries must be present
+    assert "X-Response-Time-Ms" in auth_resp.headers
+    assert "X-DB-Queries" in auth_resp.headers
+
+    # 4. TTL Cache check: subsequent call within 15s must serve cached DB counts with 0 db queries
+    auth_resp2 = client.get("/admin/system-health", headers=headers)
+    assert auth_resp2.status_code == 200
+    assert "X-DB-Queries" in auth_resp2.headers
+    assert int(auth_resp2.headers["X-DB-Queries"]) == 0
+
+    # 5. fresh=true bypasses cache
+    auth_resp_fresh = client.get("/admin/system-health?fresh=true", headers=headers)
+    assert auth_resp_fresh.status_code == 200
+
+    # 6. Assert no password or unmasked connection string appears in the response
     assert "postgresql://" not in auth_resp.text or ":***@" in auth_resp.text
