@@ -110,15 +110,22 @@ class ObjectDetector:
         image_bgr: np.ndarray,
         box: Optional[Tuple[int, int, int, int]] = None,
         label: str = "VERIFIED",
-        status: str = "SUCCESS"
-    ) -> str:
+        status: str = "SUCCESS",
+        hand_present: bool = False,
+        face_present: bool = False
+    ) -> Optional[str]:
         """
         Save evidence snapshot to uploads/evidence/ and return URL.
         Privacy Enforcement:
         - CROPS OF PRODUCT AREA ONLY (never full camera frames, never faces).
+        - If hand_present or face_present: NEVER save snapshot to disk, return None.
         - If box is provided: strictly crops product bounding box.
         - If box is omitted: crops centered product region (never entire frame).
+          Centered fallback is strictly forbidden when hand_present or face_present is True.
         """
+        if hand_present or face_present:
+            return None
+
         filename = f"{status.lower()}_{uuid.uuid4().hex[:10]}.jpg"
         filepath = os.path.join(settings.EVIDENCE_DIR, filename)
 

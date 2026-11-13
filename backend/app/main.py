@@ -193,6 +193,7 @@ _detailed_health_cache: Dict[str, Any] = {
     "total_products": 0,
     "vectors_count": 0,
     "products_enrolled": 0,
+    "mismatched_vectors": 0,
     "storage_ok": True,
     "last_job_data": None,
 }
@@ -232,6 +233,7 @@ def _get_detailed_health_data(fresh: bool = False):
         total_products = _detailed_health_cache["total_products"]
         vectors_count = _detailed_health_cache["vectors_count"]
         products_enrolled = _detailed_health_cache["products_enrolled"]
+        mismatched_vectors = _detailed_health_cache["mismatched_vectors"]
         last_job_data = _detailed_health_cache["last_job_data"]
     else:
         storage_ok = False
@@ -247,6 +249,7 @@ def _get_detailed_health_data(fresh: bool = False):
         total_products = 0
         vectors_count = 0
         products_enrolled = 0
+        mismatched_vectors = 0
         last_job_data = None
         if db_ok and SessionLocal:
             try:
@@ -254,10 +257,15 @@ def _get_detailed_health_data(fresh: bool = False):
                 try:
                     from app.models.product import Product, ProductEmbedding
                     from app.models.scan_job import ScanJob
+                    from app.config import CURRENT_PREPROCESSING_VERSION
                     from sqlalchemy import func
                     total_products = db.query(Product).count()
                     vectors_count = db.query(ProductEmbedding).count()
                     products_enrolled = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
+                    mismatched_vectors = db.query(ProductEmbedding).filter(
+                        (ProductEmbedding.preprocessing_version != CURRENT_PREPROCESSING_VERSION) |
+                        (ProductEmbedding.preprocessing_version.is_(None))
+                    ).count()
 
                     last_job = db.query(ScanJob).order_by(ScanJob.created_at.desc()).first()
                     if last_job:
@@ -279,6 +287,7 @@ def _get_detailed_health_data(fresh: bool = False):
         _detailed_health_cache["total_products"] = total_products
         _detailed_health_cache["vectors_count"] = vectors_count
         _detailed_health_cache["products_enrolled"] = products_enrolled
+        _detailed_health_cache["mismatched_vectors"] = mismatched_vectors
         _detailed_health_cache["last_job_data"] = last_job_data
 
     memory_rss_mb = 0.0
@@ -342,6 +351,12 @@ def _get_detailed_health_data(fresh: bool = False):
         "total_products": total_products,
         "vectors_count": vectors_count,
         "products_enrolled": products_enrolled,
+        "preprocessing_version_current": getattr(settings, "CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224"),
+        "preprocessing_mismatch_count": mismatched_vectors,
+        "preprocessing_warning": (
+            f"Detected {mismatched_vectors} enrolled vector(s) using an outdated preprocessing version. Re-enrollment recommended."
+            if mismatched_vectors > 0 else None
+        ),
         "embed_ms_last": metrics["embed_ms_last"],
         "embed_ms_avg": metrics["embed_ms_avg"],
         "scan_worker_metrics": worker_metrics,

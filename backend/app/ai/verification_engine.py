@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
-from app.config import settings
+from app.config import settings, CURRENT_PREPROCESSING_VERSION
 from app.ai.feature_extractor import feature_extractor
 from app.ai.vector_store import VectorStoreMatcher
 from app.ai.object_detector import object_detector
@@ -120,7 +120,22 @@ class AIVerificationEngine:
             scanned_product = db.query(Product).filter(Product.barcode == claimed_barcode).first()
         scanned_product_name = scanned_product.name if scanned_product else (f"Barcode {claimed_barcode}" if claimed_barcode else None)
 
-        # 1. Privacy Check: Face on Packaging (or human face in view)
+        # 1. Privacy & Hand Gate: Hand or Face presence
+        if hand_present:
+            decision = "HAND_IN_CART"
+            message = "We see a hand in the cart. Please remove your hand so the camera can verify."
+            # Never save crop, never embed, never store evidence
+            return {
+                "decision": decision,
+                "status": "WARNING",
+                "warning_reason": "HAND_DETECTED",
+                "confidence": 0.0,
+                "top_match": None,
+                "top_candidates": [],
+                "evidence_url": None,
+                "message": message
+            }
+
         if face_present:
             decision = "FACE_DETECTED_WITHHELD"
             message = "We can't check this item. Please ask staff"
@@ -166,12 +181,25 @@ class AIVerificationEngine:
             crop_pil = object_detector.crop_object(img_bgr, det_box)
         else:
             # Fallback: crop central region to prevent full frame storage
+            # CRITICAL PRIVACY RULE: Fallback central crop can ONLY be used when NO hand and NO face is present
+            if hand_present or face_present:
+                return {
+                    "decision": "HAND_IN_CART" if hand_present else "FACE_DETECTED_WITHHELD",
+                    "status": "WARNING",
+                    "warning_reason": "HAND_DETECTED" if hand_present else "FACE_DETECTED",
+                    "confidence": 0.0,
+                    "top_match": None,
+                    "top_candidates": [],
+                    "evidence_url": None,
+                    "message": "We see a hand in the cart. Please remove your hand so the camera can verify." if hand_present else "We can't check this item. Please ask staff"
+                }
             w, h = pil_full.size
             crop_pil = pil_full.crop((int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)))
 
         # 4. PREPARE CROP WITH EXACTLY THE SAME FUNCTION THAT ENROLLMENT USES
         # scan_worker.preprocess_product_image_for_embedding is the single canonical preparation routine
-        preprocessed_crop = preprocess_product_image_for_embedding(crop_pil, force_grabcut=False)
+        # and applies the should_apply_grabcut rule identically on any crop
+        preprocessed_crop = preprocess_product_image_for_embedding(crop_pil)
 
         # 5. Extract 512-dim embedding with ONNX INT8 CLIP ViT-B/32
         query_vector = feature_extractor.get_embedding(preprocessed_crop)
@@ -188,7 +216,9 @@ class AIVerificationEngine:
             image_bgr=img_bgr,
             box=det_box,
             label=f"{top1['product_name'] if top1 else 'Item'} ({top1_score*100:.1f}%)",
-            status="SUCCESS" if top1_score >= high_thresh else "UNCERTAIN"
+            status="SUCCESS" if top1_score >= high_thresh else "UNCERTAIN",
+            hand_present=hand_present,
+            face_present=face_present
         )
 
         # CASE A: No PENDING item scanned (Unscanned item placed in cart)
@@ -350,7 +380,7 @@ class AIVerificationEngine:
         if motion_box:
             crop_pil = object_detector.crop_object(img_bgr, motion_box)
             try:
-                preproc = preprocess_product_image_for_embedding(crop_pil, force_grabcut=False)
+                preproc = preprocess_product_image_for_embedding(crop_pil)
                 crop_vec = feature_extractor.get_embedding(preproc)
                 is_match, sim = VectorStoreMatcher.verify_claimed_barcode(db, target_barcode, crop_vec)
                 if (is_match or sim >= low_thresh) and sim > max_sim:
@@ -364,7 +394,9 @@ class AIVerificationEngine:
                 image_bgr=img_bgr,
                 box=motion_box,
                 label=f"STILL IN CART ({max_sim*100:.1f}%)",
-                status="DANGER"
+                status="DANGER",
+                hand_present=hand_present,
+                face_present=False
             )
             return {
                 "decision": "STILL_IN_CART",
@@ -378,7 +410,9 @@ class AIVerificationEngine:
         evidence_url = object_detector.save_evidence_snapshot(
             image_bgr=img_bgr,
             label="REMOVAL CONFIRMED",
-            status="SUCCESS"
+            status="SUCCESS",
+            hand_present=hand_present,
+            face_present=False
         )
 
         self._record_decision(
@@ -423,7 +457,8 @@ class AIVerificationEngine:
         threshold_high: float,
         threshold_low: float,
         evidence_path: Optional[str],
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        preprocessing_version: str = CURRENT_PREPROCESSING_VERSION
     ) -> None:
         """Persist structured decision record with exact scores, thresholds, and evidence."""
         if not db:
@@ -443,6 +478,7 @@ class AIVerificationEngine:
                 threshold_high=threshold_high,
                 threshold_low=threshold_low,
                 evidence_path=evidence_path,
+                preprocessing_version=preprocessing_version,
                 details_json=json.dumps(details or {}),
                 created_at=datetime.utcnow()
             )

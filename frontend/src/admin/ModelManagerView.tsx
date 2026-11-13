@@ -268,6 +268,18 @@ export const ModelManagerView: React.FC = () => {
               {savingThresholds ? 'Saving...' : 'Apply Changes'}
             </button>
           </div>
+
+          <div className="p-3 bg-cyan-50 dark:bg-cyan-950/30 border border-cyan-200 dark:border-cyan-800 rounded-2xl flex items-center justify-between">
+            <span className="text-cyan-900 dark:text-cyan-200 font-medium text-xs">
+              Calibrate thresholds with live webcam frames using empirical Decision Analysis.
+            </span>
+            <a
+              href="/cart-device"
+              className="bg-cyan-600 hover:bg-cyan-700 text-white font-semibold px-3 py-1.5 rounded-xl shadow-sm text-xs active:scale-95 transition-all"
+            >
+              Open /cart-device Calibration
+            </a>
+          </div>
         </div>
       </div>
 

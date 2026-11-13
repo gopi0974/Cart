@@ -11,6 +11,7 @@ import cv2
 from PIL import Image, ImageEnhance
 from sqlalchemy.orm import Session
 
+from app.config import CURRENT_PREPROCESSING_VERSION
 from app.database import SessionLocal
 from app.models.product import Product, ProductImage
 from app.models.scan_job import ScanJob
@@ -84,16 +85,70 @@ def cleanup_orphaned_jobs_on_startup():
         db.close()
 
 
-def preprocess_product_image_for_embedding(pil_img: Image.Image, force_grabcut: bool = False) -> Image.Image:
+def should_apply_grabcut(image: Image.Image, explicit_poor_crop: Optional[bool] = None) -> bool:
+    """
+    Evaluates whether an image crop requires GrabCut foreground segmentation.
+    This rule is shared and identical between 360-scan enrollment and cart-device verification.
+
+    Decision Rule:
+    1. If explicit_poor_crop is passed (e.g. from user annotation or client tag), respect it.
+    2. Dimension check: if width < 40 or height < 40, GrabCut cannot build reliable GMM models -> False.
+    3. Border variance & contrast check:
+       Examines the 6% outer perimeter border of the crop.
+       - A clean crop (e.g. turntable or bounding box on clean background) has low perimeter variance (border_std <= 20.0).
+       - A cluttered crop (e.g. cart basket wires, conveyor, shelf in background) has high perimeter variance (border_std > 20.0)
+         and distinct color contrast against the inner region.
+       - Returns True (run GrabCut) if border_std > 20.0 and total_std > 15.0. Otherwise returns False (bilinear 224x224).
+    """
+    if explicit_poor_crop is not None:
+        return bool(explicit_poor_crop)
+
+    try:
+        w, h = image.size
+        if w < 40 or h < 40:
+            return False
+
+        np_img = np.array(image.convert("RGB"))
+        h_px, w_px = np_img.shape[:2]
+
+        bx = max(1, int(w_px * 0.06))
+        by = max(1, int(h_px * 0.06))
+
+        top_strip = np_img[:by, :, :]
+        bot_strip = np_img[-by:, :, :]
+        left_strip = np_img[:, :bx, :]
+        right_strip = np_img[:, -bx:, :]
+
+        border_pixels = np.concatenate([
+            top_strip.reshape(-1, 3),
+            bot_strip.reshape(-1, 3),
+            left_strip.reshape(-1, 3),
+            right_strip.reshape(-1, 3)
+        ], axis=0)
+
+        border_std = float(np.mean(np.std(border_pixels, axis=0)))
+        total_std = float(np.mean(np.std(np_img, axis=(0, 1))))
+
+        return border_std > 20.0 and total_std > 15.0
+    except Exception:
+        return False
+
+
+def preprocess_product_image_for_embedding(pil_img: Image.Image, force_grabcut: Optional[bool] = None) -> Image.Image:
     """
     Standard preprocessing for embedding:
-    - If force_grabcut is False (default): the browser already cropped the product.
-      Resizes to 224x224 directly, skipping CPU-heavy GrabCut.
-    - If force_grabcut is True (crop flagged as poor): runs GrabCut segmentation
-      initialized from product box and composites onto neutral grey (128, 128, 128).
+    - Calls should_apply_grabcut to determine whether GrabCut is required.
+    - If False: resizes directly to 224x224 (preserves fine product text & saves CPU time).
+    - If True: runs GrabCut segmentation initialized from product box and composites onto neutral grey (128, 128, 128).
+    Used identically across scan worker enrollment and live cart verification.
     """
-    if not force_grabcut:
-        # Client-side crop was good: skip GrabCut completely for 160x speedup
+    if force_grabcut is None:
+        run_grabcut = should_apply_grabcut(pil_img)
+    else:
+        run_grabcut = bool(force_grabcut)
+
+    if not run_grabcut:
+        # Clean crop: skip GrabCut for speed and preserving package printing sharpness
         return pil_img.resize((224, 224), Image.BILINEAR)
 
     try:
@@ -135,7 +190,7 @@ def preprocess_product_image_for_embedding(pil_img: Image.Image, force_grabcut: 
         return pil_img.resize((224, 224), Image.BILINEAR)
 
 
-def _downscale_and_remove_background(pil_img: Image.Image, force_grabcut: bool = False) -> Image.Image:
+def _downscale_and_remove_background(pil_img: Image.Image, force_grabcut: Optional[bool] = None) -> Image.Image:
     return preprocess_product_image_for_embedding(pil_img, force_grabcut=force_grabcut)
 
 
@@ -144,9 +199,10 @@ def _generate_variants_224(base_224: Image.Image, matted_224: Optional[Image.Ima
     Produce 1 base image + 1 realistic augmentation variant per frame.
     Reduces total vector extraction load from 8x down to 2x per frame.
     """
+    img_to_use = matted_224 if matted_224 is not None else base_224
     variants = [
-        ("BASE", base_224),
-        ("AUG_BRIGHT", ImageEnhance.Brightness(base_224).enhance(1.10)),
+        ("BASE", img_to_use),
+        ("AUG_BRIGHT", ImageEnhance.Brightness(img_to_use).enhance(1.10)),
     ]
     return variants
 
@@ -337,9 +393,10 @@ def _execute_scan_job_sync(job_id: str):
                 t_crop_ms = (time.time() - t_crop_start) * 1000.0
                 crop_times.append(t_crop_ms)
 
-                # Stage C: Background removal (only if flagged poor_crop)
+                # Stage C: Background removal (applied identically using should_apply_grabcut rule)
                 t_bg_start = time.time()
-                if poor_crop:
+                needs_grabcut = should_apply_grabcut(pil_img, explicit_poor_crop=poor_crop if poor_crop else None)
+                if needs_grabcut:
                     matted_224 = _downscale_and_remove_background(pil_img, force_grabcut=True)
                 else:
                     matted_224 = base_224  # Browser crop was good, skip GrabCut!
@@ -427,6 +484,7 @@ def _execute_scan_job_sync(job_id: str):
                         image_path=entry.get("frame_ref"),
                         model_name=MODEL_NAME,
                         model_version=MODEL_VERSION,
+                        preprocessing_version=CURRENT_PREPROCESSING_VERSION,
                         vector_dim=VECTOR_DIM,
                         commit=False
                     )

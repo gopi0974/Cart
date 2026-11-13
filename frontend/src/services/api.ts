@@ -741,4 +741,59 @@ export const api = {
       body: JSON.stringify({ image_data_url: imageDataUrl, target_barcode: targetBarcode }),
     });
   },
+
+  async recordCalibrationSample(data: {
+    target_barcode: string;
+    image_data_url: string;
+    angle_label?: string;
+    hand_present?: boolean;
+    face_present?: boolean;
+  }) {
+    return request<{
+      sample: any;
+      total_samples: number;
+      is_same_product: boolean;
+      message: string;
+    }>('/vision/calibration/sample', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getCalibrationStats() {
+    return request<{
+      samples: any[];
+      total_samples: number;
+      same_product_stats: any;
+      diff_product_stats: any;
+      threshold_matrix: Array<{
+        threshold: number;
+        false_accepts: number;
+        false_accept_rate: number;
+        false_rejects: number;
+        false_reject_rate: number;
+      }>;
+      suggested_high: number;
+      suggested_low: number;
+      active_high: number;
+      active_low: number;
+    }>('/vision/calibration/stats');
+  },
+
+  async resetCalibrationSession() {
+    return request<{ message: string; count: number }>('/vision/calibration/reset', {
+      method: 'POST',
+    });
+  },
+
+  async applyCalibrationThresholds(confidence_high: number, confidence_low: number) {
+    return request<{
+      confidence_high: number;
+      confidence_low: number;
+      message: string;
+    }>('/vision/calibration/apply-thresholds', {
+      method: 'POST',
+      body: JSON.stringify({ confidence_high, confidence_low }),
+    });
+  },
 };

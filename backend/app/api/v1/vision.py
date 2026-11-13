@@ -3,6 +3,8 @@ import uuid
 import json
 import base64
 import logging
+import threading
+from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form
@@ -67,6 +69,17 @@ class RetryJobRequest(BaseModel):
 class PreviewTestRequest(BaseModel):
     image_data_url: str
     target_barcode: Optional[str] = None
+
+class CalibrationSampleRequest(BaseModel):
+    target_barcode: str
+    image_data_url: str
+    angle_label: Optional[str] = "OVERHEAD"
+    hand_present: bool = False
+    face_present: bool = False
+
+class ApplyThresholdsRequest(BaseModel):
+    confidence_high: float
+    confidence_low: float
 
 def _remove_background(pil_img: Image.Image) -> Image.Image:
     """Segment object foreground from background using GrabCut."""
@@ -842,4 +855,205 @@ def preview_recognition_test(
         "threshold_high": settings.CONFIDENCE_HIGH,
         "message": message,
         "scan_quality_recommendation": scan_quality_recommendation
+    }
+
+
+# In-memory calibration session storage
+_calibration_samples: List[Dict[str, Any]] = []
+_calibration_lock = threading.Lock()
+
+
+def _calc_dist_stats(vals: List[float]) -> Dict[str, float]:
+    if not vals:
+        return {"min": 0.0, "mean": 0.0, "max": 0.0, "p5": 0.0, "p50": 0.0, "p95": 0.0, "count": 0}
+    arr = np.array(vals)
+    return {
+        "min": round(float(np.min(arr)), 4),
+        "mean": round(float(np.mean(arr)), 4),
+        "max": round(float(np.max(arr)), 4),
+        "p5": round(float(np.percentile(arr, 5)), 4),
+        "p50": round(float(np.percentile(arr, 50)), 4),
+        "p95": round(float(np.percentile(arr, 95)), 4),
+        "count": len(arr),
+    }
+
+
+def _calc_threshold_matrix(same_scores: List[float], diff_scores: List[float]) -> List[Dict[str, Any]]:
+    eval_thresholds = [0.60, 0.70, 0.80, 0.85]
+    matrix = []
+    total_same = len(same_scores)
+    total_diff = len(diff_scores)
+
+    for thresh in eval_thresholds:
+        fa_count = sum(1 for s in diff_scores if s >= thresh)
+        fa_rate = round((fa_count / total_diff) * 100.0, 1) if total_diff > 0 else 0.0
+
+        fr_count = sum(1 for s in same_scores if s < thresh)
+        fr_rate = round((fr_count / total_same) * 100.0, 1) if total_same > 0 else 0.0
+
+        matrix.append({
+            "threshold": thresh,
+            "false_accepts": fa_count,
+            "false_accept_rate": fa_rate,
+            "false_rejects": fr_count,
+            "false_reject_rate": fr_rate,
+        })
+    return matrix
+
+
+@router.post("/calibration/sample")
+def record_calibration_sample(
+    req: CalibrationSampleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Records a live camera frame during a Calibration Session.
+    Extracts real ONNX INT8 CLIP embedding, queries vector store,
+    and updates empirical same-product vs different-product score distributions.
+    """
+    if req.hand_present:
+        raise HTTPException(
+            status_code=400,
+            detail="Hand detected in camera frame. Remove hands before recording calibration sample."
+        )
+    if req.face_present:
+        raise HTTPException(
+            status_code=400,
+            detail="Face detected in frame. Frame withheld for privacy."
+        )
+
+    if not req.image_data_url or len(req.image_data_url) < 100:
+        raise HTTPException(status_code=400, detail="Invalid camera frame data received.")
+
+    try:
+        from app.services.scan_worker import preprocess_product_image_for_embedding
+        raw_b64 = req.image_data_url
+        if raw_b64.startswith("data:image"):
+            raw_b64 = raw_b64.split(",", 1)[1]
+        raw_pil = Image.open(io.BytesIO(base64.b64decode(raw_b64))).convert("RGB")
+        preprocessed_img = preprocess_product_image_for_embedding(raw_pil)
+        query_vector = get_embedding(preprocessed_img)
+    except Exception as e:
+        logger.error(f"Failed to process calibration frame: {e}")
+        raise HTTPException(status_code=400, detail=f"Failed to process calibration frame: {str(e)}")
+
+    target_prod = db.query(Product).filter(Product.barcode == req.target_barcode).first()
+    target_name = target_prod.name if target_prod else req.target_barcode
+
+    top_matches = VectorStoreMatcher.find_nearest_product(db, query_vector, top_k=3)
+    top1 = top_matches[0] if top_matches else None
+    top2 = top_matches[1] if len(top_matches) > 1 else None
+
+    top1_score = float(top1["similarity"]) if top1 else 0.0
+    top2_score = float(top2["similarity"]) if top2 else 0.0
+    top1_barcode = top1.get("barcode") if top1 else None
+    is_same = bool(top1 and top1_barcode == req.target_barcode)
+
+    is_target_match, target_sim = VectorStoreMatcher.verify_claimed_barcode(
+        db=db,
+        claimed_barcode=req.target_barcode,
+        query_vector=query_vector
+    )
+
+    sample_id = str(uuid.uuid4())[:8]
+    sample_record = {
+        "id": sample_id,
+        "target_barcode": req.target_barcode,
+        "target_product_name": target_name,
+        "angle_label": req.angle_label or "OVERHEAD",
+        "top1_product_name": top1["product_name"] if top1 else "No Match",
+        "top1_barcode": top1_barcode,
+        "top1_score": top1_score,
+        "top2_product_name": top2["product_name"] if top2 else None,
+        "top2_barcode": top2.get("barcode") if top2 else None,
+        "top2_score": top2_score,
+        "target_score": float(target_sim),
+        "is_same_product": is_same,
+        "recorded_at": datetime.utcnow().strftime("%H:%M:%S")
+    }
+
+    with _calibration_lock:
+        _calibration_samples.append(sample_record)
+
+    return {
+        "sample": sample_record,
+        "total_samples": len(_calibration_samples),
+        "is_same_product": is_same,
+        "message": f"Sample #{len(_calibration_samples)} recorded: Top match {top1['product_name'] if top1 else 'None'} ({top1_score*100:.1f}%)"
+    }
+
+
+@router.get("/calibration/stats")
+def get_calibration_stats(
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Returns live calibration session statistics, empirical score distributions,
+    decision matrix (false accepts & false rejects at 0.60, 0.70, 0.80, 0.85),
+    and data-driven suggested HIGH and LOW thresholds.
+    """
+    with _calibration_lock:
+        samples = list(_calibration_samples)
+
+    same_scores = [float(s["target_score"]) for s in samples if s.get("target_score", 0.0) > 0.0]
+    diff_scores = [
+        float(s["top1_score"]) for s in samples
+        if not s.get("is_same_product", False) and s.get("top1_score", 0.0) > 0.0
+    ]
+
+    same_stats = _calc_dist_stats(same_scores)
+    diff_stats = _calc_dist_stats(diff_scores)
+    matrix = _calc_threshold_matrix(same_scores, diff_scores)
+
+    # Suggested HIGH: aim for conservative auto-approve (p5 of same_scores, min 0.70, default 0.80)
+    suggested_high = 0.80
+    if same_stats["count"] >= 3:
+        suggested_high = round(max(0.70, min(0.92, float(same_stats["p5"]))), 2)
+
+    # Suggested LOW: slightly above highest diff_product match to filter false positives
+    suggested_low = 0.55
+    if diff_stats["count"] >= 3:
+        suggested_low = round(min(suggested_high - 0.05, max(0.45, float(diff_stats["max"]) + 0.03)), 2)
+
+    return {
+        "samples": samples,
+        "total_samples": len(samples),
+        "same_product_stats": same_stats,
+        "diff_product_stats": diff_stats,
+        "threshold_matrix": matrix,
+        "suggested_high": suggested_high,
+        "suggested_low": suggested_low,
+        "active_high": settings.CONFIDENCE_HIGH,
+        "active_low": settings.CONFIDENCE_LOW,
+    }
+
+
+@router.post("/calibration/reset")
+def reset_calibration_session(
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Clears all recorded calibration session samples."""
+    with _calibration_lock:
+        _calibration_samples.clear()
+    return {"message": "Calibration session reset successfully.", "count": 0}
+
+
+@router.post("/calibration/apply-thresholds")
+def apply_calibration_thresholds(
+    req: ApplyThresholdsRequest,
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """Applies empirical calibration thresholds to live system settings."""
+    if req.confidence_high <= req.confidence_low:
+        raise HTTPException(status_code=400, detail="CONFIDENCE_HIGH must be greater than CONFIDENCE_LOW")
+    if req.confidence_high > 1.0 or req.confidence_low < 0.0:
+        raise HTTPException(status_code=400, detail="Thresholds must be between 0.0 and 1.0")
+
+    settings.CONFIDENCE_HIGH = float(req.confidence_high)
+    settings.CONFIDENCE_LOW = float(req.confidence_low)
+    return {
+        "confidence_high": settings.CONFIDENCE_HIGH,
+        "confidence_low": settings.CONFIDENCE_LOW,
+        "message": f"Applied live thresholds: HIGH={settings.CONFIDENCE_HIGH:.2f}, LOW={settings.CONFIDENCE_LOW:.2f}"
     }

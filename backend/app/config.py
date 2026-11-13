@@ -114,6 +114,7 @@ class Settings(BaseModel):
     CONFIDENCE_MEDIUM: float = float(os.getenv("CONFIDENCE_MEDIUM", "0.65"))
     CONFIDENCE_LOW: float = float(os.getenv("CONFIDENCE_LOW", "0.65"))
     EVIDENCE_RETENTION_DAYS: int = int(os.getenv("EVIDENCE_RETENTION_DAYS", "14"))
+    CURRENT_PREPROCESSING_VERSION: str = os.getenv("CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224")
     
     # Payment Gateway (Test mode only)
     PAYMENT_MODE: str = os.getenv("PAYMENT_MODE", "TEST")
@@ -121,6 +122,8 @@ class Settings(BaseModel):
     PAYMENT_KEY_SECRET: str = os.getenv("PAYMENT_KEY_SECRET", "test_secret_mock_sandbox")
 
 settings = Settings()
+
+CURRENT_PREPROCESSING_VERSION = settings.CURRENT_PREPROCESSING_VERSION
 
 # Ensure directories exist
 settings.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)

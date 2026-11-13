@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
+from app.config import CURRENT_PREPROCESSING_VERSION
 
 try:
     from pgvector.sqlalchemy import Vector
@@ -63,6 +64,7 @@ class ProductEmbedding(Base):
     image_path = Column(Text, nullable=True)
     model_name = Column(String(100), nullable=False, default="openai/clip-vit-base-patch32")
     model_version = Column(String(50), nullable=False, default="v1.0.0-clip")
+    preprocessing_version = Column(String(50), nullable=False, default=CURRENT_PREPROCESSING_VERSION)
     vector_dim = Column(Integer, nullable=False, default=512)
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.product import ProductEmbedding, Product
 from app.ai.feature_extractor import VisualFeatureExtractor, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
 from app.database import engine
-from app.config import settings
+from app.config import settings, CURRENT_PREPROCESSING_VERSION
 
 logger = logging.getLogger("smartcart.ai.vector_store")
 
@@ -65,6 +65,7 @@ class VectorStoreMatcher:
         image_path: Optional[str] = None,
         model_name: str = MODEL_NAME,
         model_version: str = MODEL_VERSION,
+        preprocessing_version: str = CURRENT_PREPROCESSING_VERSION,
         vector_dim: int = VECTOR_DIM,
         commit: bool = True
     ) -> ProductEmbedding:
@@ -74,6 +75,7 @@ class VectorStoreMatcher:
         - image path
         - model name
         - model version
+        - preprocessing version
         - vector dimension
         - created time
         """
@@ -87,6 +89,7 @@ class VectorStoreMatcher:
             image_path=image_path,
             model_name=model_name,
             model_version=model_version,
+            preprocessing_version=preprocessing_version,
             vector_dim=vector_dim,
             created_at=datetime.utcnow()
         )

@@ -71,7 +71,10 @@ def postgres_service():
         "--no-locale",
         "-E", "UTF8"
     ]
-    res = subprocess.run(init_cmd, capture_output=True, text=True)
+    try:
+        res = subprocess.run(init_cmd, capture_output=True, text=True)
+    except OSError as e:
+        pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res.returncode != 0:
         pytest.fail(f"initdb failed: {res.stderr}")
 
@@ -85,7 +88,10 @@ def postgres_service():
         "-o", f"-p {PG_PORT}",
         "-w"
     ]
-    res_start = subprocess.run(start_cmd, capture_output=True, text=True)
+    try:
+        res_start = subprocess.run(start_cmd, capture_output=True, text=True)
+    except OSError as e:
+        pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res_start.returncode != 0:
         pytest.fail(f"pg_ctl start failed: {res_start.stderr}")
 
@@ -119,7 +125,10 @@ def postgres_service():
         "-m", "fast",
         "-w"
     ]
-    subprocess.run(stop_cmd, capture_output=True, text=True)
+    try:
+        subprocess.run(stop_cmd, capture_output=True, text=True)
+    except Exception:
+        pass
     try:
         shutil.rmtree(PG_DATA, ignore_errors=True)
     except Exception:

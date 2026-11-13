@@ -83,5 +83,6 @@ class VerificationDecision(Base):
     threshold_high = Column(Float, nullable=False)
     threshold_low = Column(Float, nullable=False)
     evidence_path = Column(Text, nullable=True)
+    preprocessing_version = Column(String(50), nullable=False, default="v2_bilinear_224")
     details_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)

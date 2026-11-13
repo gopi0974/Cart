@@ -16,10 +16,14 @@ import {
   AlertTriangle,
   Activity,
   UserCheck,
-  Hand
+  Hand,
+  Sliders,
+  Target,
+  CheckCircle2,
+  BarChart2
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
-import { getApiBaseUrl } from '../services/api';
+import { getApiBaseUrl, api } from '../services/api';
 import { privacyDetector, DetectorState } from '../services/privacyDetector';
 import { Link } from 'react-router-dom';
 
@@ -108,6 +112,101 @@ export const CartDeviceView: React.FC = () => {
         ]);
       });
   }, []);
+
+  // Calibration session state
+  const [productsList, setProductsList] = useState<Array<{ id: string; name: string; barcode: string }>>([]);
+  const [calibrationOpen, setCalibrationOpen] = useState<boolean>(false);
+  const [calTargetBarcode, setCalTargetBarcode] = useState<string>('');
+  const [calAngleLabel, setCalAngleLabel] = useState<string>('OVERHEAD');
+  const [calStats, setCalStats] = useState<any>(null);
+  const [isRecordingCal, setIsRecordingCal] = useState<boolean>(false);
+  const [applyingThresholds, setApplyingThresholds] = useState<boolean>(false);
+
+  useEffect(() => {
+    api.getProducts()
+      .then((prods) => {
+        setProductsList(prods);
+        if (prods.length > 0) {
+          setCalTargetBarcode(prods[0].barcode);
+        }
+      })
+      .catch(() => {});
+    
+    // Also load initial calibration stats if any
+    api.getCalibrationStats().then((stats) => {
+      if (stats && stats.total_samples > 0) {
+        setCalStats(stats);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleRecordCalibrationSample = async () => {
+    if (!videoRef.current || !calTargetBarcode) {
+      addLog('Cannot record sample: camera not running or no target product selected.', 'warn');
+      return;
+    }
+    if (handPresent) {
+      addLog('Calibration aborted: Hand detected in frame. Remove hand.', 'warn');
+      return;
+    }
+    if (facePresent) {
+      addLog('Calibration aborted: Face detected in frame. Frame withheld.', 'warn');
+      return;
+    }
+
+    setIsRecordingCal(true);
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 480;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not create canvas context');
+      ctx.drawImage(video, 0, 0, 640, 480);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+      const res = await api.recordCalibrationSample({
+        target_barcode: calTargetBarcode,
+        image_data_url: dataUrl,
+        angle_label: calAngleLabel,
+        hand_present: handPresent,
+        face_present: facePresent
+      });
+
+      addLog(res.message, res.is_same_product ? 'success' : 'warn');
+      const stats = await api.getCalibrationStats();
+      setCalStats(stats);
+    } catch (e: any) {
+      addLog(`Calibration error: ${e.message}`, 'error');
+    } finally {
+      setIsRecordingCal(false);
+    }
+  };
+
+  const handleResetCalibration = async () => {
+    try {
+      await api.resetCalibrationSession();
+      setCalStats(null);
+      addLog('Calibration session reset.', 'info');
+    } catch (e: any) {
+      addLog(`Failed to reset calibration: ${e.message}`, 'error');
+    }
+  };
+
+  const handleApplyCalibrationThresholds = async () => {
+    if (!calStats) return;
+    setApplyingThresholds(true);
+    try {
+      const res = await api.applyCalibrationThresholds(calStats.suggested_high, calStats.suggested_low);
+      addLog(res.message, 'success');
+      const refreshed = await api.getCalibrationStats();
+      setCalStats(refreshed);
+    } catch (e: any) {
+      addLog(`Failed to apply thresholds: ${e.message}`, 'error');
+    } finally {
+      setApplyingThresholds(false);
+    }
+  };
 
   const handleStart = async () => {
     if (!deviceToken.trim()) {
@@ -483,6 +582,178 @@ export const CartDeviceView: React.FC = () => {
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Real Calibration Session Card */}
+          <div className="bg-[#0D1322] border border-cyan-900/50 rounded-3xl p-5 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-cyan-400" />
+                Live Calibration Session
+              </h2>
+              <button
+                type="button"
+                onClick={() => setCalibrationOpen(!calibrationOpen)}
+                className="text-[11px] font-medium text-cyan-400 hover:text-cyan-300 underline"
+              >
+                {calibrationOpen ? 'Hide Tool' : 'Open Tool'}
+              </button>
+            </div>
+
+            {calibrationOpen && (
+              <div className="space-y-4 pt-1">
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Place a known product at several positions and viewpoints inside the cart basket.
+                  The system records real-time top-1 and top-2 cosine scores from live webcam frames to derive empirical HIGH and LOW thresholds.
+                </p>
+
+                {/* Target Product & Viewpoint Selector */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                      Target Product
+                    </label>
+                    <select
+                      value={calTargetBarcode}
+                      onChange={(e) => setCalTargetBarcode(e.target.value)}
+                      className="w-full bg-[#131B2E] border border-slate-700 text-white rounded-xl px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                    >
+                      {productsList.map((p) => (
+                        <option key={p.barcode} value={p.barcode}>
+                          {p.name} ({p.barcode.slice(-5)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                      Angle / Viewpoint
+                    </label>
+                    <select
+                      value={calAngleLabel}
+                      onChange={(e) => setCalAngleLabel(e.target.value)}
+                      className="w-full bg-[#131B2E] border border-slate-700 text-white rounded-xl px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                    >
+                      <option value="OVERHEAD">Overhead (Center)</option>
+                      <option value="FRONT">Front Face Up</option>
+                      <option value="SIDE">Side Angle</option>
+                      <option value="TILTED">Tilted 45°</option>
+                      <option value="CORNER">Basket Corner</option>
+                      <option value="LABEL_CLOSEUP">Label Facing Camera</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Capture & Reset Actions */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleRecordCalibrationSample}
+                    disabled={!isRunning || isRecordingCal}
+                    className="flex-1 py-2.5 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-md"
+                  >
+                    <Target className="w-3.5 h-3.5" />
+                    <span>{isRecordingCal ? 'Recording...' : 'Record Sample Frame'}</span>
+                  </button>
+                  <button
+                    onClick={handleResetCalibration}
+                    disabled={!calStats || calStats.total_samples === 0}
+                    className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 font-bold text-xs"
+                    title="Reset calibration session samples"
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                {/* Calibration Live Stats & Score Ranges */}
+                {calStats && calStats.total_samples > 0 && (
+                  <div className="space-y-3 pt-2 border-t border-slate-800/80">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-slate-300 flex items-center gap-1.5">
+                        <BarChart2 className="w-3.5 h-3.5 text-cyan-400" />
+                        Empirical Ranges ({calStats.total_samples} samples)
+                      </span>
+                      <span className="text-[10px] text-slate-500">Live Webcam Data</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="bg-[#131B2E] border border-emerald-900/40 rounded-xl p-2.5">
+                        <div className="text-[10px] uppercase font-bold text-emerald-400">Same Product</div>
+                        <div className="text-sm font-mono font-bold text-white mt-0.5">
+                          {calStats.same_product_stats.count > 0
+                            ? `${(calStats.same_product_stats.min * 100).toFixed(1)}% - ${(calStats.same_product_stats.max * 100).toFixed(1)}%`
+                            : 'N/A'}
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1">
+                          Mean: {(calStats.same_product_stats.mean * 100).toFixed(1)}% • p5: {(calStats.same_product_stats.p5 * 100).toFixed(1)}%
+                        </div>
+                      </div>
+
+                      <div className="bg-[#131B2E] border border-rose-900/40 rounded-xl p-2.5">
+                        <div className="text-[10px] uppercase font-bold text-rose-400">Different Product</div>
+                        <div className="text-sm font-mono font-bold text-white mt-0.5">
+                          {calStats.diff_product_stats.count > 0
+                            ? `${(calStats.diff_product_stats.min * 100).toFixed(1)}% - ${(calStats.diff_product_stats.max * 100).toFixed(1)}%`
+                            : '0 samples'}
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1">
+                          Mean: {(calStats.diff_product_stats.mean * 100).toFixed(1)}% • p95: {(calStats.diff_product_stats.p95 * 100).toFixed(1)}%
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Decision Analysis Matrix Table at 0.60, 0.70, 0.80, 0.85 */}
+                    <div>
+                      <div className="text-[10px] uppercase font-bold text-slate-400 mb-1">
+                        Decision Matrix Across Candidate Thresholds
+                      </div>
+                      <div className="overflow-x-auto rounded-xl border border-slate-800">
+                        <table className="w-full text-left text-[11px] font-mono">
+                          <thead className="bg-[#131B2E] text-slate-400 border-b border-slate-800">
+                            <tr>
+                              <th className="py-1 px-2">Thresh</th>
+                              <th className="py-1 px-2 text-rose-400">False Accepts</th>
+                              <th className="py-1 px-2 text-amber-400">False Rejects</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/60">
+                            {calStats.threshold_matrix.map((row: any) => (
+                              <tr key={row.threshold} className="hover:bg-slate-800/30">
+                                <td className="py-1 px-2 font-bold text-cyan-300">{row.threshold.toFixed(2)}</td>
+                                <td className="py-1 px-2 text-rose-300">
+                                  {row.false_accepts} ({row.false_accept_rate}%)
+                                </td>
+                                <td className="py-1 px-2 text-amber-300">
+                                  {row.false_rejects} ({row.false_reject_rate}%)
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Suggested Live Thresholds & Apply Button */}
+                    <div className="bg-cyan-950/40 border border-cyan-800/50 rounded-xl p-3 flex items-center justify-between">
+                      <div>
+                        <div className="text-[10px] uppercase font-bold text-cyan-400">Suggested Live Thresholds</div>
+                        <div className="text-xs font-mono font-bold text-white mt-0.5">
+                          HIGH: <span className="text-emerald-400">{calStats.suggested_high.toFixed(2)}</span> • LOW: <span className="text-amber-400">{calStats.suggested_low.toFixed(2)}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleApplyCalibrationThresholds}
+                        disabled={applyingThresholds}
+                        className="py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold text-[11px] flex items-center gap-1 shadow"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>{applyingThresholds ? 'Applying...' : 'Apply Live'}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Event Log Console Card */}

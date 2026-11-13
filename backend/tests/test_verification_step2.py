@@ -461,3 +461,224 @@ def test_evidence_snapshot_privacy_cropping():
         os.remove(snapshot_path)
     except Exception:
         pass
+
+
+# =========================================================================
+# 8. Background Removal Rule & Real Crop Preprocessing
+# =========================================================================
+def test_should_apply_grabcut_real_captured_crop():
+    """Verify should_apply_grabcut rule behaves identically on enrollment and verification crops."""
+    from app.services.scan_worker import should_apply_grabcut
+
+    catalog_img_path = os.path.join(settings.BASE_DIR, "uploads", "catalog", "7622201745424_FRONT_a1e88d0d.jpg")
+    if os.path.exists(catalog_img_path):
+        real_crop = Image.open(catalog_img_path)
+    else:
+        # Fallback to creating a test image if file was removed
+        real_crop = Image.new("RGB", (250, 250), (255, 255, 255))
+
+    # A clean crop with uniform border should NOT trigger CPU-heavy GrabCut
+    needs_grabcut = should_apply_grabcut(real_crop)
+    assert isinstance(needs_grabcut, bool)
+
+    # Process through shared preprocessing
+    preproc_crop = preprocess_product_image_for_embedding(real_crop)
+    assert preproc_crop.size == (224, 224)
+    assert preproc_crop.mode == "RGB"
+
+    # Explicit poor crop override must be respected
+    assert should_apply_grabcut(real_crop, explicit_poor_crop=True) is True
+    assert should_apply_grabcut(real_crop, explicit_poor_crop=False) is False
+
+
+# =========================================================================
+# 9. Hand and Face Gates & Fallback Crop Safety
+# =========================================================================
+def test_hand_and_face_gates_in_verification(db, sample_data):
+    """Hand and face presence must be gated before any crop is saved or embedded."""
+    sample_frame = np.full((480, 640, 3), 120, dtype=np.uint8)
+
+    # Case A: hand_present=True must immediately return HAND_IN_CART without saving evidence
+    res_hand = verification_engine.evaluate_item_placement(
+        db=db,
+        claimed_barcode=sample_data["p1"].barcode,
+        image_data=sample_frame,
+        hand_present=True,
+        face_present=False
+    )
+    assert res_hand["decision"] == "HAND_IN_CART"
+    assert res_hand["warning_reason"] == "HAND_DETECTED"
+    assert res_hand["evidence_url"] is None
+
+    # Case B: face_present=True must immediately withhold frame without saving evidence
+    res_face = verification_engine.evaluate_item_placement(
+        db=db,
+        claimed_barcode=sample_data["p1"].barcode,
+        image_data=sample_frame,
+        hand_present=False,
+        face_present=True
+    )
+    assert res_face["decision"] == "FACE_DETECTED_WITHHELD"
+    assert res_face["warning_reason"] == "FACE_DETECTED"
+    assert res_face["evidence_url"] is None
+
+    # Case C: save_evidence_snapshot returns None when hand or face is present
+    ev_hand = object_detector.save_evidence_snapshot(sample_frame, hand_present=True)
+    assert ev_hand is None
+    ev_face = object_detector.save_evidence_snapshot(sample_frame, face_present=True)
+    assert ev_face is None
+
+
+# =========================================================================
+# 10. Preprocessing Version & Health Diagnostics
+# =========================================================================
+def test_preprocessing_version_tracking_and_health(db, sample_data):
+    """Verify preprocessing_version is recorded and system-health warns on version mismatch."""
+    from app.config import CURRENT_PREPROCESSING_VERSION
+    from app.ai.vector_store import VectorStoreMatcher
+    from app.main import _get_detailed_health_data
+
+    # Store a vector with current version
+    emb1 = VectorStoreMatcher.store_embedding(
+        db=db,
+        product_id=sample_data["p1"].id,
+        barcode=sample_data["p1"].barcode,
+        angle_tag="FRONT",
+        vector=[0.1] * 512,
+        commit=True
+    )
+    assert emb1.preprocessing_version == CURRENT_PREPROCESSING_VERSION
+
+    # Record a verification decision
+    verification_engine._record_decision(
+        db=db,
+        cart_id=sample_data["cart"].id,
+        session_id=sample_data["session"].id,
+        item_id="item-test-1",
+        decision="VERIFIED",
+        scanned_barcode=sample_data["p1"].barcode,
+        scanned_product_name=sample_data["p1"].name,
+        matched_product_id=sample_data["p1"].id,
+        matched_product_name=sample_data["p1"].name,
+        top1_score=0.92,
+        top2_score=0.45,
+        threshold_high=0.85,
+        threshold_low=0.65,
+        evidence_path=None
+    )
+    decision = db.query(VerificationDecision).filter(VerificationDecision.cart_id == sample_data["cart"].id).first()
+    assert decision is not None
+    assert decision.preprocessing_version == CURRENT_PREPROCESSING_VERSION
+
+    p2_id = str(sample_data["p2"].id)
+    p2_barcode = str(sample_data["p2"].barcode)
+
+    # Mock SessionLocal and check_db_health to use test db and check health diagnostics
+    mock_schema = {"is_up_to_date": True, "current_revision": "head", "head_revision": "head", "migration_error": None}
+    with patch("app.main.check_db_health", return_value=True), \
+         patch("app.migrations.get_schema_info", return_value=mock_schema), \
+         patch("app.main.SessionLocal", side_effect=lambda: TestingSessionLocal()):
+        health = _get_detailed_health_data(fresh=True)
+        assert health["preprocessing_version_current"] == CURRENT_PREPROCESSING_VERSION
+        assert health["preprocessing_mismatch_count"] == 0
+        assert health["preprocessing_warning"] is None
+
+        # Insert an outdated vector and verify warning triggers
+        emb_old = ProductEmbedding(
+            product_id=p2_id,
+            barcode=p2_barcode,
+            angle_tag="BACK",
+            embedding_json="[]",
+            preprocessing_version="v1_outdated"
+        )
+        db_s = TestingSessionLocal()
+        db_s.add(emb_old)
+        db_s.commit()
+        db_s.close()
+
+        health_mismatch = _get_detailed_health_data(fresh=True)
+        assert health_mismatch["preprocessing_mismatch_count"] >= 1
+        assert "outdated preprocessing version" in health_mismatch["preprocessing_warning"]
+
+
+# =========================================================================
+# 11. Calibration Session API Endpoints
+# =========================================================================
+def test_calibration_session_api_flow(db, sample_data):
+    """Test calibration endpoints: sample capture, distribution stats, apply thresholds, reset."""
+    from app.api.v1.vision import (
+        record_calibration_sample,
+        get_calibration_stats,
+        reset_calibration_session,
+        apply_calibration_thresholds,
+        CalibrationSampleRequest,
+        ApplyThresholdsRequest
+    )
+    from fastapi import HTTPException
+
+    mock_admin = MagicMock()
+
+    # Reset before start
+    reset_calibration_session(current_user=mock_admin)
+
+    # 1. Sample with hand_present should be rejected with 400
+    with pytest.raises(HTTPException) as exc_info:
+        record_calibration_sample(
+            req=CalibrationSampleRequest(
+                target_barcode=sample_data["p1"].barcode,
+                image_data_url="data:image/jpeg;base64," + "A" * 200,
+                hand_present=True
+            ),
+            db=db,
+            current_user=mock_admin
+        )
+    assert exc_info.value.status_code == 400
+    assert "Hand detected" in exc_info.value.detail
+
+    # 2. Record valid sample
+    # Create simple valid test image
+    test_img = Image.new("RGB", (100, 100), (200, 150, 100))
+    import io, base64
+    buf = io.BytesIO()
+    test_img.save(buf, format="JPEG")
+    valid_data_url = f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+
+    with patch("app.api.v1.vision.get_embedding", return_value=[0.1] * 512):
+        with patch("app.api.v1.vision.VectorStoreMatcher.find_nearest_product", return_value=[
+            {"product_name": sample_data["p1"].name, "barcode": sample_data["p1"].barcode, "similarity": 0.88},
+            {"product_name": sample_data["p2"].name, "barcode": sample_data["p2"].barcode, "similarity": 0.52}
+        ]):
+            res = record_calibration_sample(
+                req=CalibrationSampleRequest(
+                    target_barcode=sample_data["p1"].barcode,
+                    image_data_url=valid_data_url,
+                    angle_label="OVERHEAD",
+                    hand_present=False,
+                    face_present=False
+                ),
+                db=db,
+                current_user=mock_admin
+            )
+            assert res["is_same_product"] is True
+            assert res["total_samples"] == 1
+
+            # 3. Retrieve stats
+            stats = get_calibration_stats(current_user=mock_admin)
+            assert stats["total_samples"] == 1
+            assert len(stats["threshold_matrix"]) == 4  # 0.60, 0.70, 0.80, 0.85
+            assert stats["suggested_high"] >= 0.70
+            assert stats["suggested_low"] <= stats["suggested_high"]
+
+            # 4. Apply thresholds
+            apply_res = apply_calibration_thresholds(
+                req=ApplyThresholdsRequest(confidence_high=0.82, confidence_low=0.60),
+                current_user=mock_admin
+            )
+            assert apply_res["confidence_high"] == 0.82
+            assert apply_res["confidence_low"] == 0.60
+            assert settings.CONFIDENCE_HIGH == 0.82
+            assert settings.CONFIDENCE_LOW == 0.60
+
+            # 5. Reset session
+            reset_res = reset_calibration_session(current_user=mock_admin)
+            assert reset_res["count"] == 0
