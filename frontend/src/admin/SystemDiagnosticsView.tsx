@@ -665,7 +665,78 @@ export const SystemDiagnosticsView: React.FC<Props> = ({
         )}
       </div>
 
-      {/* Free Tier Sleep & Keepalive Notice */}
+      {/* 7. Active Cart Pending Items AI Diagnostics */}
+      <div className="p-4 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+            <Activity className="w-4 h-4 text-cyan-500" />
+            Active Cart Pending Items & Vector Diagnostics
+          </span>
+          <span className="text-[11px] font-mono text-slate-400">
+            {data?.pending_items_diagnostics?.length || 0} pending item(s)
+          </span>
+        </div>
+
+        {error ? (
+          <div className="py-2 text-center">
+            <p className="text-xs text-slate-400">Could not load pending items diagnostics.</p>
+          </div>
+        ) : loading ? (
+          <div className="space-y-2 py-2 animate-pulse">
+            <div className="h-3 bg-slate-100 dark:bg-slate-800 rounded w-2/3" />
+            <div className="h-3 bg-slate-100 dark:bg-slate-800 rounded w-1/2" />
+          </div>
+        ) : (data?.pending_items_diagnostics && data.pending_items_diagnostics.length > 0) ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-100 dark:border-slate-800 text-[10px] uppercase font-semibold text-slate-400 tracking-wider">
+                  <th className="py-2 px-2">Cart</th>
+                  <th className="py-2 px-2">Product Name</th>
+                  <th className="py-2 px-2">Barcode</th>
+                  <th className="py-2 px-2">Has Vectors</th>
+                  <th className="py-2 px-2">Vector Count</th>
+                  <th className="py-2 px-2">Version Mismatch</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-mono">
+                {data.pending_items_diagnostics.map((item: any) => (
+                  <tr key={item.item_id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                    <td className="py-2 px-2 font-bold text-slate-900 dark:text-white">{item.cart_number}</td>
+                    <td className="py-2 px-2 font-sans font-medium text-slate-800 dark:text-slate-200">{item.product_name}</td>
+                    <td className="py-2 px-2 text-slate-500">{item.scanned_barcode}</td>
+                    <td className="py-2 px-2">
+                      {item.has_vectors ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800/40 font-sans">
+                          <CheckCircle2 className="w-3 h-3" /> Yes
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 px-2 py-0.5 rounded-full border border-red-200 dark:border-red-800/40 font-sans">
+                          <XCircle className="w-3 h-3" /> NO VECTORS
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-slate-700 dark:text-slate-300 font-semibold">{item.vector_count}</td>
+                    <td className="py-2 px-2">
+                      {item.preprocessing_version_mismatch_count > 0 ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800/40 font-sans">
+                          {item.preprocessing_version_mismatch_count} outdated
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 text-[11px]">0 mismatches</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="py-4 text-center text-xs text-slate-400">
+            No active cart items currently pending AI camera verification.
+          </div>
+        )}
+      </div>
       <div className="p-4 bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/50 rounded-2xl space-y-2">
         <div className="flex items-center gap-2 text-xs font-semibold text-blue-900 dark:text-blue-300">
           <Clock className="w-4 h-4 text-blue-500 shrink-0" />

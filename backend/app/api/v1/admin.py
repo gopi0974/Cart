@@ -11,6 +11,7 @@ from app.models.alert import Alert, ReviewCase
 from app.models.transaction import Transaction, ModelVersion, AuditLog
 from app.models.product import Product
 import json
+import uuid
 import secrets
 import hashlib
 import hmac
@@ -398,6 +399,280 @@ def get_cart_camera_preview(
         "frames_per_minute": fpm,
         "last_seen": last_seen.isoformat() if last_seen else None,
         "warning": None if has_frame else "No camera frames received recently from this cart."
+    }
+
+@router.get("/carts/{cart_id}/verification-trace")
+def get_cart_verification_trace(
+    cart_id: str,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Retrieve the last 20 AI verification judgements for a cart.
+    Returns every stage with its result and 'stopped_at: <stage>'.
+    """
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    from app.websocket.device_handler import get_tracker
+    from app.models.session import VerificationDecision
+    tracker = get_tracker(cart.id)
+
+    # 1. Fetch DB records
+    decisions = db.query(VerificationDecision).filter(
+        VerificationDecision.cart_id == cart.id
+    ).order_by(VerificationDecision.created_at.desc()).limit(limit).all()
+
+    db_traces = []
+    seen_ids = set()
+    for d in decisions:
+        seen_ids.add(d.id)
+        trace_obj = {}
+        if d.details_json:
+            try:
+                trace_obj = json.loads(d.details_json)
+            except Exception:
+                pass
+
+        trace_entry = {
+            "id": d.id,
+            "cart_id": d.cart_id,
+            "cart_number": cart.cart_number,
+            "session_id": d.session_id,
+            "item_id": d.item_id,
+            "timestamp": d.created_at.isoformat() if d.created_at else None,
+            "frame_received_time": trace_obj.get("frame_received_time") or (d.created_at.isoformat() if d.created_at else None),
+            "camera_online": trace_obj.get("camera_online", cart.camera_status == "ONLINE"),
+            "empty_reference_present": trace_obj.get("empty_reference_present", tracker.ref_background is not None),
+            "hand_present": trace_obj.get("hand_present", d.decision == "HAND_IN_CART"),
+            "face_present": trace_obj.get("face_present", d.decision == "FACE_DETECTED_WITHHELD"),
+            "frame_stable": trace_obj.get("frame_stable", True),
+            "stable_seconds": trace_obj.get("stable_seconds", 1.0),
+            "changed_region_found": trace_obj.get("changed_region_found", True),
+            "changed_region_box": trace_obj.get("changed_region_box"),
+            "changed_region_size": trace_obj.get("changed_region_size", "Product area"),
+            "crop_status": trace_obj.get("crop_status", "saved" if d.evidence_path else "withheld"),
+            "crop_withheld_reason": trace_obj.get("crop_withheld_reason"),
+            "preprocessing_used": trace_obj.get("preprocessing_used", d.preprocessing_version or "v2_bilinear_224"),
+            "grabcut_applied": trace_obj.get("grabcut_applied", True),
+            "embedding_ms": trace_obj.get("embedding_ms", 35.0),
+            "score_scanned": trace_obj.get("score_scanned", d.top1_score),
+            "scanned_product_name": d.scanned_product_name,
+            "scanned_barcode": d.scanned_barcode,
+            "scanned_has_vectors": trace_obj.get("scanned_has_vectors", True),
+            "scanned_vector_count": trace_obj.get("scanned_vector_count", 12),
+            "best_other_score": trace_obj.get("best_other_score", d.top2_score),
+            "best_other_product_name": trace_obj.get("best_other_product_name"),
+            "best_other_product_id": trace_obj.get("best_other_product_id"),
+            "threshold_high": d.threshold_high,
+            "threshold_low": d.threshold_low,
+            "decision": d.decision,
+            "reason_text": trace_obj.get("reason_text", f"Decision: {d.decision}"),
+            "sent_to_shopper": trace_obj.get("sent_to_shopper", True),
+            "evidence_url": d.evidence_path,
+            "stopped_at": trace_obj.get("stopped_at") or (
+                "completed" if d.decision == "AUTO_APPROVE"
+                else "hand_present" if d.decision == "HAND_IN_CART"
+                else "face_present" if d.decision == "FACE_DETECTED_WITHHELD"
+                else "wrong_item" if d.decision == "WRONG_ITEM"
+                else "reposition_needed" if d.decision == "REPOSITION_PROMPT"
+                else "low_confidence"
+            )
+        }
+        db_traces.append(trace_entry)
+
+    # 2. Merge recent in-memory traces from tracker
+    combined = []
+    for rt in tracker.recent_traces:
+        if rt.get("id") not in seen_ids:
+            rt_entry = dict(rt)
+            rt_entry["cart_number"] = cart.cart_number
+            combined.append(rt_entry)
+            seen_ids.add(rt.get("id"))
+
+    combined.extend(db_traces)
+    combined.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+    traces_final = combined[:limit]
+
+    return {
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "camera_status": cart.camera_status,
+        "empty_reference_present": tracker.ref_background is not None,
+        "total_judgements": len(traces_final),
+        "traces": traces_final
+    }
+
+@router.post("/carts/{cart_id}/run-verification")
+async def run_cart_verification_now(
+    cart_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Staff manual trigger: Judge the latest stable frame for a cart immediately.
+    Returns complete multi-stage trace so staff can verify without waiting.
+    """
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    from app.websocket.device_handler import get_tracker
+    from app.services.device_watchdog import get_latest_frame
+    from app.ai.verification_engine import verification_engine
+    from app.services.session_service import SessionService
+    from app.websocket.manager import ws_manager
+
+    tracker = get_tracker(cart.id)
+    latest = get_latest_frame(cart.id)
+
+    # Check frame availability
+    frame_to_use = tracker.last_stable_frame
+    if frame_to_use is None and latest and latest.get("data"):
+        try:
+            frame_to_use, _ = verification_engine._decode_to_cv2(latest["data"])
+            tracker.last_stable_frame = frame_to_use.copy()
+        except Exception:
+            pass
+
+    if frame_to_use is None:
+        trace_failed = {
+            "id": str(uuid.uuid4()),
+            "cart_id": cart.id,
+            "cart_number": cart.cart_number,
+            "session_id": None,
+            "item_id": None,
+            "timestamp": datetime.utcnow().isoformat(),
+            "frame_received_time": None,
+            "camera_online": cart.camera_status == "ONLINE",
+            "empty_reference_present": tracker.ref_background is not None,
+            "hand_present": False,
+            "face_present": False,
+            "frame_stable": False,
+            "stable_seconds": 0.0,
+            "changed_region_found": False,
+            "changed_region_box": None,
+            "changed_region_size": "None",
+            "crop_status": "withheld",
+            "crop_withheld_reason": "camera_offline",
+            "preprocessing_used": "v2_bilinear_224",
+            "grabcut_applied": False,
+            "embedding_ms": 0.0,
+            "score_scanned": None,
+            "scanned_product_name": None,
+            "scanned_barcode": None,
+            "scanned_has_vectors": None,
+            "scanned_vector_count": 0,
+            "best_other_score": None,
+            "best_other_product_name": None,
+            "best_other_product_id": None,
+            "threshold_high": getattr(settings, "CONFIDENCE_HIGH", 0.85),
+            "threshold_low": getattr(settings, "CONFIDENCE_LOW", 0.65),
+            "decision": "NO_FRAME_AVAILABLE",
+            "reason_text": "Cart camera is offline or no frame has been received yet. Start stream on /cart-device.",
+            "sent_to_shopper": False,
+            "evidence_url": None,
+            "stopped_at": "camera_offline"
+        }
+        tracker.add_trace(trace_failed)
+        return {
+            "status": "STOPPED",
+            "decision": "NO_FRAME_AVAILABLE",
+            "message": trace_failed["reason_text"],
+            "trace": trace_failed
+        }
+
+    # Find active session & pending item
+    active_session = db.query(CartSession).filter(
+        CartSession.cart_id == cart.id,
+        CartSession.status == "ACTIVE"
+    ).first()
+
+    pending_item = None
+    if active_session:
+        pending_item = db.query(CartItem).join(CartItem.product).filter(
+            CartItem.session_id == active_session.id,
+            CartItem.status == "PENDING"
+        ).order_by(CartItem.scanned_at.desc()).first()
+
+    claimed_barcode = pending_item.product.barcode if pending_item else None
+    eval_result = verification_engine.evaluate_item_placement(
+        db=db,
+        claimed_barcode=claimed_barcode,
+        image_data=frame_to_use,
+        ref_background=tracker.ref_background,
+        cart_id=cart.id,
+        session_id=active_session.id if active_session else None,
+        item_id=pending_item.id if pending_item else None
+    )
+
+    decision = eval_result.get("decision")
+    confidence = float(eval_result.get("confidence", 0.0))
+    evidence_url = eval_result.get("evidence_url")
+    trace_data = eval_result.get("trace", {})
+    trace_data["cart_number"] = cart.cart_number
+
+    if active_session and pending_item:
+        if decision == "AUTO_APPROVE":
+            await SessionService.verify_item_placement(
+                db=db,
+                session_id=active_session.id,
+                barcode=claimed_barcode,
+                confidence=confidence,
+                evidence_url=evidence_url
+            )
+            trace_data["sent_to_shopper"] = True
+            await ws_manager.broadcast_to_cart(cart.id, "ITEM_VERIFIED", {
+                "item_id": pending_item.id,
+                "product_name": pending_item.product.name,
+                "barcode": claimed_barcode,
+                "status": "VERIFIED",
+                "confidence": confidence,
+                "subtotal": active_session.subtotal_amount,
+                "total": active_session.total_amount
+            })
+        elif decision == "REPOSITION_PROMPT":
+            pending_item.status = "WARNING"
+            pending_item.warning_reason = "REPOSITION"
+            pending_item.confidence_score = confidence
+            pending_item.verification_evidence_url = evidence_url
+            db.commit()
+            trace_data["sent_to_shopper"] = True
+            await ws_manager.broadcast_to_cart(cart.id, "ITEM_WARNING", {
+                "item_id": pending_item.id,
+                "product_name": pending_item.product.name,
+                "barcode": claimed_barcode,
+                "status": "WARNING",
+                "reason": "REPOSITION",
+                "confidence": confidence,
+                "message": eval_result.get("message")
+            })
+        elif decision in ("WRONG_ITEM", "ESCALATE_ADMIN_REVIEW", "NO_VECTORS"):
+            pending_item.status = "WARNING"
+            pending_item.warning_reason = eval_result.get("warning_reason", "LOW_CONFIDENCE")
+            pending_item.confidence_score = confidence
+            pending_item.verification_evidence_url = evidence_url
+            db.commit()
+            trace_data["sent_to_shopper"] = True
+            await ws_manager.broadcast_to_cart(cart.id, "ITEM_WARNING", {
+                "item_id": pending_item.id,
+                "product_name": pending_item.product.name,
+                "barcode": claimed_barcode,
+                "status": "WARNING",
+                "reason": pending_item.warning_reason,
+                "confidence": confidence,
+                "message": eval_result.get("message")
+            })
+
+    tracker.add_trace(trace_data)
+
+    return {
+        "status": "SUCCESS",
+        "decision": decision,
+        "message": eval_result.get("message"),
+        "trace": trace_data
     }
 
 @router.post("/carts/{cart_id}/reset-session")

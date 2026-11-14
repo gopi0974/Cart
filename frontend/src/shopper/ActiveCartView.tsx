@@ -58,6 +58,17 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     }
   }, [session.items]);
 
+  // Periodic 1-second refresh when items are PENDING to keep elapsed time and diagnostics live
+  const [, setPendingTick] = useState(0);
+  useEffect(() => {
+    const hasPending = session.items?.some((i) => i.status === 'PENDING');
+    if (!hasPending) return;
+    const timer = setInterval(() => {
+      setPendingTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [session.items]);
+
   // Sync state & connect to Cart WebSocket (authenticated with shopper session token)
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -594,12 +605,28 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                         </span>
                       )}
 
-                      {item.status === 'PENDING' && (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
-                          <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                          Scanned • Place item in cart
-                        </span>
-                      )}
+                      {item.status === 'PENDING' && (() => {
+                        const elapsedSec = item.scanned_at ? (Date.now() - new Date(item.scanned_at).getTime()) / 1000 : 0;
+                        const isDelayed = elapsedSec > 15;
+                        const reason = item.pending_reason || (session.camera_status === 'OFFLINE' ? 'camera offline' : 'waiting for steady placement');
+
+                        return isDelayed ? (
+                          <div className="flex flex-col gap-1 w-full">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 px-2.5 py-1 rounded-md border border-amber-300 dark:border-amber-700 animate-pulse">
+                              <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              <span>Waiting for the camera to check this item</span>
+                            </span>
+                            <span className="text-[10px] text-amber-700 dark:text-amber-400 font-medium pl-1">
+                              Reason: <span className="font-semibold">{reason}</span> ({Math.floor(elapsedSec)}s elapsed)
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700/60 animate-pulse">
+                            <Clock className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                            Scanned • Place item in cart ({Math.floor(elapsedSec)}s)
+                          </span>
+                        );
+                      })()}
 
                       {(item.status === 'WARNING' || item.status === 'WARNING_MISMATCH' || item.status === 'WARNING_UNSCANNED') && (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700/60">

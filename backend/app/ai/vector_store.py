@@ -1,12 +1,12 @@
 import os
 import json
 import logging
+import numpy as np
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy.orm import Session
 from app.models.product import ProductEmbedding, Product
 from app.ai.feature_extractor import VisualFeatureExtractor, MODEL_NAME, MODEL_VERSION, VECTOR_DIM
-from app.database import engine
 from app.config import settings, CURRENT_PREPROCESSING_VERSION
 
 logger = logging.getLogger("smartcart.ai.vector_store")
@@ -118,7 +118,9 @@ class VectorStoreMatcher:
     ) -> List[Dict[str, Any]]:
         """Search all registered product embeddings and return top-k candidates with similarity score."""
         # 1. Native PostgreSQL pgvector cosine distance search
-        if engine is not None and getattr(engine, "name", "") == "postgresql" and hasattr(ProductEmbedding, "embedding_vector"):
+        bind = db.get_bind() if hasattr(db, "get_bind") else None
+        dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+        if dialect_name == "postgresql" and hasattr(ProductEmbedding, "embedding_vector"):
             try:
                 nearest = (
                     db.query(ProductEmbedding, ProductEmbedding.embedding_vector.cosine_distance(query_vector).label("distance"))
@@ -193,7 +195,12 @@ class VectorStoreMatcher:
         scored = []
         for emb in embeddings:
             try:
-                emb_vec = emb.embedding_vector if isinstance(emb.embedding_vector, list) else json.loads(emb.embedding_json)
+                if isinstance(emb.embedding_vector, (list, np.ndarray)):
+                    emb_vec = emb.embedding_vector
+                elif emb.embedding_json:
+                    emb_vec = json.loads(emb.embedding_json)
+                else:
+                    continue
                 similarity = VisualFeatureExtractor.cosine_similarity(query_vector, emb_vec)
                 scored.append((similarity, emb))
             except Exception:
@@ -246,10 +253,12 @@ class VectorStoreMatcher:
         best_sim = 0.0
         for emb in target_embs:
             try:
-                if isinstance(emb.embedding_vector, list):
+                if isinstance(emb.embedding_vector, (list, np.ndarray)):
                     vec = emb.embedding_vector
-                else:
+                elif emb.embedding_json:
                     vec = json.loads(emb.embedding_json)
+                else:
+                    continue
                 sim = VisualFeatureExtractor.cosine_similarity(query_vector, vec)
                 if sim > best_sim:
                     best_sim = sim

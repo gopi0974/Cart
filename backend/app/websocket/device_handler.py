@@ -13,7 +13,9 @@ from app.models.session import CartSession, CartItem
 from app.models.transaction import AuditLog
 from app.websocket.manager import ws_manager
 from app.services.session_service import SessionService
+import os
 import time
+from app.config import settings
 from app.ai.verification_engine import verification_engine
 from app.ai.object_detector import object_detector
 from app.services.alert_service import AlertService
@@ -24,7 +26,44 @@ from app.services.device_watchdog import (
     get_frames_per_minute
 )
 
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    cv2 = None
+    HAS_CV2 = False
+
 logger = logging.getLogger("smartcart.device")
+
+
+def load_persisted_cart_reference(cart_id: str) -> Optional[np.ndarray]:
+    """Retrieve persisted empty-cart reference image from disk cache."""
+    if not HAS_CV2:
+        return None
+    try:
+        ref_dir = os.path.join(settings.MODELS_DIR, "cart_references")
+        ref_path = os.path.join(ref_dir, f"{cart_id}.jpg")
+        if os.path.exists(ref_path):
+            img = cv2.imread(ref_path)
+            if img is not None and img.size > 0:
+                return img
+    except Exception as e:
+        logger.warning(f"Failed to load persisted cart reference for {cart_id}: {e}")
+    return None
+
+
+def save_persisted_cart_reference(cart_id: str, img_bgr: np.ndarray) -> None:
+    """Save empty-cart reference image to persistent disk cache across server restarts."""
+    if img_bgr is None or not HAS_CV2:
+        return
+    try:
+        ref_dir = os.path.join(settings.MODELS_DIR, "cart_references")
+        os.makedirs(ref_dir, exist_ok=True)
+        ref_path = os.path.join(ref_dir, f"{cart_id}.jpg")
+        cv2.imwrite(ref_path, img_bgr)
+    except Exception as e:
+        logger.warning(f"Failed to persist cart reference for {cart_id}: {e}")
+
 
 class CartVisionTracker:
     def __init__(self, cart_id: str):
@@ -35,9 +74,18 @@ class CartVisionTracker:
         self.stable_start_time: float = 0.0
         self.last_motion_time: float = 0.0
         self.last_judged_time: float = 0.0
+        self.last_pending_item_id: Optional[str] = None
         self.face_seen_start_time: float = 0.0
-        self.ref_background: Optional[np.ndarray] = None
+        self.ref_background: Optional[np.ndarray] = load_persisted_cart_reference(cart_id)
         self.last_stable_frame: Optional[np.ndarray] = None
+        self.recent_traces: list = []
+
+    def add_trace(self, trace: dict):
+        if not trace:
+            return
+        self.recent_traces.insert(0, trace)
+        if len(self.recent_traces) > 20:
+            self.recent_traces = self.recent_traces[:20]
 
 cart_trackers: Dict[str, CartVisionTracker] = {}
 
@@ -156,18 +204,9 @@ async def process_camera_frame(
             })
             return
 
-        # Prevent duplicate judgments on the exact same static scene
-        if tracker.last_judged_time >= tracker.last_motion_time:
-            await websocket.send_json({
-                "type": "frame_ack",
-                "status": "VERIFIED_ALL",
-                "message": "Basket is steady."
-            })
-            return
-        tracker.last_judged_time = now
-
         # Decode frame
         img_bgr, _ = verification_engine._decode_to_cv2(image_data)
+        tracker.last_stable_frame = img_bgr.copy()
 
         # 4. Check active session on this cart
         active_session = db.query(CartSession).filter(
@@ -175,8 +214,13 @@ async def process_camera_frame(
             CartSession.status == "ACTIVE"
         ).first()
 
+        if tracker.ref_background is None:
+            tracker.ref_background = load_persisted_cart_reference(cart_id)
+
         if not active_session:
-            tracker.ref_background = img_bgr.copy()
+            if tracker.ref_background is None:
+                tracker.ref_background = img_bgr.copy()
+                save_persisted_cart_reference(cart_id, img_bgr)
             await websocket.send_json({
                 "type": "frame_ack",
                 "status": "IDLE",
@@ -191,6 +235,7 @@ async def process_camera_frame(
         ).count()
         if active_items_count == 0 and tracker.ref_background is None:
             tracker.ref_background = img_bgr.copy()
+            save_persisted_cart_reference(cart_id, img_bgr)
             logger.info(f"[{cart_number}] Empty cart reference auto-initialized from first stable frame.")
 
         # 5. Check for item in REMOVING status (verified item being taken out)
@@ -198,6 +243,38 @@ async def process_camera_frame(
             CartItem.session_id == active_session.id,
             CartItem.status == "REMOVING"
         ).first()
+
+        # 6. Check for pending item scanned on mobile waiting for camera confirmation
+        pending_item = db.query(CartItem).join(CartItem.product).filter(
+            CartItem.session_id == active_session.id,
+            CartItem.status == "PENDING"
+        ).order_by(CartItem.scanned_at.desc()).first()
+
+        # Evaluation eligibility rules:
+        # A) PENDING item exists: evaluate immediately if new scan, or retry every 1.0s on steady frames
+        # B) REMOVING item exists: evaluate removal cadence every 1.0s
+        # C) No items pending or removing: evaluate only when physical motion occurred (unscanned item check)
+        should_evaluate = False
+        if pending_item:
+            if tracker.last_pending_item_id != pending_item.id:
+                should_evaluate = True
+            elif (now - tracker.last_judged_time) >= 1.0:
+                should_evaluate = True
+        elif removing_item:
+            if (now - tracker.last_judged_time) >= 1.0:
+                should_evaluate = True
+        elif tracker.last_motion_time > tracker.last_judged_time:
+            should_evaluate = True
+
+        if not should_evaluate:
+            await websocket.send_json({
+                "type": "frame_ack",
+                "status": "VERIFIED_ALL",
+                "message": "Basket is steady."
+            })
+            return
+
+        tracker.last_judged_time = now
 
         if removing_item:
             claimed_barcode = removing_item.product.barcode
@@ -240,13 +317,8 @@ async def process_camera_frame(
                 })
             return
 
-        # 6. Check for pending item scanned on mobile waiting for camera confirmation
-        pending_item = db.query(CartItem).join(CartItem.product).filter(
-            CartItem.session_id == active_session.id,
-            CartItem.status == "PENDING"
-        ).order_by(CartItem.scanned_at.desc()).first()
-
         if pending_item:
+            tracker.last_pending_item_id = pending_item.id
             claimed_barcode = pending_item.product.barcode
             eval_result = verification_engine.evaluate_item_placement(
                 db=db,
@@ -262,6 +334,7 @@ async def process_camera_frame(
             decision = eval_result.get("decision")
             confidence = float(eval_result.get("confidence", 0.0))
             evidence_url = eval_result.get("evidence_url")
+            trace_data = eval_result.get("trace")
 
             if decision == "AUTO_APPROVE":
                 await SessionService.verify_item_placement(
@@ -271,6 +344,8 @@ async def process_camera_frame(
                     confidence=confidence,
                     evidence_url=evidence_url
                 )
+                if trace_data:
+                    trace_data["sent_to_shopper"] = True
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "ITEM_VERIFIED",
@@ -288,6 +363,8 @@ async def process_camera_frame(
                 pending_item.verification_evidence_url = evidence_url
                 db.commit()
 
+                if trace_data:
+                    trace_data["sent_to_shopper"] = True
                 await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
                     "item_id": pending_item.id,
                     "product_name": pending_item.product.name,
@@ -314,6 +391,8 @@ async def process_camera_frame(
                 pending_item.verification_evidence_url = evidence_url
                 db.commit()
 
+                if trace_data:
+                    trace_data["sent_to_shopper"] = True
                 await AlertService.create_alert(
                     db=db,
                     cart_id=cart_id,
@@ -347,20 +426,22 @@ async def process_camera_frame(
                     "confidence": confidence
                 })
 
-            elif decision == "ESCALATE_ADMIN_REVIEW":
+            elif decision in ("ESCALATE_ADMIN_REVIEW", "NO_VECTORS"):
                 pending_item.status = "WARNING"
-                pending_item.warning_reason = "LOW_CONFIDENCE"
+                pending_item.warning_reason = eval_result.get("warning_reason", "LOW_CONFIDENCE")
                 pending_item.confidence_score = confidence
                 pending_item.verification_evidence_url = evidence_url
                 db.commit()
 
+                if trace_data:
+                    trace_data["sent_to_shopper"] = True
                 await AlertService.create_alert(
                     db=db,
                     cart_id=cart_id,
                     session_id=active_session.id,
                     alert_type="LOW_CONFIDENCE_VERIFICATION",
                     severity="MEDIUM",
-                    message=f"Visual confidence below threshold ({confidence*100:.1f}%) for '{pending_item.product.name}'.",
+                    message=f"Visual verification halted ({eval_result.get('message', '')}) for '{pending_item.product.name}'.",
                     evidence_url=evidence_url,
                     create_review_case=True,
                     scanned_barcode=claimed_barcode,
@@ -372,7 +453,7 @@ async def process_camera_frame(
                     "product_name": pending_item.product.name,
                     "barcode": claimed_barcode,
                     "status": "WARNING",
-                    "reason": "LOW_CONFIDENCE",
+                    "reason": pending_item.warning_reason,
                     "confidence": confidence,
                     "message": eval_result.get("message")
                 })
@@ -382,6 +463,9 @@ async def process_camera_frame(
                     "product_name": pending_item.product.name,
                     "confidence": confidence
                 })
+
+            if trace_data:
+                tracker.add_trace(trace_data)
 
         else:
             # 7. No pending item: Check for Unscanned Item Placement

@@ -2,6 +2,8 @@ import base64
 import logging
 import io
 import json
+import uuid
+import time
 from datetime import datetime
 import numpy as np
 from PIL import Image
@@ -116,15 +118,73 @@ class AIVerificationEngine:
 
         # Scanned product info lookup
         scanned_product = None
+        scanned_vectors_count = 0
         if claimed_barcode and db:
+            from app.models.product import ProductEmbedding
             scanned_product = db.query(Product).filter(Product.barcode == claimed_barcode).first()
+            scanned_vectors_count = db.query(ProductEmbedding).filter(ProductEmbedding.barcode == claimed_barcode).count()
         scanned_product_name = scanned_product.name if scanned_product else (f"Barcode {claimed_barcode}" if claimed_barcode else None)
+        scanned_has_vectors = (scanned_vectors_count > 0)
 
         # 1. Privacy & Hand Gate: Hand or Face presence
         if hand_present:
             decision = "HAND_IN_CART"
             message = "We see a hand in the cart. Please remove your hand so the camera can verify."
-            # Never save crop, never embed, never store evidence
+            trace = {
+                "id": str(uuid.uuid4()),
+                "cart_id": cart_id,
+                "session_id": session_id,
+                "item_id": item_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "frame_received_time": datetime.utcnow().isoformat(),
+                "camera_online": True,
+                "empty_reference_present": ref_background is not None,
+                "hand_present": True,
+                "face_present": False,
+                "frame_stable": False,
+                "stable_seconds": 0.0,
+                "changed_region_found": False,
+                "changed_region_box": None,
+                "changed_region_size": "None (hand in view)",
+                "crop_status": "withheld",
+                "crop_withheld_reason": "hand_present",
+                "preprocessing_used": CURRENT_PREPROCESSING_VERSION,
+                "grabcut_applied": False,
+                "embedding_ms": 0.0,
+                "score_scanned": None,
+                "scanned_product_name": scanned_product_name,
+                "scanned_barcode": claimed_barcode,
+                "scanned_has_vectors": scanned_has_vectors,
+                "scanned_vector_count": scanned_vectors_count,
+                "best_other_score": None,
+                "best_other_product_name": None,
+                "best_other_product_id": None,
+                "threshold_high": high_thresh,
+                "threshold_low": low_thresh,
+                "decision": decision,
+                "reason_text": message,
+                "sent_to_shopper": False,
+                "evidence_url": None,
+                "stopped_at": "hand_present"
+            }
+            if db and cart_id:
+                self._record_decision(
+                    db=db,
+                    cart_id=cart_id,
+                    session_id=session_id,
+                    item_id=item_id,
+                    decision=decision,
+                    scanned_barcode=claimed_barcode,
+                    scanned_product_name=scanned_product_name,
+                    matched_product_id=None,
+                    matched_product_name=None,
+                    top1_score=0.0,
+                    top2_score=0.0,
+                    threshold_high=high_thresh,
+                    threshold_low=low_thresh,
+                    evidence_path=None,
+                    details=trace
+                )
             return {
                 "decision": decision,
                 "status": "WARNING",
@@ -133,12 +193,50 @@ class AIVerificationEngine:
                 "top_match": None,
                 "top_candidates": [],
                 "evidence_url": None,
-                "message": message
+                "message": message,
+                "trace": trace
             }
 
         if face_present:
             decision = "FACE_DETECTED_WITHHELD"
             message = "We can't check this item. Please ask staff"
+            trace = {
+                "id": str(uuid.uuid4()),
+                "cart_id": cart_id,
+                "session_id": session_id,
+                "item_id": item_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "frame_received_time": datetime.utcnow().isoformat(),
+                "camera_online": True,
+                "empty_reference_present": ref_background is not None,
+                "hand_present": False,
+                "face_present": True,
+                "frame_stable": False,
+                "stable_seconds": 0.0,
+                "changed_region_found": False,
+                "changed_region_box": None,
+                "changed_region_size": "None (face detected, withheld)",
+                "crop_status": "withheld",
+                "crop_withheld_reason": "face_present",
+                "preprocessing_used": CURRENT_PREPROCESSING_VERSION,
+                "grabcut_applied": False,
+                "embedding_ms": 0.0,
+                "score_scanned": None,
+                "scanned_product_name": scanned_product_name,
+                "scanned_barcode": claimed_barcode,
+                "scanned_has_vectors": scanned_has_vectors,
+                "scanned_vector_count": scanned_vectors_count,
+                "best_other_score": None,
+                "best_other_product_name": None,
+                "best_other_product_id": None,
+                "threshold_high": high_thresh,
+                "threshold_low": low_thresh,
+                "decision": decision,
+                "reason_text": message,
+                "sent_to_shopper": False,
+                "evidence_url": None,
+                "stopped_at": "face_present"
+            }
             self._record_decision(
                 db=db,
                 cart_id=cart_id,
@@ -154,7 +252,7 @@ class AIVerificationEngine:
                 threshold_high=high_thresh,
                 threshold_low=low_thresh,
                 evidence_path=None,
-                details={"reason": "frame withheld (face detected)"}
+                details=trace
             )
             return {
                 "decision": decision,
@@ -164,10 +262,12 @@ class AIVerificationEngine:
                 "top_match": None,
                 "top_candidates": [],
                 "evidence_url": None,
-                "message": message
+                "message": message,
+                "trace": trace
             }
 
         img_bgr, pil_full = self._decode_to_cv2(image_data)
+        w_frame, h_frame = pil_full.size
 
         # 2. Locate placed object via background differencing against empty-cart reference
         det_box = crop_box
@@ -202,7 +302,9 @@ class AIVerificationEngine:
         preprocessed_crop = preprocess_product_image_for_embedding(crop_pil)
 
         # 5. Extract 512-dim embedding with ONNX INT8 CLIP ViT-B/32
+        t0_emb = time.time()
         query_vector = feature_extractor.get_embedding(preprocessed_crop)
+        embedding_ms = round((time.time() - t0_emb) * 1000.0, 2)
 
         # 6. Search stored product vectors (cosine similarity, top 3)
         top_candidates = VectorStoreMatcher.find_nearest_product(db, query_vector, top_k=3)
@@ -221,10 +323,65 @@ class AIVerificationEngine:
             face_present=face_present
         )
 
+        # Compute best other candidate
+        best_other_score = None
+        best_other_name = None
+        best_other_id = None
+        if claimed_barcode:
+            if top1 and top1.get("barcode") != claimed_barcode:
+                best_other_score = top1_score
+                best_other_name = top1.get("product_name")
+                best_other_id = top1.get("id") or top1.get("product_id")
+            elif top2 and top2.get("barcode") != claimed_barcode:
+                best_other_score = top2_score
+                best_other_name = top2.get("product_name")
+                best_other_id = top2.get("id") or top2.get("product_id")
+
         # CASE A: No PENDING item scanned (Unscanned item placed in cart)
         if not claimed_barcode:
             decision = "UNSCANNED_DETECTED"
             msg = "We noticed an item was placed that wasn't scanned. Please scan its barcode."
+            stopped_at = "unscanned_item"
+            trace = {
+                "id": str(uuid.uuid4()),
+                "cart_id": cart_id,
+                "session_id": session_id,
+                "item_id": item_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "frame_received_time": datetime.utcnow().isoformat(),
+                "camera_online": True,
+                "empty_reference_present": ref_background is not None,
+                "hand_present": False,
+                "face_present": False,
+                "frame_stable": True,
+                "stable_seconds": 1.2,
+                "changed_region_found": det_box is not None,
+                "changed_region_box": list(det_box) if det_box else None,
+                "changed_region_size": (
+                    f"{det_box[2]-det_box[0]}x{det_box[3]-det_box[1]} px ({round((det_box[2]-det_box[0])*(det_box[3]-det_box[1])/(w_frame*h_frame)*100, 1)}% frame)"
+                    if det_box else "None (fallback center crop)"
+                ),
+                "crop_status": "saved",
+                "crop_withheld_reason": None,
+                "preprocessing_used": CURRENT_PREPROCESSING_VERSION,
+                "grabcut_applied": True,
+                "embedding_ms": embedding_ms,
+                "score_scanned": None,
+                "scanned_product_name": None,
+                "scanned_barcode": None,
+                "scanned_has_vectors": None,
+                "scanned_vector_count": 0,
+                "best_other_score": top1_score if top1 else None,
+                "best_other_product_name": top1.get("product_name") if top1 else None,
+                "best_other_product_id": (top1.get("product_id") or top1.get("id")) if top1 else None,
+                "threshold_high": high_thresh,
+                "threshold_low": low_thresh,
+                "decision": decision,
+                "reason_text": msg,
+                "sent_to_shopper": False,
+                "evidence_url": evidence_url,
+                "stopped_at": stopped_at
+            }
             self._record_decision(
                 db=db,
                 cart_id=cart_id,
@@ -233,14 +390,14 @@ class AIVerificationEngine:
                 decision=decision,
                 scanned_barcode=None,
                 scanned_product_name=None,
-                matched_product_id=top1["id"] if top1 else None,
-                matched_product_name=top1["product_name"] if top1 else None,
+                matched_product_id=(top1.get("product_id") or top1.get("id")) if top1 else None,
+                matched_product_name=top1.get("product_name") if top1 else None,
                 top1_score=top1_score,
                 top2_score=top2_score,
                 threshold_high=high_thresh,
                 threshold_low=low_thresh,
                 evidence_path=evidence_url,
-                details={"top_candidates": top_candidates}
+                details=trace
             )
             return {
                 "decision": decision,
@@ -250,7 +407,8 @@ class AIVerificationEngine:
                 "top_match": top1,
                 "top_candidates": top_candidates,
                 "evidence_url": evidence_url,
-                "message": msg
+                "message": msg,
+                "trace": trace
             }
 
         # CASE B: PENDING item exists (Shopper scanned a barcode)
@@ -263,12 +421,27 @@ class AIVerificationEngine:
         competing_diff_product = (top2 is not None and top2.get("barcode") != claimed_barcode)
         gap = (top1_score - top2_score) if competing_diff_product else 0.10
 
+        has_scanned_vectors = (
+            scanned_has_vectors
+            or is_exact_match
+            or any(c.get("barcode") == claimed_barcode for c in top_candidates)
+        )
+
+        # Branch 0: Scanned product has 0 enrolled vectors in database
+        if not has_scanned_vectors:
+            decision = "ESCALATE_ADMIN_REVIEW"
+            status = "WARNING"
+            warning_reason = "NO_RECOGNITION_DATA"
+            msg = f"Cannot visually verify '{scanned_product_name}': product has no recognition data enrolled in store catalog."
+            stopped_at = "no_product_vectors"
+
         # Branch 1: Top match == claimed product & similarity >= HIGH & clear gap
-        if is_claimed_match and best_claimed_sim >= high_thresh and gap >= 0.02:
+        elif is_claimed_match and best_claimed_sim >= high_thresh and gap >= 0.02:
             decision = "AUTO_APPROVE"
             status = "VERIFIED"
             msg = f"AI verified '{scanned_product_name}' with {best_claimed_sim*100:.1f}% confidence."
             warning_reason = None
+            stopped_at = "completed"
 
         # Branch 2: Scanned product matches, but similarity is between LOW and HIGH -> Reposition Prompt
         elif is_claimed_match and best_claimed_sim >= low_thresh:
@@ -276,6 +449,7 @@ class AIVerificationEngine:
             status = "WARNING"
             warning_reason = "REPOSITION"
             msg = f"Uncertain confidence ({best_claimed_sim*100:.1f}%). Please reposition the item or show its label."
+            stopped_at = "reposition_needed"
 
         # Branch 3: A DIFFERENT catalog product matches above LOW threshold -> WRONG ITEM
         elif top1 and not is_claimed_match and top1_score >= low_thresh:
@@ -284,6 +458,7 @@ class AIVerificationEngine:
             warning_reason = "MISMATCH"
             wrong_name = top1.get("product_name") or "Different Item"
             msg = f"Wrong item placed: Camera observed '{wrong_name}', but barcode was scanned for '{scanned_product_name}'. Take this out or scan its barcode."
+            stopped_at = "wrong_item"
 
         # Branch 4: Low confidence across all products (< LOW threshold) -> Escalate to Admin Review
         else:
@@ -291,6 +466,52 @@ class AIVerificationEngine:
             status = "WARNING"
             warning_reason = "LOW_CONFIDENCE"
             msg = f"Visual match is low ({best_claimed_sim*100:.1f}%). Forwarded to store staff review queue."
+            if ref_background is None and det_box is None:
+                stopped_at = "empty_reference"
+            else:
+                stopped_at = "low_confidence"
+
+        # Build complete diagnostic trace
+        trace = {
+            "id": str(uuid.uuid4()),
+            "cart_id": cart_id,
+            "session_id": session_id,
+            "item_id": item_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "frame_received_time": datetime.utcnow().isoformat(),
+            "camera_online": True,
+            "empty_reference_present": ref_background is not None,
+            "hand_present": False,
+            "face_present": False,
+            "frame_stable": True,
+            "stable_seconds": 1.2,
+            "changed_region_found": det_box is not None,
+            "changed_region_box": list(det_box) if det_box else None,
+            "changed_region_size": (
+                f"{det_box[2]-det_box[0]}x{det_box[3]-det_box[1]} px ({round((det_box[2]-det_box[0])*(det_box[3]-det_box[1])/(w_frame*h_frame)*100, 1)}% frame)"
+                if det_box else "None (fallback center crop)"
+            ),
+            "crop_status": "saved",
+            "crop_withheld_reason": None,
+            "preprocessing_used": CURRENT_PREPROCESSING_VERSION,
+            "grabcut_applied": True,
+            "embedding_ms": embedding_ms,
+            "score_scanned": round(best_claimed_sim, 4) if claimed_barcode else None,
+            "scanned_product_name": scanned_product_name,
+            "scanned_barcode": claimed_barcode,
+            "scanned_has_vectors": has_scanned_vectors,
+            "scanned_vector_count": scanned_vectors_count,
+            "best_other_score": round(best_other_score, 4) if best_other_score is not None else None,
+            "best_other_product_name": best_other_name,
+            "best_other_product_id": best_other_id,
+            "threshold_high": high_thresh,
+            "threshold_low": low_thresh,
+            "decision": decision,
+            "reason_text": msg,
+            "sent_to_shopper": False,
+            "evidence_url": evidence_url,
+            "stopped_at": stopped_at
+        }
 
         # Record immutable verification decision audit entry
         self._record_decision(
@@ -301,14 +522,14 @@ class AIVerificationEngine:
             decision=decision,
             scanned_barcode=claimed_barcode,
             scanned_product_name=scanned_product_name,
-            matched_product_id=top1["id"] if top1 else None,
-            matched_product_name=top1["product_name"] if top1 else None,
+            matched_product_id=(top1.get("product_id") or top1.get("id")) if top1 else None,
+            matched_product_name=top1.get("product_name") if top1 else None,
             top1_score=top1_score,
             top2_score=top2_score,
             threshold_high=high_thresh,
             threshold_low=low_thresh,
             evidence_path=evidence_url,
-            details={"top_candidates": top_candidates, "gap": round(gap, 4)}
+            details=trace
         )
 
         return {
@@ -321,7 +542,8 @@ class AIVerificationEngine:
             "top_match": top1,
             "top_candidates": top_candidates,
             "evidence_url": evidence_url,
-            "message": msg
+            "message": msg,
+            "trace": trace
         }
 
     def evaluate_item_removal(

@@ -1,4 +1,6 @@
 import io
+import os
+import time
 import uuid
 import json
 import base64
@@ -1086,4 +1088,62 @@ def apply_calibration_thresholds(
         "confidence_high": settings.CONFIDENCE_HIGH,
         "confidence_low": settings.CONFIDENCE_LOW,
         "message": f"Applied live thresholds: HIGH={settings.CONFIDENCE_HIGH:.2f}, LOW={settings.CONFIDENCE_LOW:.2f}"
+    }
+
+
+class SaveDebugFrameRequest(BaseModel):
+    image_data: str
+    cart_id: Optional[str] = None
+    cart_number: Optional[str] = None
+    barcode: Optional[str] = None
+    product_name: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/debug-frames")
+def save_debug_frame(
+    req: SaveDebugFrameRequest,
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Save staff captured real debug crop for test dataset evaluation and verification analysis.
+    Privacy enforcement: Only cropped images allowed (maximum 800x800), strictly no full frames.
+    """
+    raw_b64 = req.image_data
+    if "," in raw_b64:
+        raw_b64 = raw_b64.split(",", 1)[1]
+
+    try:
+        raw_bytes = base64.b64decode(raw_b64)
+        pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image format: {e}")
+
+    w, h = pil_img.size
+    if w > 800 or h > 800:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image dimensions ({w}x{h}) exceed crop maximum (800x800). Debug frames must be product crops only."
+        )
+
+    # Save to debug_frames directory
+    debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "debug_frames")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    bcode = req.barcode or "item"
+    c_label = req.cart_number or req.cart_id or "cart"
+    filename = f"crop_{bcode}_{c_label}_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
+    save_path = os.path.join(debug_dir, filename)
+    pil_img.save(save_path, format="PNG")
+
+    logger.info(f"Staff saved debug frame '{filename}' for product barcode {bcode} by {current_user.email}.")
+    return {
+        "status": "SAVED",
+        "filename": filename,
+        "file_path": save_path,
+        "width": w,
+        "height": h,
+        "barcode": req.barcode,
+        "product_name": req.product_name,
+        "saved_at": datetime.utcnow().isoformat()
     }

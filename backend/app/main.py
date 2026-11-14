@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, status, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings, is_valid_base_url, get_base_url_host
@@ -200,13 +201,20 @@ _detailed_health_cache: Dict[str, Any] = {
 HEALTH_CACHE_TTL_SECONDS = 15.0
 
 
-def _get_detailed_health_data(fresh: bool = False):
+def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None):
     """
     Full diagnostic metrics for authenticated staff portal (/admin/system-health).
     Always masks database credentials, passwords, and tokens.
     Caches expensive DB count aggregations and storage probes for 15s to guarantee sub-millisecond responses.
     """
-    db_ok = check_db_health()
+    if db is not None:
+        try:
+            db.execute(text("SELECT 1"))
+            db_ok = True
+        except Exception:
+            db_ok = False
+    else:
+        db_ok = check_db_health()
     model_ok = is_model_ready()
 
     schema_ok = False
@@ -251,34 +259,36 @@ def _get_detailed_health_data(fresh: bool = False):
         products_enrolled = 0
         mismatched_vectors = 0
         last_job_data = None
-        if db_ok and SessionLocal:
+        if db_ok:
             try:
-                db = SessionLocal()
-                try:
-                    from app.models.product import Product, ProductEmbedding
-                    from app.models.scan_job import ScanJob
-                    from app.config import CURRENT_PREPROCESSING_VERSION
-                    from sqlalchemy import func
-                    total_products = db.query(Product).count()
-                    vectors_count = db.query(ProductEmbedding).count()
-                    products_enrolled = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
-                    mismatched_vectors = db.query(ProductEmbedding).filter(
-                        (ProductEmbedding.preprocessing_version != CURRENT_PREPROCESSING_VERSION) |
-                        (ProductEmbedding.preprocessing_version.is_(None))
-                    ).count()
+                db_session = db if db is not None else (SessionLocal() if SessionLocal else None)
+                if db_session:
+                    try:
+                        from app.models.product import Product, ProductEmbedding
+                        from app.models.scan_job import ScanJob
+                        from app.config import CURRENT_PREPROCESSING_VERSION
+                        from sqlalchemy import func
+                        total_products = db_session.query(Product).count()
+                        vectors_count = db_session.query(ProductEmbedding).count()
+                        products_enrolled = db_session.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
+                        mismatched_vectors = db_session.query(ProductEmbedding).filter(
+                            (ProductEmbedding.preprocessing_version != CURRENT_PREPROCESSING_VERSION) |
+                            (ProductEmbedding.preprocessing_version.is_(None))
+                        ).count()
 
-                    last_job = db.query(ScanJob).order_by(ScanJob.created_at.desc()).first()
-                    if last_job:
-                        dur_ms = 0.0
-                        if last_job.created_at and last_job.updated_at:
-                            dur_ms = round((last_job.updated_at - last_job.created_at).total_seconds() * 1000.0, 1)
-                        last_job_data = {
-                            "id": last_job.id,
-                            "status": last_job.status,
-                            "duration_ms": dur_ms,
-                        }
-                finally:
-                    db.close()
+                        last_job = db_session.query(ScanJob).order_by(ScanJob.created_at.desc()).first()
+                        if last_job:
+                            dur_ms = 0.0
+                            if last_job.created_at and last_job.updated_at:
+                                dur_ms = round((last_job.updated_at - last_job.created_at).total_seconds() * 1000.0, 1)
+                            last_job_data = {
+                                "id": last_job.id,
+                                "status": last_job.status,
+                                "duration_ms": dur_ms,
+                            }
+                    finally:
+                        if db is None and db_session:
+                            db_session.close()
             except Exception:
                 pass
 
@@ -336,6 +346,52 @@ def _get_detailed_health_data(fresh: bool = False):
     base_url_valid = is_valid_base_url(settings.BASE_URL, demo_mode=settings.DEMO_MODE)
     base_url_warning = None if base_url_valid else "Set BASE_URL to your public https address"
 
+    # Live diagnostics for pending items currently awaiting cart camera verification
+    pending_items_diagnostics = []
+    if db_ok:
+        try:
+            db_live = db if db is not None else (SessionLocal() if SessionLocal else None)
+            if db_live:
+                try:
+                    from app.models.session import CartSession, CartItem
+                    from app.models.cart import Cart
+                    from app.models.product import ProductEmbedding
+
+                    active_sessions = db_live.query(CartSession).filter(CartSession.status == "ACTIVE").all()
+                    for sess in active_sessions:
+                        p_items = db_live.query(CartItem).join(CartItem.product).filter(
+                            CartItem.session_id == sess.id,
+                            CartItem.status == "PENDING"
+                        ).all()
+                        for pi in p_items:
+                            prod = pi.product
+                            if not prod:
+                                continue
+                            v_count = db_live.query(ProductEmbedding).filter(ProductEmbedding.product_id == prod.id).count()
+                            mismatch_c = db_live.query(ProductEmbedding).filter(
+                                ProductEmbedding.product_id == prod.id,
+                                (ProductEmbedding.preprocessing_version != getattr(settings, "CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224")) |
+                                (ProductEmbedding.preprocessing_version.is_(None))
+                            ).count()
+                            cart_obj = db_live.query(Cart).filter(Cart.id == sess.cart_id).first()
+                            pending_items_diagnostics.append({
+                                "cart_id": sess.cart_id,
+                                "cart_number": cart_obj.cart_number if cart_obj else "UNKNOWN",
+                                "session_id": sess.id,
+                                "item_id": pi.id,
+                                "scanned_barcode": prod.barcode,
+                                "product_name": prod.name,
+                                "has_vectors": v_count > 0,
+                                "vector_count": v_count,
+                                "preprocessing_version_mismatch_count": mismatch_c,
+                                "scanned_at": pi.scanned_at.isoformat() if pi.scanned_at else None
+                            })
+                finally:
+                    if db is None and db_live:
+                        db_live.close()
+        except Exception:
+            pass
+
     return {
         "status": overall_status,
         "database_ok": db_ok,
@@ -357,6 +413,7 @@ def _get_detailed_health_data(fresh: bool = False):
             f"Detected {mismatched_vectors} enrolled vector(s) using an outdated preprocessing version. Re-enrollment recommended."
             if mismatched_vectors > 0 else None
         ),
+        "pending_items_diagnostics": pending_items_diagnostics,
         "embed_ms_last": metrics["embed_ms_last"],
         "embed_ms_avg": metrics["embed_ms_avg"],
         "scan_worker_metrics": worker_metrics,
@@ -395,14 +452,18 @@ def api_health_check(response: Response):
 
 @app.get("/admin/system-health")
 @app.get(f"{settings.API_V1_STR}/admin/system-health")
-def admin_system_health(fresh: bool = False, current_user=Depends(get_current_user)):
+def admin_system_health(
+    fresh: bool = False,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Detailed system health diagnostics for authenticated staff.
     Includes schema revisions, sanitized migration error (if any), model metrics,
     memory usage, vector counts, storage type, and worker timings.
     Never exposes raw database credentials or connection strings.
     """
-    return _get_detailed_health_data(fresh=fresh)
+    return _get_detailed_health_data(fresh=fresh, db=db)
 
 # Real-Time WebSocket Endpoints
 @app.websocket("/ws/cart/{cart_id}")

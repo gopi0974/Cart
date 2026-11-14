@@ -18,6 +18,7 @@ export interface CartItem {
   top1_score?: number;
   top2_score?: number;
   verification_evidence_url?: string;
+  pending_reason?: string;
 }
 
 export interface ActiveWarning {

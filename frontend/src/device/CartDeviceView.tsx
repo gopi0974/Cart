@@ -20,7 +20,8 @@ import {
   Sliders,
   Target,
   CheckCircle2,
-  BarChart2
+  BarChart2,
+  Download
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
 import { getApiBaseUrl, api } from '../services/api';
@@ -299,6 +300,62 @@ export const CartDeviceView: React.FC = () => {
     }
   };
 
+  const [savingDebugFrame, setSavingDebugFrame] = useState(false);
+
+  const handleSaveDebugFrame = async () => {
+    if (!videoRef.current || !isRunning) {
+      addLog('Cannot save debug frame: Camera is not running.', 'warn');
+      return;
+    }
+
+    if (facePresent) {
+      alert('Cannot save debug frame: Human face detected! For privacy safety, debug frames must be product crops only with no faces.');
+      addLog('Save debug frame blocked: Human face detected.', 'warn');
+      return;
+    }
+
+    setSavingDebugFrame(true);
+    try {
+      const video = videoRef.current;
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+
+      // Crop central 60% x 60% product region (strictly product crop, max 480x480)
+      const cropW = Math.round(vw * 0.6);
+      const cropH = Math.round(vh * 0.6);
+      const cropX = Math.round((vw - cropW) / 2);
+      const cropY = Math.round((vh - cropH) / 2);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = cropW;
+      canvas.height = cropH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not get 2D canvas context');
+
+      ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+      const dataUrl = canvas.toDataURL('image/png');
+
+      // 1. Direct browser download for local inspection
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = `debug_crop_${selectedCart || 'cart'}_${Date.now()}.png`;
+      a.click();
+
+      // 2. Upload to server debug-frames store
+      await api.saveDebugFrame({
+        image_data: dataUrl,
+        cart_number: selectedCart,
+        notes: 'Captured by staff via /cart-device Save Debug Frame button'
+      });
+
+      addLog(`Debug product crop saved and downloaded (${cropW}x${cropH} px).`, 'success');
+    } catch (err: any) {
+      addLog(`Failed to save debug frame: ${err.message}`, 'error');
+    } finally {
+      setSavingDebugFrame(false);
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (cameraManagerRef.current) {
@@ -572,14 +629,25 @@ export const CartDeviceView: React.FC = () => {
               )}
 
               {isRunning && (
-                <button
-                  onClick={handleCaptureReference}
-                  className="py-3 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95"
-                  title="Capture empty cart reference frame"
-                >
-                  <Layers className="w-4 h-4" />
-                  <span>Capture Ref</span>
-                </button>
+                <>
+                  <button
+                    onClick={handleCaptureReference}
+                    className="py-3 px-3.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 shadow-md shadow-emerald-900/30"
+                    title="Capture empty cart reference frame"
+                  >
+                    <Layers className="w-4 h-4" />
+                    <span>Capture Ref</span>
+                  </button>
+                  <button
+                    onClick={handleSaveDebugFrame}
+                    disabled={savingDebugFrame || facePresent}
+                    className="py-3 px-3.5 rounded-xl bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 shadow-md shadow-purple-900/30"
+                    title="Save debug product crop (crops only, no faces)"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>{savingDebugFrame ? 'Saving...' : 'Save Debug Frame'}</span>
+                  </button>
+                </>
               )}
             </div>
           </div>

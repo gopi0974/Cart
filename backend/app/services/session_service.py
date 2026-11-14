@@ -126,6 +126,55 @@ class SessionService:
         return session
 
     @staticmethod
+    def compute_pending_reason(db: Session, cart: Optional[Cart], itm: CartItem) -> str:
+        """
+        Computes exact diagnostic reason if a PENDING item is awaiting camera judgement:
+        - camera offline
+        - no reference
+        - hand in view
+        - face withheld
+        - product has no recognition data
+        - below threshold
+        """
+        # 1. Check camera status
+        if not cart or cart.camera_status != "ONLINE":
+            return "camera offline"
+
+        from app.websocket.device_handler import get_tracker
+        from app.models.product import ProductEmbedding
+        from app.models.session import VerificationDecision
+
+        tracker = get_tracker(cart.id)
+
+        # 2. Check empty reference
+        if tracker.ref_background is None:
+            return "no reference"
+
+        # 3. Check hand in view
+        if tracker.hand_in_frame:
+            return "hand in view"
+
+        # 4. Check face withheld
+        if tracker.face_seen_start_time > 0.0:
+            return "face withheld"
+
+        # 5. Check product recognition vectors
+        if itm.product:
+            vectors_count = db.query(ProductEmbedding).filter(ProductEmbedding.barcode == itm.product.barcode).count()
+            if vectors_count == 0:
+                return "product has no recognition data"
+
+        # 6. Check last decision for this item
+        last_decision = db.query(VerificationDecision).filter(
+            VerificationDecision.item_id == itm.id
+        ).order_by(VerificationDecision.created_at.desc()).first()
+
+        if last_decision and last_decision.decision in ("ESCALATE_ADMIN_REVIEW", "REPOSITION_PROMPT"):
+            return "below threshold"
+
+        return "waiting for steady placement"
+
+    @staticmethod
     def get_session_details(db: Session, session_id: str) -> Dict[str, Any]:
         """Fetch complete real-time session state, items, and active warnings (N+1 eliminated via joinedload)."""
         session = db.query(CartSession).options(joinedload(CartSession.cart)).filter(CartSession.id == session_id).first()
@@ -145,9 +194,18 @@ class SessionService:
         for itm in items:
             if itm.status == "PENDING":
                 has_unverified = True
+                p_reason = SessionService.compute_pending_reason(db, cart, itm)
+                setattr(itm, "pending_reason", p_reason)
+
+                elapsed_sec = (datetime.utcnow() - itm.scanned_at).total_seconds() if itm.scanned_at else 0
+                if elapsed_sec > 15:
+                    w_msg = f"Waiting for the camera to check this item ({p_reason})"
+                else:
+                    w_msg = f"'{itm.product.name}' is scanned. Place it in your cart."
+
                 active_warnings.append({
                     "type": "PENDING_ITEM",
-                    "message": f"'{itm.product.name}' is scanned. Place it in your cart.",
+                    "message": w_msg,
                     "target_barcode": itm.product.barcode,
                     "action_required": "PLACE_IN_CART",
                     "item_id": itm.id,

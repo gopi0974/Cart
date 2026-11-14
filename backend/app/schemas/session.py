@@ -24,6 +24,7 @@ class CartItemResponse(BaseModel):
     verified_at: Optional[datetime] = None
     confidence_score: Optional[float] = None
     verification_evidence_url: Optional[str] = None
+    pending_reason: Optional[str] = None
 
     class Config:
         from_attributes = True

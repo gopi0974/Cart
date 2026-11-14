@@ -812,4 +812,47 @@ export const api = {
       body: JSON.stringify({ confidence_high, confidence_low }),
     });
   },
+
+  async getCartVerificationTrace(cartId: string, limit: number = 20) {
+    return request<{
+      cart_id: string;
+      cart_number: string;
+      camera_status: string;
+      empty_reference_present: boolean;
+      total_judgements: number;
+      traces: any[];
+    }>(`/admin/carts/${cartId}/verification-trace?limit=${limit}`);
+  },
+
+  async runCartVerificationNow(cartId: string) {
+    return request<{
+      status: string;
+      decision: string;
+      message: string;
+      trace: any;
+    }>(`/admin/carts/${cartId}/run-verification`, {
+      method: 'POST',
+    });
+  },
+
+  async saveDebugFrame(payload: {
+    image_data: string;
+    cart_id?: string;
+    cart_number?: string;
+    barcode?: string;
+    product_name?: string;
+    notes?: string;
+  }) {
+    return request<{
+      status: string;
+      filename: string;
+      file_path: string;
+      width: number;
+      height: number;
+      saved_at: string;
+    }>('/vision/debug-frames', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
 };

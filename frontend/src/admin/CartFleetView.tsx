@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { 
   Plus, Printer, QrCode, Download, RefreshCw, Key, ShieldCheck, 
   Copy, Check, AlertTriangle, Power, ShoppingCart, ExternalLink, Battery, Camera, CameraOff,
-  Edit3, RotateCcw, X, Unlock, Save
+  Edit3, RotateCcw, X, Unlock, Save, Activity
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { CartFleetItem, CartRegistrationResult } from '../types';
 import { api, getWsBaseUrl } from '../services/api';
 import { wsRegistry } from '../services/wsRegistry';
+import { VerificationTraceView } from './VerificationTraceView';
 
 export const CartFleetView: React.FC = () => {
   const [carts, setCarts] = useState<CartFleetItem[]>([]);
@@ -29,6 +30,9 @@ export const CartFleetView: React.FC = () => {
   const [testingCameraCart, setTestingCameraCart] = useState<CartFleetItem | null>(null);
   const [cameraPreviewData, setCameraPreviewData] = useState<any | null>(null);
   const [cameraPreviewLoading, setCameraPreviewLoading] = useState<boolean>(false);
+
+  // Verification Trace View State
+  const [selectedTraceCart, setSelectedTraceCart] = useState<CartFleetItem | null>(null);
 
   // Edit Cart Modal State
   const [editingCart, setEditingCart] = useState<CartFleetItem | null>(null);
@@ -293,6 +297,15 @@ export const CartFleetView: React.FC = () => {
     setTimeout(() => setCopiedLinkId(null), 2000);
   };
 
+  if (selectedTraceCart) {
+    return (
+      <VerificationTraceView
+        cart={selectedTraceCart}
+        onBack={() => setSelectedTraceCart(null)}
+      />
+    );
+  }
+
   return (
     <div className="space-y-6 animate-fade-in pb-12">
       {/* Missing BASE_URL Warning Banner */}
@@ -504,6 +517,19 @@ export const CartFleetView: React.FC = () => {
                       Seen {new Date(c.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                     </span>
                   )}
+                </button>
+
+                {/* Verification Trace Button */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedTraceCart(c)}
+                  className="w-full text-center text-xs font-semibold py-1.5 px-3 rounded-xl bg-purple-500/10 hover:bg-purple-500/20 text-purple-600 dark:text-purple-400 border border-purple-500/20 transition-all flex items-center justify-center gap-1.5 active:scale-95"
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  <span>Verification trace</span>
+                  <span className="text-[10px] text-purple-400/80 font-normal ml-auto">
+                    Debug last 20
+                  </span>
                 </button>
 
                 {/* Active Session Indicator & Quick Release */}
