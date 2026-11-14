@@ -49,3 +49,4 @@ def downgrade() -> None:
             with op.batch_alter_table("alerts", schema=None) as batch_op:
                 batch_op.drop_index("ix_alerts_item_id")
                 batch_op.drop_column("item_id")
+
