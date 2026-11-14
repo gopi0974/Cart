@@ -1,4 +1,4 @@
-export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'REMOVED' | 'REMOVING' | 'REMOVED_PENDING_RESCAN';
+export type ItemStatus = 'PENDING' | 'VERIFIED' | 'WARNING' | 'WARNING_MISMATCH' | 'WARNING_UNSCANNED' | 'NEEDS_STAFF_CHECK' | 'REMOVED' | 'REMOVING' | 'REMOVED_PENDING_RESCAN';
 
 export interface CartItem {
   id: string;
@@ -22,7 +22,7 @@ export interface CartItem {
 }
 
 export interface ActiveWarning {
-  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN' | 'WARNING_ITEM' | 'PENDING_ITEM' | 'FACE_IN_PACKAGING_WITHHELD';
+  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN' | 'WARNING_ITEM' | 'PENDING_ITEM' | 'FACE_IN_PACKAGING_WITHHELD' | 'NEEDS_STAFF_CHECK';
   message: string;
   target_barcode?: string;
   action_required: string;
@@ -128,6 +128,8 @@ export interface AdminAlert {
 export interface ReviewCase {
   id: string;
   alert_id: string;
+  alert_type?: string;
+  evidence_status?: string;
   cart_id: string;
   cart_number: string;
   scanned_barcode?: string;

@@ -36,9 +36,18 @@ class SessionService:
                 f"[Cart {cart_id}] Multiple ({len(active_sessions)}) ACTIVE sessions detected. "
                 f"Retaining latest session {active_sessions[0].id} and closing {len(active_sessions) - 1} stale session(s)."
             )
+            now_dt = datetime.utcnow()
             for stale in active_sessions[1:]:
                 stale.status = "ENDED"
-                stale.ended_at = datetime.utcnow()
+                stale.ended_at = now_dt
+                stale_alerts = db.query(Alert).filter(
+                    Alert.session_id == stale.id,
+                    Alert.status == "OPEN"
+                ).all()
+                for al in stale_alerts:
+                    al.status = "RESOLVED"
+                    al.resolved_at = now_dt
+                    al.resolution_notes = "Auto-resolved on session cleanup (stale session ended)."
             db.commit()
 
         return active_sessions[0]
@@ -129,6 +138,16 @@ class SessionService:
             raise ValueError(f"Cart '{cart.cart_number}' is currently occupied by an active shopper. Only one active session is allowed per cart.")
 
         # 5. Create new shopping session with secure unguessable session token
+        # Clean up any lingering open alerts from older sessions on this cart
+        lingering_alerts = db.query(Alert).filter(
+            Alert.cart_id == cart.id,
+            Alert.status == "OPEN"
+        ).all()
+        for la in lingering_alerts:
+            la.status = "RESOLVED"
+            la.resolved_at = datetime.utcnow()
+            la.resolution_notes = "Auto-resolved prior to new session start."
+
         session = CartSession(
             cart_id=cart.id,
             session_token=secrets.token_urlsafe(32),
@@ -237,6 +256,16 @@ class SessionService:
                     "item_id": itm.id,
                     "product_name": itm.product.name
                 })
+            elif itm.status == "NEEDS_STAFF_CHECK":
+                has_unverified = True
+                active_warnings.append({
+                    "type": "NEEDS_STAFF_CHECK",
+                    "message": "We can't check this item automatically. Please ask staff.",
+                    "target_barcode": itm.product.barcode,
+                    "action_required": "CALL_STAFF",
+                    "item_id": itm.id,
+                    "product_name": itm.product.name
+                })
             elif itm.status in ["WARNING", "WARNING_MISMATCH", "WARNING_UNSCANNED"]:
                 has_unverified = True
                 reason = getattr(itm, "warning_reason", None) or ("MISMATCH" if itm.status == "WARNING_MISMATCH" else "UNSCANNED" if itm.status == "WARNING_UNSCANNED" else "WARNING")
@@ -245,17 +274,17 @@ class SessionService:
                 elif reason == "REPOSITION":
                     w_msg = f"Please reposition '{itm.product.name}' or show its label."
                 elif reason == "FACE_DETECTED":
-                    w_msg = "We can't check this item. Please ask staff"
+                    w_msg = "We can't check this item automatically. Please ask staff."
                 elif reason == "UNSCANNED":
                     w_msg = "We noticed an item was placed that wasn't scanned. Please scan its barcode."
                 else:
                     w_msg = f"Warning on '{itm.product.name}'. Please check item."
 
                 active_warnings.append({
-                    "type": "MISMATCH_ITEM" if reason == "MISMATCH" else "UNSCANNED_ITEM" if reason == "UNSCANNED" else "WARNING_ITEM",
+                    "type": "MISMATCH_ITEM" if reason == "MISMATCH" else "UNSCANNED_ITEM" if reason == "UNSCANNED" else "NEEDS_STAFF_CHECK" if reason == "FACE_DETECTED" else "WARNING_ITEM",
                     "message": w_msg,
                     "target_barcode": itm.product.barcode,
-                    "action_required": "RESCAN_OR_CALL_STAFF",
+                    "action_required": "CALL_STAFF" if reason == "FACE_DETECTED" else "RESCAN_OR_CALL_STAFF",
                     "item_id": itm.id,
                     "product_name": itm.product.name
                 })
@@ -281,18 +310,22 @@ class SessionService:
                 })
 
         # Check for open removal or unscanned warnings in alerts
+        seen_warning_item_ids = {w.get("item_id") for w in active_warnings if w.get("item_id")}
         unresolved_alerts = db.query(Alert).filter(
             Alert.session_id == session.id,
-            Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "UNSCANNED_ITEM", "FACE_IN_PACKAGING_WITHHELD"]),
+            Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "UNSCANNED_ITEM", "NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD"]),
             Alert.status == "OPEN"
         ).all()
 
         for r_alert in unresolved_alerts:
+            if r_alert.item_id and r_alert.item_id in seen_warning_item_ids:
+                continue
             active_warnings.append({
                 "type": r_alert.alert_type,
                 "message": r_alert.message,
                 "target_barcode": None,
-                "action_required": "SCAN_BARCODE" if r_alert.alert_type == "UNSCANNED_ITEM" else "RESCAN_TO_REMOVE"
+                "action_required": "SCAN_BARCODE" if r_alert.alert_type == "UNSCANNED_ITEM" else "CALL_STAFF" if r_alert.alert_type in ("NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD") else "RESCAN_TO_REMOVE",
+                "item_id": r_alert.item_id
             })
 
         is_camera_online = (cart.camera_status == "ONLINE") if cart else False
@@ -417,12 +450,12 @@ class SessionService:
         if not session:
             return None
 
-        # Find pending item for this product
+        # Find pending or flagged item for this product
         clean_barcode = str(barcode).strip()
         item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == session.id,
             (Product.barcode == clean_barcode) | (Product.barcode.ilike(clean_barcode)),
-            CartItem.status == "PENDING"
+            CartItem.status.in_(["PENDING", "NEEDS_STAFF_CHECK", "WARNING", "WARNING_MISMATCH"])
         ).order_by(CartItem.scanned_at.desc()).first()
 
         if not item:
@@ -434,13 +467,13 @@ class SessionService:
         item.verification_evidence_url = evidence_url
         SessionService.recalculate_session_totals(db, session)
 
-        # AUTO-CLEAR: Resolve any open UNSCANNED_ITEM alerts for this session
-        open_unscanned_alerts = db.query(Alert).filter(
+        # AUTO-CLEAR: Resolve any open alerts for this session
+        open_alerts = db.query(Alert).filter(
             Alert.session_id == session.id,
-            Alert.alert_type == "UNSCANNED_ITEM",
+            Alert.alert_type.in_(["UNSCANNED_ITEM", "NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD", "MISMATCH_ITEM"]),
             Alert.status == "OPEN"
         ).all()
-        for al in open_unscanned_alerts:
+        for al in open_alerts:
             al.status = "RESOLVED"
             al.resolution_notes = f"Auto-cleared: item verified as '{item.product.name}'."
             al.resolved_at = datetime.utcnow()
@@ -464,17 +497,19 @@ class SessionService:
         # Check if more pending items remain
         remaining_pending = db.query(CartItem).filter(
             CartItem.session_id == session.id,
-            CartItem.status == "PENDING"
+            CartItem.status.in_(["PENDING", "NEEDS_STAFF_CHECK"])
         ).count()
         tracker.has_pending_items = (remaining_pending > 0)
         if not tracker.has_pending_items:
             tracker.last_pending_item_id = None
 
-        if open_unscanned_alerts or unscanned_placeholders:
-            await ws_manager.broadcast_to_cart(session.cart_id, "ALERT_CLEARED", {
-                "alert_type": "UNSCANNED_ITEM",
-                "message": f"Unscanned item warning cleared: verified as '{item.product.name}'."
-            })
+        if open_alerts or unscanned_placeholders:
+            for al in open_alerts:
+                await ws_manager.broadcast_to_cart(session.cart_id, "ALERT_CLEARED", {
+                    "alert_type": al.alert_type,
+                    "item_id": item.id,
+                    "message": f"Alert cleared: item verified as '{item.product.name}'."
+                })
 
         # Real-time WebSocket announcement: Item is verified!
         await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_VERIFIED", {

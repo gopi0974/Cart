@@ -14,6 +14,7 @@ class AlertService:
         message: str,
         severity: str = "MEDIUM",
         session_id: Optional[str] = None,
+        item_id: Optional[str] = None,
         evidence_url: Optional[str] = None,
         create_review_case: bool = False,
         scanned_barcode: Optional[str] = None,
@@ -21,11 +22,36 @@ class AlertService:
         confidence: float = 0.5,
         top_candidates: Optional[list] = None
     ) -> Alert:
-        """Create a real-time alert and notify admin channels instantly."""
+        """Create or update a real-time alert (enforcing at most one open alert per session, item, and type)."""
         import json
+
+        # De-duplicate: check for existing open alert for (cart, session, item, alert_type)
+        query = db.query(Alert).filter(
+            Alert.cart_id == cart_id,
+            Alert.alert_type == alert_type,
+            Alert.status == "OPEN"
+        )
+        if session_id:
+            query = query.filter(Alert.session_id == session_id)
+        if item_id:
+            query = query.filter(Alert.item_id == item_id)
+        else:
+            query = query.filter(Alert.item_id.is_(None))
+
+        existing_alert = query.order_by(Alert.created_at.desc()).first()
+        if existing_alert:
+            existing_alert.message = message
+            existing_alert.severity = severity
+            if evidence_url:
+                existing_alert.evidence_snapshot_url = evidence_url
+            db.commit()
+            db.refresh(existing_alert)
+            return existing_alert
+
         alert = Alert(
             cart_id=cart_id,
             session_id=session_id,
+            item_id=item_id,
             alert_type=alert_type,
             severity=severity,
             message=message,

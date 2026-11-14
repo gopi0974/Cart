@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, AlertCircle, ArrowRight, Camera, X } from 'lucide-react';
+import { AlertTriangle, AlertCircle, ArrowRight, Camera, X, ShieldAlert } from 'lucide-react';
 import { ActiveWarning } from '../types';
 
 interface Props {
@@ -26,6 +26,8 @@ export const WarningBanner: React.FC<Props> = ({
         const isRemovedPending = w.type === 'REMOVED_PENDING_RESCAN';
         const isRemoval = w.type === 'REMOVAL_WITHOUT_RESCAN' || isRemovedPending || isRemoving;
         const isMismatch = w.type === 'MISMATCH_ITEM';
+        const isNeedsStaffCheck = w.type === 'NEEDS_STAFF_CHECK' || w.type === 'FACE_IN_PACKAGING_WITHHELD';
+        const isUnscanned = w.type === 'UNSCANNED_ITEM';
 
         return (
           <div
@@ -37,6 +39,8 @@ export const WarningBanner: React.FC<Props> = ({
                 ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-300 dark:border-blue-700/60 text-blue-950 dark:text-blue-100 shadow-blue-500/10'
                 : isRemoval
                 ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-700/60 text-amber-900 dark:text-amber-200'
+                : isNeedsStaffCheck
+                ? 'bg-amber-50 dark:bg-amber-950/35 border-amber-300 dark:border-amber-700/60 text-amber-900 dark:text-amber-200 shadow-amber-500/5'
                 : 'bg-red-50 dark:bg-red-950/30 border-red-300 dark:border-red-700/60 text-red-900 dark:text-red-200'
             }`}
           >
@@ -47,7 +51,7 @@ export const WarningBanner: React.FC<Props> = ({
                     ? 'bg-amber-200/80 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 animate-pulse'
                     : isRemovedPending
                     ? 'bg-blue-200/80 dark:bg-blue-900/60 text-blue-900 dark:text-blue-200'
-                    : isRemoval
+                    : isRemoval || isNeedsStaffCheck
                     ? 'bg-amber-200/70 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300'
                     : 'bg-red-200/70 dark:bg-red-900/50 text-red-800 dark:text-red-300'
                 }`}
@@ -57,7 +61,9 @@ export const WarningBanner: React.FC<Props> = ({
 
               <div className="flex-1">
                 <div className="font-semibold text-sm">
-                  {isRemoving
+                  {isNeedsStaffCheck
+                    ? 'Staff Check Needed'
+                    : isRemoving
                     ? 'Item Removal in Progress'
                     : isRemovedPending
                     ? 'Item Removed from Cart'
@@ -65,7 +71,9 @@ export const WarningBanner: React.FC<Props> = ({
                     ? 'Item Removed from Cart'
                     : isMismatch
                     ? 'Item Check Needed'
-                    : 'Unscanned Item Detected'}
+                    : isUnscanned
+                    ? 'Unscanned Item Detected'
+                    : 'Item Check Needed'}
                 </div>
                 <p className="text-xs mt-0.5 opacity-90 leading-relaxed font-medium">
                   {w.message}
@@ -126,7 +134,12 @@ export const WarningBanner: React.FC<Props> = ({
                 </button>
               )}
 
-              {!isRemoval && (
+              {isNeedsStaffCheck ? (
+                <div className="flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-300 font-medium px-2 py-1">
+                  <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Attendant alerted • Please show item to staff</span>
+                </div>
+              ) : !isRemoval && (
                 <button
                   onClick={onScanClick}
                   className="bg-red-600 hover:bg-red-700 text-white text-xs font-semibold px-4 py-2 rounded-xl flex items-center gap-1.5 shadow-sm active:scale-95 transition-all"

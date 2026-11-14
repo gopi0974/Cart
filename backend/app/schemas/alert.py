@@ -27,6 +27,8 @@ class AlertResolutionRequest(BaseModel):
 class ReviewCaseResponse(BaseModel):
     id: str
     alert_id: str
+    alert_type: Optional[str] = None
+    evidence_status: Optional[str] = None
     cart_id: str
     cart_number: Optional[str] = None
     scanned_barcode: Optional[str] = None

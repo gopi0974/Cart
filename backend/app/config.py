@@ -116,6 +116,8 @@ class Settings(BaseModel):
     UNSCANNED_GRACE_PERIOD_SECONDS: float = float(os.getenv("UNSCANNED_GRACE_PERIOD_SECONDS", "10.0"))
     EVIDENCE_RETENTION_DAYS: int = int(os.getenv("EVIDENCE_RETENTION_DAYS", "14"))
     CURRENT_PREPROCESSING_VERSION: str = os.getenv("CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224")
+    # Face on Packaging policy: "withhold" (default, privacy-first) or "mask_and_judge"
+    FACE_ON_PACKAGING_MODE: str = os.getenv("FACE_ON_PACKAGING_MODE", "withhold").lower()
     
     # Payment Gateway (Test mode only)
     PAYMENT_MODE: str = os.getenv("PAYMENT_MODE", "TEST")
@@ -125,6 +127,7 @@ class Settings(BaseModel):
 settings = Settings()
 
 CURRENT_PREPROCESSING_VERSION = settings.CURRENT_PREPROCESSING_VERSION
+FACE_ON_PACKAGING_MODE = settings.FACE_ON_PACKAGING_MODE
 
 # Ensure directories exist
 settings.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)

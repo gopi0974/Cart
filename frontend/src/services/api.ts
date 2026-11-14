@@ -820,6 +820,7 @@ export const api = {
       camera_status: string;
       empty_reference_present: boolean;
       total_judgements: number;
+      session_alerts?: any[];
       traces: any[];
     }>(`/admin/carts/${cartId}/verification-trace?limit=${limit}`);
   },

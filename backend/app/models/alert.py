@@ -11,7 +11,8 @@ class Alert(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     cart_id = Column(String(36), ForeignKey("carts.id"), nullable=False, index=True)
     session_id = Column(String(36), ForeignKey("cart_sessions.id"), nullable=True, index=True)
-    alert_type = Column(String(50), nullable=False)  # UNSCANNED_ITEM, MISMATCH_ITEM, REMOVAL_WITHOUT_RESCAN, CAMERA_OCCLUSION, CART_OFFLINE
+    item_id = Column(String(36), ForeignKey("cart_items.id"), nullable=True, index=True)
+    alert_type = Column(String(50), nullable=False)  # UNSCANNED_ITEM, MISMATCH_ITEM, REMOVAL_WITHOUT_RESCAN, CAMERA_OCCLUSION, CART_OFFLINE, NEEDS_STAFF_CHECK
     severity = Column(String(20), nullable=False, default="MEDIUM")  # LOW, MEDIUM, HIGH, CRITICAL
     message = Column(Text, nullable=False)
     evidence_snapshot_url = Column(Text, nullable=True)

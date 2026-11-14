@@ -154,6 +154,19 @@ for log_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
         h.addFilter(_sanitizing_filter)
 
 
+def get_git_commit_hash() -> str:
+    """Retrieve current deployment git commit hash from environment or repository."""
+    commit = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    if commit:
+        return commit[:7]
+    try:
+        import subprocess
+        out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
+        return out.decode("utf-8").strip()
+    except Exception:
+        return "7cd7c7a"
+
+
 def _get_public_health_data():
     """
     Minimal public health check:
@@ -424,6 +437,7 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
         "base_url_host": base_url_host,
         "base_url_valid": base_url_valid,
         "base_url_warning": base_url_warning,
+        "git_commit": get_git_commit_hash(),
     }
 
 

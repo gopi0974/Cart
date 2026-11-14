@@ -542,7 +542,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                       ? 'border-amber-400/90 dark:border-amber-500/80 shadow-amber-500/10 shadow-lg ring-1 ring-amber-400'
                       : isItemRemovedPending
                         ? 'border-blue-400/90 dark:border-blue-500/80 shadow-blue-500/10 shadow-lg ring-1 ring-blue-400'
-                        : item.status === 'PENDING'
+                        : item.status === 'PENDING' || item.status === 'NEEDS_STAFF_CHECK'
                           ? 'border-amber-400/80 dark:border-amber-500/70 shadow-amber-500/10 shadow-lg'
                           : item.status === 'VERIFIED'
                             ? 'border-emerald-200 dark:border-emerald-900/60'
@@ -641,6 +641,13 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                           </span>
                         );
                       })()}
+
+                      {item.status === 'NEEDS_STAFF_CHECK' && (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 px-2.5 py-1 rounded-md border border-amber-300 dark:border-amber-700/60">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span>We can't check this item automatically. Please ask staff.</span>
+                        </span>
+                      )}
 
                       {(item.status === 'WARNING' || item.status === 'WARNING_MISMATCH' || item.status === 'WARNING_UNSCANNED') && (
                         <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/50 px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700/60">

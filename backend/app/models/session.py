@@ -40,7 +40,8 @@ class CartItem(Base):
     
     # PENDING: User scanned barcode; waiting for cart camera verification
     # VERIFIED: AI camera confirmed correct item placed in cart
-    # WARNING: Wrong item, needs reposition, unscanned, or face detected
+    # WARNING: Wrong item, needs reposition, or unscanned
+    # NEEDS_STAFF_CHECK: Camera withheld frame or cannot verify automatically, staff approval required
     # REMOVING: Item taken out or being removed
     # REMOVED_PENDING_RESCAN: Camera confirmed removal, waiting for shopper barcode rescan
     # REMOVED: Item taken out and confirmed removed from bill

@@ -31,6 +31,7 @@ interface Props {
 
 export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
   const [traces, setTraces] = useState<any[]>([]);
+  const [sessionAlerts, setSessionAlerts] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [runningNow, setRunningNow] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +44,7 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
     try {
       const resp = await api.getCartVerificationTrace(cart.id, 20);
       setTraces(resp.traces || []);
+      setSessionAlerts(resp.session_alerts || []);
       if (resp.traces && resp.traces.length > 0 && !expandedTraceId) {
         setExpandedTraceId(resp.traces[0].id);
       }
@@ -209,6 +211,64 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
           </button>
         </div>
       )}
+
+      {/* Active Session Alerts List */}
+      <div className="p-4 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-500" />
+            Session Alerts ({sessionAlerts.length})
+          </span>
+          <span className="text-[11px] text-slate-400 font-mono">
+            Recorded incidents for active cart session
+          </span>
+        </div>
+
+        {sessionAlerts.length === 0 ? (
+          <div className="py-2 text-center text-xs text-slate-400">
+            No alerts generated for current active shopping session.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-100 dark:border-slate-800 text-[10px] uppercase font-semibold text-slate-400 tracking-wider">
+                  <th className="py-2 px-2">Alert ID</th>
+                  <th className="py-2 px-2">Type</th>
+                  <th className="py-2 px-2">Severity</th>
+                  <th className="py-2 px-2">Status</th>
+                  <th className="py-2 px-2">Created By Stage</th>
+                  <th className="py-2 px-2">Created At</th>
+                  <th className="py-2 px-2">Message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-mono text-[11px]">
+                {sessionAlerts.map((alt: any) => (
+                  <tr key={alt.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                    <td className="py-2 px-2 font-bold text-slate-900 dark:text-white">#{alt.id.slice(0, 8)}</td>
+                    <td className="py-2 px-2">
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300">
+                        {alt.type}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 text-slate-600 dark:text-slate-400">{alt.severity}</td>
+                    <td className="py-2 px-2 font-bold">
+                      <span className={alt.status === 'OPEN' ? 'text-amber-500' : 'text-emerald-500'}>
+                        {alt.status}
+                      </span>
+                    </td>
+                    <td className="py-2 px-2 font-mono text-purple-600 dark:text-purple-400 font-medium">{alt.created_by_stage}</td>
+                    <td className="py-2 px-2 text-slate-400">{alt.created_at ? new Date(alt.created_at).toLocaleTimeString() : 'N/A'}</td>
+                    <td className="py-2 px-2 font-sans text-slate-700 dark:text-slate-300 truncate max-w-xs" title={alt.message}>
+                      {alt.message}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Trace History List */}
       <div className="space-y-4">
@@ -436,7 +496,18 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
                         <div className="font-mono text-[11px] font-bold text-slate-800 dark:text-slate-200">
                           Hand: {trace.hand_present ? '✋ YES' : 'NO'} • Face: {trace.face_present ? '👤 YES' : 'NO'}
                         </div>
-                        <span className="text-[10px] text-slate-500 block">MediaPipe in-browser gate</span>
+                        <div className="text-[10px] text-slate-500 space-y-0.5 font-mono">
+                          <div>Profile: <span className="font-semibold text-slate-700 dark:text-slate-300">{trace.detector_profile || 'privacy'}</span></div>
+                          {trace.face_box && (
+                            <div>Box: <span className="text-slate-600 dark:text-slate-400">[{trace.face_box.join(', ')}]</span></div>
+                          )}
+                          {trace.face_confidence != null && (
+                            <div>Conf: <span className="text-slate-600 dark:text-slate-400">{(trace.face_confidence * 100).toFixed(1)}%</span></div>
+                          )}
+                          {trace.face_box_size_percent != null && (
+                            <div>Size: <span className="text-slate-600 dark:text-slate-400">{trace.face_box_size_percent}% of frame</span></div>
+                          )}
+                        </div>
                       </div>
 
                       {/* Stage 5: Frame Stability */}

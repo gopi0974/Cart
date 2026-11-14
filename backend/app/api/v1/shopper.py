@@ -232,12 +232,24 @@ async def end_session(session: CartSession = Depends(verify_shopper_session), db
     Idempotent: calling multiple times on an already ended session succeeds without error.
     """
     cart = session.cart
+    now_dt = datetime.utcnow()
     if session.status == "ACTIVE":
         session.status = "ENDED"
-        session.ended_at = datetime.utcnow()
+        session.ended_at = now_dt
     elif session.status not in ("ENDED", "ABANDONED", "COMPLETED"):
         session.status = "ENDED"
-        session.ended_at = datetime.utcnow()
+        session.ended_at = now_dt
+
+    # Resolve any open alerts for this session
+    from app.models.alert import Alert
+    session_alerts = db.query(Alert).filter(
+        Alert.session_id == session.id,
+        Alert.status == "OPEN"
+    ).all()
+    for al in session_alerts:
+        al.status = "RESOLVED"
+        al.resolved_at = now_dt
+        al.resolution_notes = "Auto-resolved when shopper ended session."
 
     if cart:
         # Close any other active sessions that might be lingering for this cart
@@ -247,10 +259,18 @@ async def end_session(session: CartSession = Depends(verify_shopper_session), db
         ).all()
         for s in stale_sessions:
             s.status = "ENDED"
-            s.ended_at = datetime.utcnow()
+            s.ended_at = now_dt
+            stale_alerts = db.query(Alert).filter(
+                Alert.session_id == s.id,
+                Alert.status == "OPEN"
+            ).all()
+            for sa in stale_alerts:
+                sa.status = "RESOLVED"
+                sa.resolved_at = now_dt
+                sa.resolution_notes = "Auto-resolved when cart returned to idle."
 
         cart.status = "IDLE"
-        cart.last_heartbeat = datetime.utcnow()
+        cart.last_heartbeat = now_dt
 
     db.commit()
 

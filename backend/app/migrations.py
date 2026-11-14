@@ -96,6 +96,15 @@ def _ensure_baseline_pieces_idempotent(bind_or_conn) -> None:
                     conn.execute(sa.text("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT false;"))
                 else:
                     conn.execute(sa.text("ALTER TABLE products ADD COLUMN is_deleted BOOLEAN DEFAULT 0;"))
+
+        # Alerts table columns
+        if "alerts" in existing_tables:
+            alert_cols = {c["name"] for c in inspector.get_columns("alerts")}
+            if "item_id" not in alert_cols:
+                if is_postgres:
+                    conn.execute(sa.text("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS item_id VARCHAR(36);"))
+                else:
+                    conn.execute(sa.text("ALTER TABLE alerts ADD COLUMN item_id VARCHAR(36);"))
         
         if is_connection and conn.in_transaction():
             conn.commit()

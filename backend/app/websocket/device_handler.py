@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 import hashlib
 import logging
 from datetime import datetime
@@ -97,6 +98,29 @@ def get_tracker(cart_id: str) -> CartVisionTracker:
         cart_trackers[cart_id] = CartVisionTracker(cart_id)
     return cart_trackers[cart_id]
 
+def mask_face_regions(img_bgr, face_boxes: list):
+    """
+    Blurs detected face bounding boxes on the frame before embedding extraction.
+    Ensures human face features are heavily obscured while preserving surrounding packaging texture.
+    Never stores or persists the unmasked image.
+    """
+    if img_bgr is None or not face_boxes:
+        return img_bgr
+    import cv2
+    h, w = img_bgr.shape[:2]
+    masked = img_bgr.copy()
+    for fb in face_boxes:
+        bx = int(max(0, fb.get("x", 0) * w))
+        by = int(max(0, fb.get("y", 0) * h))
+        bw = int(min(w - bx, fb.get("width", 0) * w))
+        bh = int(min(h - by, fb.get("height", 0) * h))
+        if bw > 2 and bh > 2:
+            sub = masked[by:by+bh, bx:bx+bw]
+            ksize = max(15, (min(bw, bh) // 2) * 2 + 1)
+            blurred = cv2.GaussianBlur(sub, (ksize, ksize), 30)
+            masked[by:by+bh, bx:bx+bw] = blurred
+    return masked
+
 async def process_camera_frame(
     db: Session,
     cart_id: str,
@@ -105,7 +129,9 @@ async def process_camera_frame(
     websocket: WebSocket,
     hand_present: bool = False,
     face_present: bool = False,
-    motion: bool = False
+    motion: bool = False,
+    face_boxes: Optional[list] = None,
+    detector_profile: str = "privacy"
 ):
     """
     Process incoming camera frame from cart device (Laptop webcam or ESP32-CAM).
@@ -128,56 +154,111 @@ async def process_camera_frame(
         now = time.time()
 
         # 1. PRIVACY CHECK: Faces on Packaging or in Frame
+        face_on_packaging_mode = getattr(settings, "FACE_ON_PACKAGING_MODE", "withhold").lower()
         if face_present:
             if tracker.face_seen_start_time == 0.0:
                 tracker.face_seen_start_time = now
             tracker.stable_frame_count = 0
             tracker.stable_start_time = 0.0
 
-            # If face_present stays true for about 1 second on a stable object:
-            if (now - tracker.face_seen_start_time) >= 1.0:
-                active_session = SessionService.ensure_single_active_session(db, cart_id)
-                if active_session:
-                    pending_item = db.query(CartItem).join(CartItem.product).filter(
-                        CartItem.session_id == active_session.id,
-                        CartItem.status == "PENDING"
-                    ).order_by(CartItem.scanned_at.desc()).first()
+            active_session = SessionService.ensure_single_active_session(db, cart_id)
+            pending_item = None
+            if active_session:
+                pending_item = db.query(CartItem).join(CartItem.product).filter(
+                    CartItem.session_id == active_session.id,
+                    CartItem.status.in_(["PENDING", "NEEDS_STAFF_CHECK"])
+                ).order_by(CartItem.scanned_at.desc()).first()
 
-                    if pending_item:
-                        pending_item.status = "WARNING"
-                        pending_item.warning_reason = "FACE_DETECTED"
-                        db.commit()
+            # If mode is mask_and_judge and frame image is available, mask face and allow evaluation
+            if face_on_packaging_mode == "mask_and_judge" and image_data and not hand_present and not motion:
+                try:
+                    img_bgr, _ = verification_engine._decode_to_cv2(image_data)
+                    masked_bgr = mask_face_regions(img_bgr, face_boxes or [])
+                    # Replace image_data with masked_bgr and proceed past privacy gate
+                    image_data = masked_bgr
+                except Exception as ex:
+                    logger.warning(f"Failed to mask face region: {ex}")
+            else:
+                # Withhold frame for privacy (default mode)
+                # If face_present stays true for about 1 second on a stable object:
+                if (now - tracker.face_seen_start_time) >= 1.0 and active_session and pending_item:
+                    pending_item.status = "NEEDS_STAFF_CHECK"
+                    pending_item.warning_reason = "FACE_DETECTED"
+                    db.commit()
 
-                        # Shopper notice
-                        await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
-                            "item_id": pending_item.id,
-                            "product_name": pending_item.product.name,
-                            "barcode": pending_item.product.barcode,
-                            "status": "WARNING",
-                            "reason": "FACE_DETECTED",
-                            "message": "We can't check this item. Please ask staff"
-                        })
+                    # Shopper notice
+                    await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
+                        "item_id": pending_item.id,
+                        "product_name": pending_item.product.name,
+                        "barcode": pending_item.product.barcode,
+                        "status": "NEEDS_STAFF_CHECK",
+                        "reason": "FACE_DETECTED",
+                        "message": "We can't check this item automatically. Please ask staff. (Please hold the cover/barcode toward the camera.)"
+                    })
 
-                        # Admin review case: "frame withheld (face detected)"
-                        await AlertService.create_alert(
-                            db=db,
-                            cart_id=cart_id,
-                            session_id=active_session.id,
-                            alert_type="FACE_IN_PACKAGING_WITHHELD",
-                            severity="MEDIUM",
-                            message=f"frame withheld (face detected) for '{pending_item.product.name}'.",
-                            evidence_url=None,
-                            create_review_case=True,
-                            scanned_barcode=pending_item.product.barcode,
-                            confidence=0.0
-                        )
+                    # Admin review case: "frame withheld (face detected)"
+                    await AlertService.create_alert(
+                        db=db,
+                        cart_id=cart_id,
+                        session_id=active_session.id,
+                        item_id=pending_item.id,
+                        alert_type="NEEDS_STAFF_CHECK",
+                        severity="MEDIUM",
+                        message="We can't check this item automatically. Please ask staff.",
+                        evidence_url=None,
+                        create_review_case=True,
+                        scanned_barcode=pending_item.product.barcode,
+                        confidence=0.0
+                    )
 
-            await websocket.send_json({
-                "type": "frame_ack",
-                "status": "FACE_REDACTED",
-                "message": "Face detected. Frame withheld for privacy."
-            })
-            return
+                # Record privacy trace for verification diagnostics
+                first_box = face_boxes[0] if (face_boxes and len(face_boxes) > 0) else None
+                box_coords = None
+                face_conf = None
+                box_size_pct = None
+                if first_box:
+                    box_coords = [
+                        round(first_box.get("y", 0), 3),
+                        round(first_box.get("x", 0), 3),
+                        round(first_box.get("y", 0) + first_box.get("height", 0), 3),
+                        round(first_box.get("x", 0) + first_box.get("width", 0), 3)
+                    ]
+                    face_conf = first_box.get("score")
+                    box_size_pct = round((first_box.get("areaFraction") or (first_box.get("width", 0) * first_box.get("height", 0))) * 100, 2)
+
+                trace_data = {
+                    "id": str(uuid.uuid4()),
+                    "cart_id": cart_id,
+                    "cart_number": cart_number,
+                    "session_id": active_session.id if active_session else None,
+                    "item_id": pending_item.id if (active_session and pending_item) else None,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "frame_received_time": datetime.utcnow().isoformat(),
+                    "camera_online": True,
+                    "empty_reference_present": tracker.ref_background is not None,
+                    "hand_present": hand_present,
+                    "face_present": True,
+                    "face_box": box_coords,
+                    "face_confidence": face_conf,
+                    "face_box_size_percent": box_size_pct,
+                    "detector_profile": detector_profile,
+                    "frame_stable": not motion,
+                    "stable_seconds": round(max(0.0, now - tracker.face_seen_start_time), 1),
+                    "crop_status": "withheld",
+                    "crop_withheld_reason": "Human face detected in camera view (Privacy Protection Policy)",
+                    "decision": "FACE_DETECTED_WITHHELD",
+                    "reason_text": "Frame withheld: face detected in camera view.",
+                    "stopped_at": "face_present",
+                    "sent_to_shopper": bool(active_session and pending_item)
+                }
+                tracker.add_trace(trace_data)
+
+                await websocket.send_json({
+                    "type": "frame_ack",
+                    "status": "FACE_REDACTED",
+                    "message": "Face detected. Frame withheld for privacy."
+                })
+                return
 
         tracker.face_seen_start_time = 0.0
 
@@ -728,10 +809,13 @@ async def handle_device_websocket(
                     is_reference = event_type == "reference_frame" or bool(payload.get("is_reference", False))
                     face_present = bool(payload.get("face_present", False))
                     hand_present = bool(payload.get("hand_present", False))
+                    face_boxes = payload.get("face_boxes") or []
+                    detector_profile = payload.get("profile") or "privacy"
                     frame_data = payload.get("data") or payload.get("image")
 
-                    # PRIVACY ENFORCEMENT: If face detected, image is discarded immediately
-                    if face_present:
+                    # PRIVACY ENFORCEMENT: If face detected, image is discarded unless mode is mask_and_judge
+                    face_mode = getattr(settings, "FACE_ON_PACKAGING_MODE", "withhold").lower()
+                    if face_present and face_mode != "mask_and_judge":
                         frame_data = None
 
                     # Size check (200 KB)
@@ -765,16 +849,18 @@ async def handle_device_websocket(
                         continue
 
                     if face_present:
-                        # Privacy: frame image is withheld (None), metadata sent to processor
+                        # Privacy: frame image is withheld (None) in withhold mode, metadata sent to processor
                         await process_camera_frame(
                             db,
                             cart_id,
                             cart_number,
-                            None,
+                            frame_data if face_mode == "mask_and_judge" else None,
                             websocket,
                             hand_present=hand_present,
                             face_present=True,
-                            motion=bool(payload.get("motion", False))
+                            motion=bool(payload.get("motion", False)),
+                            face_boxes=face_boxes,
+                            detector_profile=detector_profile
                         )
                     elif frame_data:
                         # Process frame if not a face and under limit
@@ -786,7 +872,9 @@ async def handle_device_websocket(
                             websocket,
                             hand_present=hand_present,
                             face_present=False,
-                            motion=bool(payload.get("motion", False))
+                            motion=bool(payload.get("motion", False)),
+                            face_boxes=face_boxes,
+                            detector_profile=detector_profile
                         )
                     else:
                         await websocket.send_json({

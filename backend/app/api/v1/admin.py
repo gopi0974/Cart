@@ -450,6 +450,10 @@ def get_cart_verification_trace(
             "empty_reference_present": trace_obj.get("empty_reference_present", tracker.ref_background is not None),
             "hand_present": trace_obj.get("hand_present", d.decision == "HAND_IN_CART"),
             "face_present": trace_obj.get("face_present", d.decision == "FACE_DETECTED_WITHHELD"),
+            "face_box": trace_obj.get("face_box"),
+            "face_confidence": trace_obj.get("face_confidence"),
+            "face_box_size_percent": trace_obj.get("face_box_size_percent"),
+            "detector_profile": trace_obj.get("detector_profile", "privacy"),
             "frame_stable": trace_obj.get("frame_stable", True),
             "stable_seconds": trace_obj.get("stable_seconds", 1.0),
             "changed_region_found": trace_obj.get("changed_region_found", True),
@@ -498,12 +502,36 @@ def get_cart_verification_trace(
     combined.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
     traces_final = combined[:limit]
 
+    # Fetch alerts for active session on this cart
+    active_session = SessionService.ensure_single_active_session(db, cart.id)
+    session_alerts = []
+    if active_session:
+        raw_alerts = db.query(Alert).filter(Alert.session_id == active_session.id).order_by(Alert.created_at.desc()).all()
+        for a in raw_alerts:
+            created_stage = (
+                "privacy_gate" if a.alert_type in ("NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD")
+                else "item_matching" if a.alert_type == "MISMATCH_ITEM"
+                else "grace_period" if a.alert_type == "UNSCANNED_ITEM"
+                else "device_monitor"
+            )
+            session_alerts.append({
+                "id": a.id,
+                "type": a.alert_type,
+                "severity": a.severity,
+                "status": a.status,
+                "message": a.message,
+                "item_id": a.item_id,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "created_by_stage": created_stage
+            })
+
     return {
         "cart_id": cart.id,
         "cart_number": cart.cart_number,
         "camera_status": cart.camera_status,
         "empty_reference_present": tracker.ref_background is not None,
         "total_judgements": len(traces_final),
+        "session_alerts": session_alerts,
         "traces": traces_final
     }
 
@@ -1115,6 +1143,10 @@ def get_review_queue(db: Session = Depends(get_db)):
             scanned_prod = db.query(Product).filter(Product.barcode == c.scanned_barcode).first()
         
         cart = db.query(Cart).filter(Cart.id == c.cart_id).first()
+        alert = db.query(Alert).filter(Alert.id == c.alert_id).first()
+        is_withheld = (alert and alert.alert_type in ("NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD")) or not c.evidence_image_url or "images.unsplash.com" in (c.evidence_image_url or "")
+        evidence_status = "frame withheld (face detected)" if is_withheld else "recorded crop"
+
         top_cands = None
         if getattr(c, "top_candidates_json", None):
             try:
@@ -1125,6 +1157,8 @@ def get_review_queue(db: Session = Depends(get_db)):
         result.append(ReviewCaseResponse(
             id=c.id,
             alert_id=c.alert_id,
+            alert_type=alert.alert_type if alert else None,
+            evidence_status=evidence_status,
             cart_id=c.cart_id,
             cart_number=cart.cart_number if cart else "N/A",
             scanned_barcode=c.scanned_barcode,
@@ -1155,7 +1189,7 @@ async def submit_review_decision(
     case.status = "APPROVED" if req.decision == "APPROVE" else "REJECTED"
     case.feedback_saved_for_training = req.save_for_training
     
-    # If approved, resolve the associated alert
+    # If approved, resolve the associated alert and verify item placement
     if req.decision == "APPROVE":
         await AlertService.resolve_alert(
             db=db,
@@ -1164,7 +1198,7 @@ async def submit_review_decision(
             notes=f"Staff approved match ({current_user.email}). {req.notes or ''}",
             action="RESOLVED"
         )
-        # If there's an active session with this barcode in PENDING, verify it!
+        # If there's an active session with this barcode in PENDING/NEEDS_STAFF_CHECK/WARNING, verify it!
         if case.scanned_barcode:
             active_session = db.query(CartSession).filter(
                 CartSession.cart_id == case.cart_id,
@@ -1178,12 +1212,43 @@ async def submit_review_decision(
                     confidence=1.0,
                     evidence_url=case.evidence_image_url
                 )
+        
+        # Write immutable audit log entry
+        audit = AuditLog(
+            user_id=current_user.id,
+            action="STAFF_ITEM_APPROVAL",
+            entity_type="REVIEW_CASE",
+            entity_id=case.id,
+            details_json=json.dumps({
+                "cart_id": case.cart_id,
+                "barcode": case.scanned_barcode,
+                "decision": "APPROVE",
+                "notes": req.notes,
+                "staff_email": current_user.email
+            })
+        )
+        db.add(audit)
     else:
         # Rejected
         alert = db.query(Alert).filter(Alert.id == case.alert_id).first()
         if alert:
             alert.status = "IN_REVIEW"
             alert.resolution_notes = f"Staff confirmed mismatch. Security intervention required. {req.notes or ''}"
+
+        audit = AuditLog(
+            user_id=current_user.id,
+            action="STAFF_ITEM_REJECTION",
+            entity_type="REVIEW_CASE",
+            entity_id=case.id,
+            details_json=json.dumps({
+                "cart_id": case.cart_id,
+                "barcode": case.scanned_barcode,
+                "decision": "REJECT",
+                "notes": req.notes,
+                "staff_email": current_user.email
+            })
+        )
+        db.add(audit)
 
     db.commit()
     return {"status": "SUCCESS", "message": f"Review case {case.status.lower()}."}

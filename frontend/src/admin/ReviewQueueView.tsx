@@ -144,7 +144,16 @@ export const ReviewQueueView: React.FC = () => {
                 <span className="text-red-500 font-mono text-[11px]">Product Area Crop</span>
               </div>
               <div className="aspect-video bg-black rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 relative shadow-inner flex items-center justify-center">
-                {currentCase.evidence_image_url ? (
+                {currentCase.evidence_status === 'frame withheld (face detected)' || currentCase.confidence === 0.0 ? (
+                  <div className="p-6 text-center space-y-2">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/40 font-mono">
+                      Frame withheld (face detected)
+                    </span>
+                    <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                      In-camera face detection withheld this frame to protect shopper privacy. Staff visual verification required.
+                    </p>
+                  </div>
+                ) : currentCase.evidence_image_url ? (
                   <img
                     src={currentCase.evidence_image_url}
                     alt="Cart Camera Evidence Crop"
@@ -157,7 +166,7 @@ export const ReviewQueueView: React.FC = () => {
                   </div>
                 )}
                 <div className="absolute bottom-2 left-2 bg-black/70 px-2.5 py-1 rounded-lg text-[10px] font-mono text-white">
-                  Cropped Target Region
+                  {currentCase.evidence_status === 'frame withheld (face detected)' || currentCase.confidence === 0.0 ? 'Privacy Withheld' : 'Cropped Target Region'}
                 </div>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">

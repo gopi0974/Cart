@@ -237,6 +237,14 @@ export const SystemDiagnosticsView: React.FC<Props> = ({
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
               Verified by live active database pre-ping (<code className="font-mono text-[11px]">SELECT 1</code>) and ONNX runtime state.
             </p>
+            {data?.git_commit && (
+              <div className="flex items-center gap-1.5 mt-1.5">
+                <span className="text-[11px] text-slate-400 font-mono">Git Commit:</span>
+                <span className="font-mono text-[11px] font-bold bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded text-slate-700 dark:text-slate-300">
+                  {data.git_commit}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>

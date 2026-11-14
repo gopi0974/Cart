@@ -497,6 +497,7 @@ export class CartCameraManager {
         hand_count: det.hand_count,
         face_boxes: det.face_boxes,
         hand_boxes: det.hand_boxes,
+        profile: det.profile || 'privacy',
         processing_ms: det.processing_ms,
         motion_level: this.motionLevel,
         privacy_redacted: det.face_present,
