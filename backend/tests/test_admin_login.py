@@ -3,13 +3,14 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from fastapi import HTTPException
-from app.database import SessionLocal
+from app.database import SessionLocal, init_db
 from app.api.v1.auth import login
 from app.schemas.auth import UserLogin
 from app.models.user import User
 from app.utils.security import hash_password
 
 def run_tests():
+    init_db()
     if not SessionLocal:
         print("Database not configured, skipping login test.")
         return

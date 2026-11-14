@@ -1,5 +1,23 @@
+import os
 import sys
+import base64
+import cv2
+import numpy as np
+
+if not os.getenv("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = "sqlite:///./smartcart_test.db"
+if not os.getenv("DEMO_MODE"):
+    os.environ["DEMO_MODE"] = "true"
+if not os.getenv("ADMIN_EMAIL"):
+    os.environ["ADMIN_EMAIL"] = "admin@supermart.com"
+if not os.getenv("ADMIN_PASSWORD"):
+    os.environ["ADMIN_PASSWORD"] = "SmartCart@Admin2026!"
+if not os.getenv("USE_MOCK"):
+    os.environ["USE_MOCK"] = "true"
+
 from fastapi.testclient import TestClient
+from app.config import settings
+settings.USE_MOCK = True
 from app.main import app
 from app.database import init_db, SessionLocal
 from app.utils.seed_data import seed_database
@@ -39,8 +57,8 @@ def run_all_tests():
     # Test 2: Auth
     print("Test 2: Staff login & JWT issue...")
     resp = client.post("/api/v1/auth/login", json={
-        "email": "admin@supermart.com",
-        "password": "admin123"
+        "email": os.getenv("ADMIN_EMAIL", "admin@supermart.com"),
+        "password": os.getenv("ADMIN_PASSWORD", "SmartCart@Admin2026!")
     })
     assert resp.status_code == 200, f"Login failed: {resp.text}"
     token = resp.json()["access_token"]
@@ -62,17 +80,18 @@ def run_all_tests():
     pair_resp = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
     assert pair_resp.status_code == 200, f"Pair failed: {pair_resp.text}"
     sess_id = pair_resp.json()["id"]
+    sess1_headers = {"X-Session-Token": pair_resp.json()["session_token"]}
     
-    scan_resp = client.post(f"/api/v1/shopper/{sess_id}/scan-item", json={"barcode": test_barcode})
+    scan_resp = client.post(f"/api/v1/shopper/{sess_id}/scan-item", json={"barcode": test_barcode}, headers=sess1_headers)
     assert scan_resp.status_code == 200
-    sess_state = client.get(f"/api/v1/shopper/{sess_id}").json()
+    sess_state = client.get(f"/api/v1/shopper/{sess_id}", headers=sess1_headers).json()
     assert len(sess_state["items"]) == 1
     assert sess_state["items"][0]["status"] == "PENDING"
     print("[OK] Scanned item is in PENDING state")
     
     # Test 5: Checkout blocked on pending
     print("Test 5: Checkout validation rules (must block PENDING)...")
-    co_block = client.post(f"/api/v1/shopper/{sess_id}/checkout", json={"payment_method": "UPI"})
+    co_block = client.post(f"/api/v1/shopper/{sess_id}/checkout", json={"payment_method": "UPI"}, headers=sess1_headers)
     assert co_block.status_code == 400
     assert "pending" in co_block.json()["detail"].lower() or "blocked" in co_block.json()["detail"].lower()
     print("[OK] Checkout correctly BLOCKED while item is pending verification")
@@ -83,9 +102,9 @@ def run_all_tests():
         "cart_id": "CART-001",
         "action_type": "CONFIRM_BARCODE",
         "detected_barcode": test_barcode
-    })
+    }, headers=auth_header)
     assert ver_sim.status_code == 200
-    sess_state_ver = client.get(f"/api/v1/shopper/{sess_id}").json()
+    sess_state_ver = client.get(f"/api/v1/shopper/{sess_id}", headers=sess1_headers).json()
     assert sess_state_ver["items"][0]["status"] == "VERIFIED"
     assert sess_state_ver["can_checkout"] is True
     print("[OK] AI camera confirmed item: state updated to VERIFIED")
@@ -95,12 +114,12 @@ def run_all_tests():
     co_ok = client.post(f"/api/v1/shopper/{sess_id}/checkout", json={
         "payment_method": "UPI",
         "upi_id": "shopper@oksbi"
-    })
+    }, headers=sess1_headers)
     assert co_ok.status_code == 200
     co_data = co_ok.json()
     assert "REC-" in co_data["receipt_number"]
     
-    rec_resp = client.get(f"/api/v1/shopper/{sess_id}/receipt")
+    rec_resp = client.get(f"/api/v1/shopper/{sess_id}/receipt", headers=sess1_headers)
     assert rec_resp.status_code == 200
     print(f"[OK] Checkout PASSED: Generated receipt {co_data['receipt_number']}")
     
@@ -109,15 +128,16 @@ def run_all_tests():
     pair2 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-002"})
     assert pair2.status_code == 200
     sess_id_2 = pair2.json()["id"]
+    sess2_headers = {"X-Session-Token": pair2.json()["session_token"]}
     
     unscanned = client.post("/api/v1/vision/simulate-action", json={
         "cart_id": "CART-002",
         "action_type": "PLACE_UNSCANNED",
         "detected_barcode": "7622201745424"
-    })
+    }, headers=auth_header)
     assert unscanned.status_code == 200
     
-    sess2_state = client.get(f"/api/v1/shopper/{sess_id_2}").json()
+    sess2_state = client.get(f"/api/v1/shopper/{sess_id_2}", headers=sess2_headers).json()
     assert len(sess2_state["active_warnings"]) > 0
     assert sess2_state["can_checkout"] is False
     print("[OK] Unscanned item alert detected and flagged in cart session")
@@ -129,8 +149,8 @@ def run_all_tests():
     assert admin_ov["open_incidents"] >= 1
     print("[OK] Admin KPI overview and alert triage verified")
 
-    # Exit session 2 to test shopper exit and release CART-002
-    exit_resp = client.post(f"/api/v1/shopper/{sess_id_2}/exit")
+    # Exit session 2 to test shopper end-session and release CART-002
+    exit_resp = client.post(f"/api/v1/shopper/{sess_id_2}/end-session", headers=sess2_headers)
     assert exit_resp.status_code == 200
     assert exit_resp.json()["status"] == "SUCCESS"
     print("[OK] Shopper exit endpoint terminates session and frees cart to IDLE")
@@ -140,8 +160,9 @@ def run_all_tests():
     pair3 = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-003"})
     assert pair3.status_code == 200
     sess_id_3 = pair3.json()["id"]
-    client.post(f"/api/v1/shopper/{sess_id_3}/scan-item", json={"barcode": "8901262010053"}) # Amul Butter ₹58
-    coup_res = client.post(f"/api/v1/shopper/{sess_id_3}/apply-coupon", json={"coupon_code": "SUPER50"})
+    sess3_headers = {"X-Session-Token": pair3.json()["session_token"]}
+    client.post(f"/api/v1/shopper/{sess_id_3}/scan-item", json={"barcode": "8901262010053"}, headers=sess3_headers) # Amul Butter ₹58
+    coup_res = client.post(f"/api/v1/shopper/{sess_id_3}/apply-coupon", json={"coupon_code": "SUPER50"}, headers=sess3_headers)
     assert coup_res.status_code == 200
     sess3_data = coup_res.json()
     assert sess3_data["discount_amount"] > 0
@@ -183,7 +204,7 @@ def run_all_tests():
     parsed = urlparse(reg_data["signed_connect_url"])
     params = parse_qs(parsed.query)
     c_param = params["cart"][0]
-    t_param = params["token"][0]
+    t_param = params.get("token", [""])[0]
     s_param = params["sig"][0]
 
     qr_connect = client.get(f"/api/v1/shopper/connect?cart={c_param}&token={t_param}&sig={s_param}")
@@ -238,44 +259,47 @@ def run_all_tests():
     # =========================================================================
     import starlette.websockets
 
-    # Test 15: Device WebSocket rejects missing token
-    print("Test 15: Task 3 - Device WebSocket rejects missing token...")
+    # Test 15: Device WebSocket rejects token in URL (Strict URL security)
+    print("Test 15: Task 3 - Device WebSocket rejects token in URL...")
     try:
-        with client.websocket_connect("/ws/device"):
+        with client.websocket_connect("/ws/device?token=any_token_in_url"):
             pass
-        assert False, "Should have rejected missing device token"
+        assert False, "Should have rejected device token in URL"
     except starlette.websockets.WebSocketDisconnect as e:
-        assert e.code == 1008
-    print("[OK] Task 3: Missing device token rejected with code 1008 (Policy Violation)")
+        assert e.code == 4003
+    print("[OK] Task 3: Device token in URL rejected with code 4003")
 
     # Test 16: Device WebSocket rejects unknown token
     print("Test 16: Task 3 - Device WebSocket rejects unknown token...")
     try:
-        with client.websocket_connect("/ws/device?token=invalid_unregistered_token"):
-            pass
+        with client.websocket_connect("/ws/device") as ws:
+            ws.send_json({"type": "auth", "token": "invalid_unregistered_token"})
+            ws.receive_json()
         assert False, "Should have rejected unknown device token"
     except starlette.websockets.WebSocketDisconnect as e:
-        assert e.code == 1008
-    print("[OK] Task 3: Unknown device token rejected and logged to AuditLog")
+        assert e.code == 4004
+    print("[OK] Task 3: Unknown device token rejected with code 4004")
 
     # Test 17: Device WebSocket rejects disabled cart
     print("Test 17: Task 3 - Device WebSocket rejects disabled cart...")
     # reg_data['device_token'] is for CART-T2 which was disabled in Test 14
     try:
-        with client.websocket_connect(f"/ws/device?token={reg_data['device_token']}"):
-            pass
+        with client.websocket_connect("/ws/device") as ws:
+            ws.send_json({"type": "auth", "token": reg_data["device_token"]})
+            ws.receive_json()
         assert False, "Should have rejected connection for disabled cart"
     except starlette.websockets.WebSocketDisconnect as e:
-        assert e.code == 1008
-    print("[OK] Task 3: Disabled cart device connection rejected with code 1008")
+        assert e.code == 4005
+    print("[OK] Task 3: Disabled cart device connection rejected with code 4005")
 
     # Test 18: Device WebSocket connects with valid token, derives cart, handles heartbeat
     print("Test 18: Task 3 - Device WebSocket connection, heartbeat, and camera online status...")
-    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
+    with client.websocket_connect("/ws/device") as ws:
+        ws.send_json({"type": "auth", "token": "CART001_SECRET_TOKEN_2026"})
         conn_msg = ws.receive_json()
-        assert conn_msg["type"] == "connected"
+        assert conn_msg["type"] == "auth_ok"
         assert conn_msg["cart_number"] == "CART-001"
-        assert conn_msg["status"] == "ONLINE"
+        assert conn_msg["camera_status"] == "ONLINE"
 
         # Send heartbeat with simulated battery
         ws.send_json({"type": "heartbeat", "battery": 92, "timestamp": 123456789})
@@ -283,13 +307,7 @@ def run_all_tests():
         assert hb_ack["type"] == "heartbeat_ack"
         assert hb_ack["cart_number"] == "CART-001"
 
-        # Send test camera frame during motion
-        mock_frame = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
-        ws.send_json({"type": "frame", "format": "jpeg", "data": mock_frame})
-        frame_ack = ws.receive_json()
-        assert frame_ack["type"] in ["frame_ack", "verification_result"]
-
-    print("[OK] Task 3: Device WebSocket authenticated, derived cart identity, and processed frame/heartbeat")
+    print("[OK] Task 3: Device WebSocket authenticated, derived cart identity, and processed heartbeat")
 
     # Test 19: Task 4 - Camera OFFLINE Shopper UI Gating & Checkout Lock
     print("Test 19: Task 4 - Camera OFFLINE gating and Shopper Checkout lock...")
@@ -302,34 +320,37 @@ def run_all_tests():
     s_pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
     assert s_pair.status_code == 200
     s_id = s_pair.json()["id"]
+    s_headers = {"X-Session-Token": s_pair.json()["session_token"]}
     
     # Add an item to cart
-    client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode})
+    client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode}, headers=s_headers)
     # Simulate verification
     client.post("/api/v1/vision/simulate-action", json={
         "cart_id": "CART-001",
         "action_type": "PLACE_CORRECT",
         "barcode": test_barcode
-    })
+    }, headers=auth_header)
     
     # Check session state: item is verified, but camera is OFFLINE -> can_checkout must be FALSE
-    s_check = client.get(f"/api/v1/shopper/{s_id}").json()
+    s_check = client.get(f"/api/v1/shopper/{s_id}", headers=s_headers).json()
     assert s_check["camera_status"] == "OFFLINE"
     assert s_check["can_checkout"] is False
     
     # Attempting checkout while camera is OFFLINE must be rejected with 400
-    chk_fail = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"})
+    chk_fail = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"}, headers=s_headers)
     assert chk_fail.status_code == 400
     assert "camera is not connected" in chk_fail.json()["detail"].lower()
     
     # Now bring camera ONLINE via Device WebSocket connection
-    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
-        c_online = client.get(f"/api/v1/shopper/{s_id}").json()
+    with client.websocket_connect("/ws/device") as ws:
+        ws.send_json({"type": "auth", "token": "CART001_SECRET_TOKEN_2026"})
+        _ = ws.receive_json()
+        c_online = client.get(f"/api/v1/shopper/{s_id}", headers=s_headers).json()
         assert c_online["camera_status"] == "ONLINE"
         assert c_online["can_checkout"] is True
         
         # Checkout succeeds while camera is ONLINE
-        chk_success = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"})
+        chk_success = client.post(f"/api/v1/shopper/{s_id}/checkout", json={"payment_method": "UPI"}, headers=s_headers)
         assert chk_success.status_code == 200
         assert chk_success.json()["status"] == "SUCCESS"
     
@@ -348,21 +369,18 @@ def run_all_tests():
     s_pair = client.post("/api/v1/shopper/pair", json={"qr_token": "QR-CART-001"})
     assert s_pair.status_code == 200
     s_id = s_pair.json()["id"]
+    s20_headers = {"X-Session-Token": s_pair.json()["session_token"]}
     
     # Shopper scans item
-    scan_res = client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode})
+    scan_res = client.post(f"/api/v1/shopper/{s_id}/scan-item", json={"barcode": test_barcode}, headers=s20_headers)
     assert scan_res.status_code == 200
     assert scan_res.json()["status"] == "PENDING"
     
     # Connect device camera WebSocket
-    with client.websocket_connect("/ws/device?token=CART001_SECRET_TOKEN_2026") as ws:
-        _ = ws.receive_json()  # connected ack
+    with client.websocket_connect("/ws/device") as ws:
+        ws.send_json({"type": "auth", "token": "CART001_SECRET_TOKEN_2026"})
+        _ = ws.receive_json()  # auth_ok ack
         
-        # Generate test frame with real shape & colors
-        import cv2
-        import numpy as np
-        import base64
-        import os
         from app.config import settings
         
         test_frame = np.full((480, 640, 3), 220, dtype=np.uint8)

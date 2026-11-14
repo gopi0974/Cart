@@ -90,7 +90,7 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
         )
     return current_user
 
-def get_client_ip(request: Request) -> str:
+def get_client_ip(request: Optional[Request]) -> str:
     """
     Extract the real client IP address:
     1. Inspects 'X-Forwarded-For' header: in reverse-proxy architectures (Render, Cloudflare, AWS),
@@ -99,6 +99,9 @@ def get_client_ip(request: Request) -> str:
     3. Falls back to request.client.host if direct connection.
     4. Defaults to '127.0.0.1'.
     """
+    if not request or not hasattr(request, "headers"):
+        return "127.0.0.1"
+
     x_forwarded = request.headers.get("x-forwarded-for")
     if x_forwarded:
         ips = [ip.strip() for ip in x_forwarded.split(",") if ip.strip()]
@@ -115,8 +118,16 @@ def get_client_ip(request: Request) -> str:
 
 
 @router.post("/login", response_model=Token)
-def login(login_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+def login(
+    login_data: UserLogin,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Staff/Admin login endpoint providing JWT access token with rate limiting protection."""
+    if isinstance(request, Session):
+        db = request
+        request = None
+
     clean_email = (login_data.email or "").strip().lower()
     clean_password = (login_data.password or "").strip()
 

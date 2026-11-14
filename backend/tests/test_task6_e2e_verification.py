@@ -4,7 +4,7 @@ import asyncio
 import uuid
 
 # Ensure backend directory is in python path
-sys.path.insert(0, os.path.abspath("."))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.database import SessionLocal
 from app.models.user import User
@@ -18,7 +18,11 @@ from app.schemas.product import ProductCreate
 
 def test_full_e2e():
     db = SessionLocal()
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     print("=================================================================")
     print("   TASK 6: FINAL END-TO-END VERIFICATION & DEPLOYMENT CHECKLIST   ")
     print("=================================================================")

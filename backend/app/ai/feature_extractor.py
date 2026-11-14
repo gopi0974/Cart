@@ -308,4 +308,16 @@ class VisualFeatureExtractor:
     def extract_embeddings_batch(self, images: List[Any]) -> List[List[float]]:
         return get_embeddings_batch(images)
 
+    @staticmethod
+    def cosine_similarity(v1: Any, v2: Any) -> float:
+        """Compute cosine similarity between two 1D embedding vectors."""
+        a = np.asarray(v1, dtype=np.float32)
+        b = np.asarray(v2, dtype=np.float32)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
+        if norm_a == 0.0 or norm_b == 0.0:
+            return 0.0
+        dot = np.dot(a, b)
+        return float(np.clip(dot / (norm_a * norm_b), -1.0, 1.0))
+
 feature_extractor = VisualFeatureExtractor()

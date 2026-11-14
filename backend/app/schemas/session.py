@@ -64,3 +64,6 @@ class RescanRemoveRequest(BaseModel):
 
 class VerifyRemovalRequest(BaseModel):
     image_data_url: Optional[str] = None
+
+class CouponRequest(BaseModel):
+    coupon_code: str

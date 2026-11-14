@@ -80,12 +80,14 @@ class VectorStoreMatcher:
         - created time
         """
         emb_json = json.dumps(vector)
+        from app.models.product import HAS_PGVECTOR
+        emb_vec_val = vector if HAS_PGVECTOR else emb_json
         record = ProductEmbedding(
             product_id=product_id,
             barcode=barcode,
             angle_tag=angle_tag,
             embedding_json=emb_json,
-            embedding_vector=vector,
+            embedding_vector=emb_vec_val,
             image_path=image_path,
             model_name=model_name,
             model_version=model_version,
@@ -139,8 +141,10 @@ class VectorStoreMatcher:
                             # pgvector cosine_distance = 1 - cosine_similarity
                             sim = max(0.0, min(1.0, 1.0 - float(dist)))
                             results.append({
+                                "id": prod.id,
                                 "product_id": prod.id,
                                 "product_name": prod.name,
+                                "name": prod.name,
                                 "barcode": prod.barcode,
                                 "similarity": round(sim, 4),
                                 "matched_angle": emb.angle_tag,
@@ -175,6 +179,7 @@ class VectorStoreMatcher:
                         prod = db.query(Product).filter(Product.id == pid).first()
                         prod_name = prod.name if prod else f"Product {bcode}"
                         results.append({
+                            "id": pid,
                             "product_id": pid,
                             "product_name": prod_name,
                             "name": prod_name,
@@ -211,6 +216,7 @@ class VectorStoreMatcher:
             prod = db.query(Product).filter(Product.id == emb.product_id).first()
             if prod:
                 results.append({
+                    "id": prod.id,
                     "product_id": prod.id,
                     "product_name": prod.name,
                     "name": prod.name,

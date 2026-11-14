@@ -78,7 +78,7 @@ class SessionService:
                 hashlib.sha256
             ).hexdigest()[:16]
             if not hmac.compare_digest(signature, expected_sig):
-                raise ValueError("This cart QR code is invalid or has expired. Please scan the current code on the cart.")
+                raise ValueError("Security verification failed: Invalid HMAC signature. This cart QR code is invalid or has expired. Please scan the current code on the cart.")
         else:
             if not settings.DEMO_MODE:
                 raise ValueError(
@@ -241,6 +241,53 @@ class SessionService:
         if not product:
             raise ValueError(f"Product with barcode '{barcode}' not found in supermarket catalog.")
 
+        # Check if an unscanned placeholder item already exists for this product in this session
+        unscanned_item = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.product_id == product.id,
+            CartItem.status == "WARNING_UNSCANNED"
+        ).order_by(CartItem.scanned_at.desc()).first()
+
+        if unscanned_item:
+            # Physical item was placed first; shopper now scanned the barcode
+            unscanned_item.status = "VERIFIED"
+            unscanned_item.warning_reason = None
+            unscanned_item.verified_at = datetime.utcnow()
+            unscanned_item.scanned_at = datetime.utcnow()
+            item = unscanned_item
+
+            # Resolve open UNSCANNED_ITEM alerts for this session
+            open_alerts = db.query(Alert).filter(
+                Alert.session_id == session.id,
+                Alert.status == "OPEN",
+                Alert.alert_type == "UNSCANNED_ITEM"
+            ).all()
+            for al in open_alerts:
+                al.status = "RESOLVED"
+                al.resolved_at = datetime.utcnow()
+                al.resolution_notes = f"Customer scanned barcode for previously unscanned item '{product.name}'."
+
+            SessionService.recalculate_session_totals(db, session)
+            db.commit()
+            db.refresh(item)
+
+            # Broadcast verified and cleared warnings
+            await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_VERIFIED", {
+                "item_id": item.id,
+                "product_name": product.name,
+                "barcode": product.barcode,
+                "status": "VERIFIED",
+                "confidence": item.confidence_score or 0.95,
+                "subtotal": session.subtotal_amount,
+                "total": session.total_amount
+            })
+            await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+                "message": f"Barcode scanned for '{product.name}'. Item verified.",
+                "item_id": item.id,
+                "product_name": product.name
+            })
+            return item
+
         # Create cart item with status PENDING
         item = CartItem(
             session_id=session.id,
@@ -282,25 +329,38 @@ class SessionService:
         if not session:
             return None
 
-        # Find pending item for this product
+        # Find pending or warning item for this product
         item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == session.id,
             Product.barcode == barcode,
-            CartItem.status == "PENDING"
+            CartItem.status.in_(["PENDING", "WARNING", "WARNING_MISMATCH", "WARNING_UNSCANNED"])
         ).order_by(CartItem.scanned_at.desc()).first()
 
         if not item:
             return None
 
         item.status = "VERIFIED"
+        item.warning_reason = None
         item.verified_at = datetime.utcnow()
         item.confidence_score = confidence
         item.verification_evidence_url = evidence_url
+
+        # Also resolve related open alerts for this session
+        open_alerts = db.query(Alert).filter(
+            Alert.session_id == session.id,
+            Alert.status == "OPEN",
+            Alert.alert_type.in_(["MISMATCH_ITEM", "LOW_CONFIDENCE_VERIFICATION", "UNSCANNED_ITEM", "FACE_IN_PACKAGING_WITHHELD"])
+        ).all()
+        for al in open_alerts:
+            al.status = "RESOLVED"
+            al.resolved_at = datetime.utcnow()
+            al.resolution_notes = f"Item verified: '{item.product.name}'."
+
         SessionService.recalculate_session_totals(db, session)
         db.commit()
         db.refresh(item)
 
-        # Real-time WebSocket announcement: Item is verified!
+        # Real-time WebSocket announcement: Item is verified and warnings cleared!
         await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_VERIFIED", {
             "item_id": item.id,
             "product_name": item.product.name,
@@ -309,6 +369,11 @@ class SessionService:
             "confidence": confidence,
             "subtotal": session.subtotal_amount,
             "total": session.total_amount
+        })
+        await ws_manager.broadcast_to_cart(session.cart_id, "WARNING_CLEARED", {
+            "message": f"Verification approved for '{item.product.name}'.",
+            "item_id": item.id,
+            "product_name": item.product.name
         })
 
         return item

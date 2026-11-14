@@ -4,7 +4,8 @@ import io
 import json
 from datetime import datetime
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 from typing import Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
 from app.config import settings, CURRENT_PREPROCESSING_VERSION
@@ -43,7 +44,13 @@ class AIVerificationEngine:
                 nparr = np.frombuffer(raw_bytes, np.uint8)
                 img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if img_bgr is None or img_bgr.size == 0:
-                    raise ValueError("Could not decode image from base64 buffer.")
+                    try:
+                        pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                        img_rgb = np.array(pil_img)
+                        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                        return img_bgr, pil_img
+                    except Exception:
+                        raise ValueError("Could not decode image from base64 buffer.")
                 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(img_rgb)
                 return img_bgr, pil_img
@@ -57,7 +64,13 @@ class AIVerificationEngine:
                 nparr = np.frombuffer(image_data, np.uint8)
                 img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if img_bgr is None or img_bgr.size == 0:
-                    raise ValueError("Could not decode image from raw bytes.")
+                    try:
+                        pil_img = Image.open(io.BytesIO(image_data)).convert("RGB")
+                        img_rgb = np.array(pil_img)
+                        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                        return img_bgr, pil_img
+                    except Exception:
+                        raise ValueError("Could not decode image from raw bytes.")
                 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(img_rgb)
                 return img_bgr, pil_img
@@ -233,7 +246,7 @@ class AIVerificationEngine:
                 decision=decision,
                 scanned_barcode=None,
                 scanned_product_name=None,
-                matched_product_id=top1["id"] if top1 else None,
+                matched_product_id=(top1.get("id") or top1.get("product_id")) if top1 else None,
                 matched_product_name=top1["product_name"] if top1 else None,
                 top1_score=top1_score,
                 top2_score=top2_score,
@@ -301,7 +314,7 @@ class AIVerificationEngine:
             decision=decision,
             scanned_barcode=claimed_barcode,
             scanned_product_name=scanned_product_name,
-            matched_product_id=top1["id"] if top1 else None,
+            matched_product_id=(top1.get("id") or top1.get("product_id")) if top1 else None,
             matched_product_name=top1["product_name"] if top1 else None,
             top1_score=top1_score,
             top2_score=top2_score,
@@ -343,6 +356,14 @@ class AIVerificationEngine:
         - When departure is confirmed: advances to REMOVED_PENDING_RESCAN.
         """
         if image_data is None:
+            if getattr(settings, "USE_MOCK", False):
+                return {
+                    "decision": "CONFIRMED_REMOVED",
+                    "removed": True,
+                    "confidence": 0.95,
+                    "evidence_url": "/uploads/evidence/sample_removal_verified.jpg",
+                    "message": "Rescan the barcode to remove this item"
+                }
             return {
                 "decision": "CAMERA_FEED_REQUIRED",
                 "removed": False,

@@ -93,10 +93,11 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           } else if (evtType === 'WARNING_CLEARED' || evtType === 'ITEM_SCANNED_PENDING' || evtType === 'REMOVAL_CANCELLED') {
             refreshSession();
           } else if (evtType === 'CART_CAMERA_STATUS') {
+            const camStatus = payload.data?.camera_status || payload.camera_status;
             setSession((prev) => ({
               ...prev,
-              camera_status: payload.camera_status,
-              can_checkout: payload.camera_status === 'ONLINE' ? prev.can_checkout : false
+              camera_status: camStatus,
+              can_checkout: camStatus === 'ONLINE' ? prev.can_checkout : false
             }));
             refreshSession();
           }

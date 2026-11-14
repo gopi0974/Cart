@@ -37,7 +37,9 @@ class BillingService:
                 raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is scanned but not yet placed in cart. (PENDING)")
             if itm.status in ["WARNING", "WARNING_MISMATCH", "WARNING_UNSCANNED"]:
                 raise ValueError(f"Checkout blocked: Item '{itm.product.name}' has an active warning. Please resolve it before checkout. (WARNING)")
-            if itm.status in ["REMOVING", "REMOVED_PENDING_RESCAN"]:
+            if itm.status == "REMOVING":
+                raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is being removed. Please complete the item removal before checking out.")
+            if itm.status == "REMOVED_PENDING_RESCAN":
                 raise ValueError(f"Checkout blocked: Item '{itm.product.name}' was removed. Rescan the barcode to remove this item before checking out. (REMOVED_PENDING_RESCAN)")
             if itm.status != "VERIFIED":
                 raise ValueError(f"Checkout blocked: Item '{itm.product.name}' is {itm.status}. All items must be VERIFIED by the cart camera before checkout.")
@@ -49,19 +51,11 @@ class BillingService:
         if not session_details["can_checkout"]:
             raise ValueError("Checkout blocked: Cannot complete checkout at this time.")
 
-        # Deduct purchased quantities from product inventory & trigger low-stock alerts
+        # Deduct purchased quantities from product inventory
         for itm in session_details["items"]:
             prod = db.query(Product).filter(Product.id == itm.product_id).first()
             if prod:
                 prod.stock_quantity = max(0, prod.stock_quantity - itm.quantity)
-                if prod.stock_quantity <= 5:
-                    await AlertService.create_alert(
-                        db=db,
-                        cart_id=cart.id,
-                        alert_type="LOW_STOCK_WARNING",
-                        message=f"Low Stock Alert: '{prod.name}' has only {prod.stock_quantity} units remaining in inventory.",
-                        severity="LOW"
-                    )
 
         # Generate official digital receipt
         receipt_num = generate_receipt_number()

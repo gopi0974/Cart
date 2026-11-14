@@ -8,8 +8,8 @@ interface Props {
 }
 
 export const AdminLogin: React.FC<Props> = ({ onLoginSuccess, sessionExpiredMessage }) => {
-  const [email, setEmail] = useState('admin@smartcart.ai');
-  const [password, setPassword] = useState('Admin@123');
+  const [email, setEmail] = useState('admin@supermart.com');
+  const [password, setPassword] = useState('SmartCart@Admin2026!');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(sessionExpiredMessage || null);

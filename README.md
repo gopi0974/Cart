@@ -2,8 +2,8 @@
 
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688.svg?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/Frontend-React_18_%2B_Vite-61DAFB.svg?style=flat&logo=react)](https://react.dev)
-[![PyTorch](https://img.shields.io/badge/AI_Vision-PyTorch_%2B_CLIP_ViT--B%2F32-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org)
-[![YOLOv8](https://img.shields.io/badge/Object_Detection-YOLOv8n-00FFFF.svg?style=flat)](https://github.com/ultralytics/ultralytics)
+[![AI Vision](https://img.shields.io/badge/AI_Vision-ONNX_Runtime_INT8_CLIP_ViT--B%2F32-EE4C2C.svg?style=flat)](https://onnxruntime.ai)
+[![MediaPipe](https://img.shields.io/badge/Privacy_Detection-MediaPipe_Tasks_Vision-00FFFF.svg?style=flat)](https://developers.google.com/mediapipe)
 [![pgvector](https://img.shields.io/badge/Vector_DB-PostgreSQL_pgvector-336791.svg?style=flat&logo=postgresql)](https://github.com/pgvector/pgvector)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -21,8 +21,8 @@ An end-to-end, **100% real vision AI smart cart platform** that eliminates retai
     Barcode Scanning (UPC/EAN)                 State Engine & Watchdog                 Client Motion Differencing
               |                                        |                                           |
     [ Verification Gate ]        <--->       [ Real AI Vision Engine ]    <--->       [ PostgreSQL + pgvector ]
-  (Blocks Checkout if Offline)               - YOLOv8 Hand & Item BBox                - 512-dim Normalized Vectors
-                                             - CLIP ViT-B/32 Embeddings               - Dual Disk Cache Resilience
+  (Blocks Checkout if Offline)               - OpenCV Differencing & BBox Localization - 512-dim Normalized Vectors
+                                             - INT8 CLIP ViT-B/32 Embeddings          - Dual Disk Cache Resilience
                                              - Annotated Snapshot Evidence            - Multi-Angle 360 Signatures
 ```
 
@@ -39,8 +39,8 @@ An end-to-end, **100% real vision AI smart cart platform** that eliminates retai
 ## 🧠 Model Persistence & Offline Storage
 
 All machine learning models run locally on CPU/CUDA and are cached permanently:
-- **CLIP ViT-B/32 Vision Encoder**: `backend/models_storage/clip_vision/` (Pretrained weights, processor config, preprocessor JSON).
-- **YOLOv8n Object & Hand Detector**: `backend/models_storage/yolov8n.pt` (6.2 MB local weights).
+- **INT8 CLIP ViT-B/32 Vision Encoder**: `backend/models_storage/clip_vision_int8.onnx` (85.0 MB quantized ONNX graph).
+- **In-Browser Privacy & Hand Detector**: Self-hosted MediaPipe tasks-vision (`frontend/public/mediapipe/`).
 - **Dual Persistent Vector Index**:
   - Primary: PostgreSQL `pgvector` extension storing 512-dimensional L2-normalized embeddings.
   - Secondary: `backend/models_storage/vector_cache.json` automatically synced on enrollment for instant offline recovery.
@@ -86,7 +86,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ## 🚀 End-to-End Walkthrough
 
 ### Step 1: Register Cart & Display Signed QR Code
-1. Open [http://127.0.0.1:5173/admin](http://127.0.0.1:5173/admin) (Login: `admin@supermart.com` / `admin123`).
+1. Open [http://127.0.0.1:5173/admin](http://127.0.0.1:5173/admin) (Login: `admin@supermart.com` / `SmartCart@Admin2026!`).
 2. Navigate to **Fleet Management**.
 3. Register a new cart or inspect `CART-001`.
 4. The system issues a cryptographic device token and generates an HMAC-signed QR code URL:

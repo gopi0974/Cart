@@ -1,15 +1,23 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath("."))
 import asyncio
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.database import SessionLocal
+from app.config import settings
 from app.models.cart import Cart
 from app.models.product import Product
 from app.models.session import CartSession, CartItem
 from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 
-async def test_removal_flow():
+def test_removal_flow():
+    settings.USE_MOCK = True
+    os.environ["USE_MOCK"] = "true"
+    asyncio.run(_async_removal_flow())
+
+async def _async_removal_flow():
     db = SessionLocal()
     try:
         cart = db.query(Cart).filter(Cart.is_enabled == True).first()

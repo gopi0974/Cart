@@ -147,7 +147,7 @@ async def simulate_cart_camera_action(
 
     if req.action_type in ["PLACE_CORRECT", "CONFIRM_BARCODE"]:
         barcode = req.barcode or req.detected_barcode or "8901262010053"
-        item = db.query(CartItem).join(Product).filter(
+        item = db.query(CartItem).join(Product, CartItem.product_id == Product.id).filter(
             CartItem.session_id == active_session.id,
             Product.barcode == barcode,
             CartItem.status == "PENDING"

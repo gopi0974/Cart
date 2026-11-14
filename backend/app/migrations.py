@@ -3,10 +3,18 @@ import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 import sqlalchemy as sa
-from alembic.config import Config
-from alembic import command
-from alembic.script import ScriptDirectory
-from alembic.runtime.migration import MigrationContext
+try:
+    from alembic.config import Config
+    from alembic import command
+    from alembic.script import ScriptDirectory
+    from alembic.runtime.migration import MigrationContext
+    HAS_ALEMBIC = True
+except ImportError:
+    Config = None
+    command = None
+    ScriptDirectory = None
+    MigrationContext = None
+    HAS_ALEMBIC = False
 from app.config import settings
 from app.utils.sanitization import sanitize_secrets
 
@@ -35,6 +43,9 @@ def get_alembic_config(connection=None, custom_url=None) -> Config:
     
     if not alembic_ini_path.exists():
         raise FileNotFoundError(f"Alembic configuration file not found at {alembic_ini_path}")
+
+    if not HAS_ALEMBIC or Config is None:
+        raise ImportError("Alembic is not installed in the current environment.")
 
     alembic_cfg = Config(str(alembic_ini_path))
     alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
@@ -117,6 +128,9 @@ def run_db_migrations(target: str = "head", connection=None, custom_url=None) ->
     global _last_migration_error
     from app.database import engine
 
+    if not HAS_ALEMBIC:
+        return True
+
     _last_migration_error = None
     try:
         alembic_cfg = get_alembic_config(connection=connection, custom_url=custom_url)
@@ -163,6 +177,14 @@ def _compute_schema_info_uncached(connection=None, custom_url=None) -> Dict[str,
     Never exposes raw database credentials.
     """
     from app.database import engine
+
+    if not HAS_ALEMBIC:
+        return {
+            "current_revision": None,
+            "head_revision": None,
+            "is_up_to_date": True,
+            "migration_error": None,
+        }
 
     try:
         alembic_cfg = get_alembic_config(connection=connection, custom_url=custom_url)

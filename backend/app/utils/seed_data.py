@@ -133,9 +133,9 @@ def seed_database(db: Session):
     # 2. One-time insecure accounts audit
     audit_insecure_admins_once(db)
 
-    # 3. Seed Initial Admin Account from Environment Variables
-    admin_email = os.getenv("ADMIN_EMAIL")
-    admin_password = os.getenv("ADMIN_PASSWORD")
+    # 3. Seed Initial Admin Account from Environment Variables or Demo Defaults
+    admin_email = os.getenv("ADMIN_EMAIL") or (settings.ADMIN_EMAIL if settings.DEMO_MODE else None)
+    admin_password = os.getenv("ADMIN_PASSWORD") or (settings.ADMIN_PASSWORD if settings.DEMO_MODE else None)
 
     if admin_email and admin_password:
         clean_email = admin_email.strip().lower()

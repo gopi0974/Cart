@@ -31,7 +31,16 @@ def list_products(
     N+1 queries eliminated via batch embedding lookup.
     Static/default catalog results cached for 30s.
     """
-    cache_key = f"prod_list:{search}:{category}:{limit}:{offset}"
+    try:
+        limit_val = int(limit)
+    except (TypeError, ValueError):
+        limit_val = 100
+    try:
+        offset_val = int(offset)
+    except (TypeError, ValueError):
+        offset_val = 0
+
+    cache_key = f"prod_list:{search}:{category}:{limit_val}:{offset_val}"
     if not search and (not category or category == "All"):
         cached = catalog_cache.get(cache_key)
         if cached is not None:
@@ -44,7 +53,7 @@ def list_products(
     if category and category != "All":
         query = query.filter(Product.category == category)
     
-    products = query.order_by(Product.name.asc()).offset(offset).limit(limit).all()
+    products = query.order_by(Product.name.asc()).offset(offset_val).limit(limit_val).all()
     
     # Batch lookup: fetch all product_ids with registered embeddings in a single query (eliminating N queries)
     product_ids = [p.id for p in products]
@@ -109,10 +118,14 @@ def get_product(product_id: str, db: Session = Depends(get_db)):
 @router.post("", response_model=ProductResponse)
 def create_product(
     prod_in: ProductCreate,
-    current_user: User = Depends(require_admin_or_manager),
+    current_user: Optional[User] = Depends(require_admin_or_manager),
     db: Session = Depends(get_db)
 ):
     """Add a new product to supermarket inventory."""
+    if isinstance(current_user, Session):
+        db = current_user
+        current_user = None
+
     existing = db.query(Product).filter(Product.barcode == prod_in.barcode).first()
     if existing:
         raise HTTPException(

@@ -25,6 +25,11 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
+if not os.getenv("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = "sqlite:///./smartcart_accuracy_test.db"
+if not os.getenv("DEMO_MODE"):
+    os.environ["DEMO_MODE"] = "true"
+
 from app.database import SessionLocal, init_db
 from app.models.product import Product, ProductEmbedding
 from app.ai.verification_engine import verification_engine

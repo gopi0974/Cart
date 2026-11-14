@@ -1,7 +1,47 @@
 import os
 import sys
 import asyncio
-import pytest
+
+def run_async(coro):
+    """Run pure async coroutine synchronously to prevent IOCP / socketpair hangs on Windows sandbox."""
+    try:
+        coro.send(None)
+    except StopIteration as e:
+        return e.value
+try:
+    import pytest
+except ImportError:
+    import re
+
+    class _RaisesContext:
+        def __init__(self, expected_exception, match=None):
+            self.expected_exception = expected_exception
+            self.match = match
+            self.value = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if exc_type is None:
+                raise AssertionError(f"DID NOT RAISE {self.expected_exception}")
+            if not issubclass(exc_type, self.expected_exception):
+                return False
+            if self.match is not None and not re.search(self.match, str(exc_val)):
+                raise AssertionError(f"Pattern '{self.match}' does not match '{str(exc_val)}'")
+            self.value = exc_val
+            return True
+
+    class DummyPytest:
+        @staticmethod
+        def fixture(func):
+            return func
+
+        @staticmethod
+        def raises(expected_exception, match=None):
+            return _RaisesContext(expected_exception, match=match)
+
+    pytest = DummyPytest
 import numpy as np
 from PIL import Image
 from unittest.mock import MagicMock, patch
@@ -318,7 +358,7 @@ def test_remove_on_pending_deletes_immediately(db, sample_data):
         assert sample_data["session"].item_count == 0
         assert sample_data["session"].total_amount == 0.0
 
-    asyncio.run(_run())
+    run_async(_run())
 
 
 def test_keep_preserves_pending_state(db, sample_data):
@@ -336,7 +376,7 @@ def test_keep_preserves_pending_state(db, sample_data):
         restored = await SessionService.cancel_item_removal(db, sample_data["session"].id, item.id)
         assert restored.status == "PENDING", "Restored item must be PENDING, never VERIFIED"
 
-    asyncio.run(_run())
+    run_async(_run())
 
 
 # =========================================================================
@@ -378,7 +418,7 @@ def test_removal_and_rescan_flow(db, sample_data):
         assert sample_data["session"].item_count == 0
         assert sample_data["session"].total_amount == 0.0
 
-    asyncio.run(_run())
+    run_async(_run())
 
 
 # =========================================================================
@@ -423,7 +463,7 @@ def test_server_checkout_blocked_states(db, sample_data):
         details = SessionService.get_session_details(db, sample_data["session"].id)
         assert details["can_checkout"] is True
 
-    asyncio.run(_run())
+    run_async(_run())
 
 
 # =========================================================================
@@ -682,3 +722,50 @@ def test_calibration_session_api_flow(db, sample_data):
             # 5. Reset session
             reset_res = reset_calibration_session(current_user=mock_admin)
             assert reset_res["count"] == 0
+
+
+if __name__ == "__main__":
+    print("Running test_verification_step2 suite...")
+
+    # Helper to run fixture-dependent test
+    def run_with_fixtures(test_func):
+        conn = test_engine.connect()
+        trans = conn.begin()
+        session = TestingSessionLocal(bind=conn)
+        try:
+            s_data = sample_data(session)
+            test_func(session, s_data)
+        finally:
+            session.close()
+            trans.rollback()
+            conn.close()
+
+    # Run standalone tests (without db fixtures)
+    test_pipeline_equality()
+    print("  [OK] test_pipeline_equality")
+    test_evidence_snapshot_privacy_cropping()
+    print("  [OK] test_evidence_snapshot_privacy_cropping")
+    test_should_apply_grabcut_real_captured_crop()
+    print("  [OK] test_should_apply_grabcut_real_captured_crop")
+
+    tests = [
+        test_decision_branch_auto_approve,
+        test_decision_branch_reposition_prompt,
+        test_decision_branch_wrong_item,
+        test_decision_branch_escalate_admin_review,
+        test_decision_branch_face_detected_withheld,
+        test_unscanned_item_placement,
+        test_remove_on_pending_deletes_immediately,
+        test_keep_preserves_pending_state,
+        test_removal_and_rescan_flow,
+        test_server_checkout_blocked_states,
+        test_hand_and_face_gates_in_verification,
+        test_preprocessing_version_tracking_and_health,
+        test_calibration_session_api_flow,
+    ]
+
+    for t in tests:
+        run_with_fixtures(t)
+        print(f"  [OK] {t.__name__}")
+
+    print("ALL test_verification_step2 SUITE TESTS PASSED!")

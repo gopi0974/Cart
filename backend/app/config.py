@@ -63,9 +63,11 @@ def get_base_url_host(url: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
-raw_db_url = os.getenv("DATABASE_URL")
-
 _is_demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
+
+raw_db_url = os.getenv("DATABASE_URL")
+if not raw_db_url and _is_demo_mode:
+    raw_db_url = f"sqlite:///{BASE_DIR / 'smartcart.db'}"
 
 class Settings(BaseModel):
     BASE_DIR: Path = BASE_DIR
@@ -74,8 +76,8 @@ class Settings(BaseModel):
     API_V1_STR: str = "/api/v1"
     
     # Initial Admin Bootstrap (Environment Variables Only)
-    ADMIN_EMAIL: Optional[str] = os.getenv("ADMIN_EMAIL")
-    ADMIN_PASSWORD: Optional[str] = os.getenv("ADMIN_PASSWORD")
+    ADMIN_EMAIL: Optional[str] = os.getenv("ADMIN_EMAIL", "admin@supermart.com" if _is_demo_mode else None)
+    ADMIN_PASSWORD: Optional[str] = os.getenv("ADMIN_PASSWORD", "SmartCart@Admin2026!" if _is_demo_mode else None)
     
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY", "smartcart-super-secret-key-change-in-production-2026")

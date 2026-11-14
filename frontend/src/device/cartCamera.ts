@@ -41,10 +41,10 @@ export interface CartCameraConfig {
 }
 
 export function getDeviceWsUrl(): string {
-  const envApi = (import.meta as any).env?.VITE_API_URL;
-  if (envApi) {
-    const wsProto = envApi.startsWith('https') ? 'wss' : 'ws';
-    const cleanHost = envApi.replace(/^https?:\/\//, '');
+  const envApi = (import.meta as any).env?.VITE_API_URL || (import.meta as any).env?.NEXT_PUBLIC_API_URL;
+  if (envApi && typeof envApi === 'string' && envApi.trim()) {
+    const wsProto = envApi.trim().startsWith('https') ? 'wss' : 'ws';
+    const cleanHost = envApi.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\/api\/v1$/, '');
     return `${wsProto}://${cleanHost}/ws/device`;
   }
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';

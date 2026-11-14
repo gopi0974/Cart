@@ -12,7 +12,7 @@ from app.utils.security import decode_access_token
 from app.websocket.manager import ws_manager
 from app.schemas.session import (
     PairSessionRequest, SessionResponse, CartItemResponse,
-    ScanItemRequest, RescanRemoveRequest, VerifyRemovalRequest
+    ScanItemRequest, RescanRemoveRequest, VerifyRemovalRequest, CouponRequest
 )
 from app.schemas.transaction import CheckoutRequest, ReceiptResponse
 from app.services.session_service import SessionService
@@ -283,6 +283,39 @@ def _format_item_response(itm) -> CartItemResponse:
         confidence_score=itm.confidence_score,
         verification_evidence_url=itm.verification_evidence_url
     )
+
+@router.post("/{session_id}/apply-coupon")
+async def apply_coupon(
+    req: CouponRequest,
+    session: CartSession = Depends(verify_shopper_session),
+    db: Session = Depends(get_db)
+):
+    """Apply promotional coupon code to active shopping cart session."""
+    code = (req.coupon_code or "").strip().upper()
+    if code in ["SUPER50", "WELCOME50", "SAVE50"]:
+        discount = round(min(session.subtotal_amount * 0.5, 50.0), 2)
+        if discount <= 0:
+            discount = round(session.subtotal_amount * 0.5, 2)
+    elif code in ["SUPER10", "SAVE10"]:
+        discount = round(session.subtotal_amount * 0.1, 2)
+    elif code in ["FLAT100"]:
+        discount = min(session.subtotal_amount, 100.0)
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid or expired coupon code '{code}'.")
+
+    session.total_discount = discount
+    session.total_amount = max(0.0, round(session.subtotal_amount + session.total_tax - discount, 2))
+    db.commit()
+    db.refresh(session)
+
+    return {
+        "status": "SUCCESS",
+        "coupon_code": code,
+        "discount_amount": discount,
+        "subtotal_amount": session.subtotal_amount,
+        "total_amount": session.total_amount,
+        "message": f"Coupon '{code}' applied successfully!"
+    }
 
 def _format_session_response(details) -> SessionResponse:
     sess = details["session"]

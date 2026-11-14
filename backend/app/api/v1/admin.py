@@ -627,7 +627,7 @@ async def force_remove_from_alert(
     if req.cart_item_id:
         item = db.query(CartItem).filter(CartItem.id == req.cart_item_id, CartItem.session_id == session.id).first()
     elif req.barcode:
-        item = db.query(CartItem).join(Product).filter(
+        item = db.query(CartItem).join(Product, CartItem.product_id == Product.id).filter(
             CartItem.session_id == session.id,
             Product.barcode == req.barcode,
             CartItem.status != "REMOVED"

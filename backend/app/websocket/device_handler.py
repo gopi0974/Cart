@@ -402,7 +402,7 @@ async def process_camera_frame(
                 await SessionService.flag_unscanned_item(
                     db=db,
                     cart_id=cart_id,
-                    detected_product_id=detected_prod["id"] if detected_prod else None,
+                    detected_product_id=(detected_prod.get("id") or detected_prod.get("product_id")) if detected_prod else None,
                     evidence_url=eval_result.get("evidence_url")
                 )
                 await websocket.send_json({
