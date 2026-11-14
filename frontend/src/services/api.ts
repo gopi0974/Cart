@@ -709,6 +709,22 @@ export const api = {
     );
   },
 
+  async logAuditOverride(payload: {
+    product_id: string;
+    angle_tag: string;
+    reason: string;
+    confirmed_by: string;
+    face_details?: any;
+  }) {
+    return request<{ status: string; timestamp: string; confirmed_by: string }>(
+      '/vision/scan-jobs/audit-override',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+
   async getProductActiveJob(productId: string) {
     return request<{ has_active_job: boolean; job: ScanJobResponse | null }>(
       `/vision/products/${productId}/active-job`,

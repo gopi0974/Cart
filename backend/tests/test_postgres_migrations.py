@@ -37,7 +37,7 @@ def postgres_service():
     """
     # 0. Check if PostgreSQL on port 5433 is already running
     try:
-        conn = psycopg2.connect(dbname="postgres", user=PG_USER, host="localhost", port=PG_PORT)
+        conn = psycopg2.connect(dbname="postgres", user=PG_USER, host="localhost", port=PG_PORT, connect_timeout=1)
         conn.close()
         yield {
             "port": PG_PORT,

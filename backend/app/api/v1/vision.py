@@ -60,6 +60,13 @@ class InitUploadFileItem(BaseModel):
     filename: str
     poor_crop: Optional[bool] = False
 
+class AuditOverrideRequest(BaseModel):
+    product_id: str
+    angle_tag: str
+    reason: str
+    confirmed_by: str
+    face_details: Optional[Dict[str, Any]] = None
+
 class InitUploadRequest(BaseModel):
     files: List[InitUploadFileItem]
 
@@ -780,6 +787,29 @@ def delete_scan_job(
         "status": "DELETED",
         "job_id": job_id,
         "message": "Scan job successfully deleted."
+    }
+
+@router.post("/scan-jobs/audit-override")
+def log_audit_override(
+    req: AuditOverrideRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Audit log entry when an admin uses the 'Capture anyway' override
+    after 3 blocked face detection attempts during 360 enrollment.
+    """
+    logger.warning(
+        f"[AUDIT_LOG_OVERRIDE] Admin face override confirmed by user_id={current_user.id} "
+        f"email={current_user.email} (role: {current_user.role}) for product_id={req.product_id} "
+        f"angle_tag={req.angle_tag}. Reason: {req.reason}. Face telemetry: {req.face_details}"
+    )
+    return {
+        "status": "AUDIT_LOGGED",
+        "timestamp": datetime.utcnow().isoformat(),
+        "confirmed_by": current_user.email,
+        "product_id": req.product_id,
+        "angle_tag": req.angle_tag
     }
 
 @router.post("/products/preview-test")

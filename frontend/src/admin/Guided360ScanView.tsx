@@ -2,11 +2,11 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Camera, Check, RefreshCw, Volume2, VolumeX, Sparkles, AlertCircle,
   ArrowLeft, X, Trash2, AlertTriangle, CheckCircle2, Plus, Zap,
-  Play, Pause, SkipForward, Scan, ShieldAlert, Eye, XCircle, Circle, Loader2
+  Play, Pause, SkipForward, Scan, ShieldAlert, Eye, XCircle, Circle, Loader2, Info
 } from 'lucide-react';
 import { Product } from '../types';
 import { api } from '../services/api';
-import { privacyDetector } from '../services/privacyDetector';
+import { privacyDetector, DetectedFaceBox } from '../services/privacyDetector';
 
 interface Props {
   product: Product;
@@ -22,8 +22,7 @@ export interface ProductBoundingBox {
 }
 
 export interface CapturedFrame {
-  dataUrl: string; // Cropped to product bounding box with 5% margin
-  originalDataUrl: string; // Full uncropped high-resolution camera frame
+  dataUrl: string; // Cropped to product bounding box with 5% margin (never full frame)
   blurScore: number;
   timestamp: number;
   box: ProductBoundingBox;
@@ -85,6 +84,15 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
   const [detectorError, setDetectorError] = useState<string | null>(null);
   const [productRatio, setProductRatio] = useState<number>(0);
   const [detectedBox, setDetectedBox] = useState<ProductBoundingBox | null>(null);
+
+  // Face Detection Telemetry, Reasons, Static Background & Admin Override States
+  const [blockingFaces, setBlockingFaces] = useState<DetectedFaceBox[]>([]);
+  const [outsideFaces, setOutsideFaces] = useState<DetectedFaceBox[]>([]);
+  const [allDetectedFaces, setAllDetectedFaces] = useState<DetectedFaceBox[]>([]);
+  const [staticRefFacesCount, setStaticRefFacesCount] = useState<number>(0);
+  const [captureBlockedReason, setCaptureBlockedReason] = useState<string | null>(null);
+  const [blockedAttemptsCount, setBlockedAttemptsCount] = useState<number>(0);
+  const [adminConfirmNoFace, setAdminConfirmNoFace] = useState<boolean>(false);
 
   // Load real in-browser MediaPipe Privacy Detector
   useEffect(() => {
@@ -281,7 +289,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     }
   }, [currentStepIdx, voiceEnabled, isScanning, isDone, isCalibratingBg]);
 
-  // Capture Crop & Original Frames
+  // Capture Cropped Product Frame (Never Full Frame)
   const captureFrameInternal = useCallback((): CapturedFrame | null => {
     const video = videoRef.current;
     if (!video || video.readyState < 2) return null;
@@ -289,16 +297,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     const vw = video.videoWidth || 1280;
     const vh = video.videoHeight || 720;
 
-    // 1. Full uncropped original frame
-    const originalCanvas = document.createElement('canvas');
-    originalCanvas.width = vw;
-    originalCanvas.height = vh;
-    const origCtx = originalCanvas.getContext('2d');
-    if (!origCtx) return null;
-    origCtx.drawImage(video, 0, 0, vw, vh);
-    const originalDataUrl = originalCanvas.toDataURL('image/jpeg', 0.90);
-
-    // 2. Cropped product box with 5% margin
+    // Cropped product box with 5% margin (Strict privacy protection: only crop is captured)
     const box = detectedBoxRef.current || {
       x: Math.round(vw * 0.20),
       y: Math.round(vh * 0.15),
@@ -321,7 +320,6 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
     return {
       dataUrl: croppedDataUrl,
-      originalDataUrl,
       blurScore: liveBlurScore,
       timestamp: Date.now(),
       box,
@@ -464,6 +462,20 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 avgBg[p] = sum / 5.0;
               }
               bgRefAverage.current = avgBg;
+
+              // Step 0 Static Reference Calibration:
+              // If the detector flags the same spot in the empty-scene reference, treat it as a static
+              // false positive (e.g. poster, packaging artwork on wall, high-contrast texture) and ignore it.
+              const emptySceneDet = privacyDetector.detect(video, 'privacy');
+              if (emptySceneDet.face_boxes.length > 0) {
+                privacyDetector.setStaticReferenceBoxes(emptySceneDet.face_boxes);
+                setStaticRefFacesCount(emptySceneDet.face_boxes.length);
+                console.log(`[Guided360] Step 0 empty scene: ${emptySceneDet.face_boxes.length} static reference false-positive spot(s) registered and will be ignored for this session.`);
+              } else {
+                privacyDetector.clearStaticReferenceBoxes();
+                setStaticRefFacesCount(0);
+              }
+
               setBgCalibrated(true);
               setIsCalibratingBg(false);
               setCameraFeedback('Background calibrated! Place product in center guide box.');
@@ -523,10 +535,12 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           }
         }
 
-        // Real in-browser MediaPipe Detection (Face and Hand Landmarker)
-        const det = privacyDetector.detect(video);
-        const isFaceIntrusion = det.face_present || det.face_boxes.length > 0;
-        setFaceDetectedWarning(isFaceIntrusion);
+        // Real in-browser MediaPipe Detection using 'enrollment' profile
+        // - Min confidence >= 0.60 (ignores package logos, cartoon characters, folds)
+        // - Min box width >= 6% frame width (ignores distant background specks)
+        // - Requires 3 consecutive frames persistence before flag is raised
+        // - Short 0.3s cooldown with immediate clear on clean frames
+        const det = privacyDetector.detect(video, 'enrollment');
 
         // Product ratio inside guide box
         const currentProdRatio = productPixelCount / totalGuidePixels;
@@ -554,8 +568,47 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
         setDetectedBox(computedBox);
 
+        // Classify Active Faces: Blocking vs Outside Guide Box (Gentle Hint)
+        // Guide box normalized coordinates
+        const guideNorm = { x: 32 / 160, y: 20 / 120, width: (128 - 32) / 160, height: (100 - 20) / 120 };
+        const cropTargetNorm = computedBox ? {
+          x: computedBox.x / vw,
+          y: computedBox.y / vh,
+          width: computedBox.width / vw,
+          height: computedBox.height / vh,
+        } : guideNorm;
+
+        const activeBlockingFaces: DetectedFaceBox[] = [];
+        const activeOutsideFaces: DetectedFaceBox[] = [];
+
+        for (const fb of det.active_face_boxes) {
+          // Large face threshold (>15% of frame area or >38% of frame width)
+          const isLargeFace = (fb.areaFraction >= 0.15) || (fb.widthFraction >= 0.38);
+
+          // Check overlap with guide box or product crop
+          const interX1 = Math.max(fb.x, cropTargetNorm.x);
+          const interY1 = Math.max(fb.y, cropTargetNorm.y);
+          const interX2 = Math.min(fb.x + fb.width, cropTargetNorm.x + cropTargetNorm.width);
+          const interY2 = Math.min(fb.y + fb.height, cropTargetNorm.y + cropTargetNorm.height);
+          const hasOverlap = (interX2 > interX1 && interY2 > interY1);
+
+          if (isLargeFace || hasOverlap) {
+            activeBlockingFaces.push(fb);
+          } else {
+            activeOutsideFaces.push(fb);
+          }
+        }
+
+        const isFaceBlocking = activeBlockingFaces.length > 0;
+        const hasOutsideHint = activeOutsideFaces.length > 0;
+        setFaceDetectedWarning(isFaceBlocking);
+        setBlockingFaces(activeBlockingFaces);
+        setOutsideFaces(activeOutsideFaces);
+        setAllDetectedFaces(det.face_boxes);
+
         // Hand occlusion / covering guard: reject hands covering the product
         let isHandCoveringProduct = false;
+        let handOverlapRatio = 0;
         if (computedBox && det.hand_boxes.length > 0) {
           const prodNormX1 = computedBox.x / vw;
           const prodNormY1 = computedBox.y / vh;
@@ -576,9 +629,13 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
             if (interX2 > interX1 && interY2 > interY1) {
               const interArea = (interX2 - interX1) * (interY2 - interY1);
               const prodArea = (prodNormX2 - prodNormX1) * (prodNormY2 - prodNormY1);
-              if (prodArea > 0 && (interArea / prodArea) > 0.08) {
-                isHandCoveringProduct = true;
-                break;
+              if (prodArea > 0) {
+                const ratio = interArea / prodArea;
+                if (ratio > handOverlapRatio) handOverlapRatio = ratio;
+                if (ratio > 0.08) {
+                  isHandCoveringProduct = true;
+                  break;
+                }
               }
             }
           }
@@ -628,45 +685,127 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         const isLightingOk = avgBrightness >= 35;
         const isProductBigEnough = currentProdRatio >= 0.15; // At least ~15% of guide box
 
-        // Draw Canvas Overlay (Green box on product, red/hatched on excluded regions)
+        // Draw Canvas Overlay: Product Box, Hand Boxes, Face Boxes with Exact Telemetry
         if (overlayCanvas) {
-          overlayCanvas.width = 160;
-          overlayCanvas.height = 120;
+          if (overlayCanvas.width !== vw || overlayCanvas.height !== vh) {
+            overlayCanvas.width = vw;
+            overlayCanvas.height = vh;
+          }
           const oCtx = overlayCanvas.getContext('2d');
           if (oCtx) {
-            oCtx.clearRect(0, 0, 160, 120);
+            oCtx.clearRect(0, 0, vw, vh);
 
-            if (isFaceIntrusion) {
-              // Excluded red hatched warning
-              oCtx.fillStyle = 'rgba(239, 68, 68, 0.35)';
-              oCtx.fillRect(gX1, gY1, gX2 - gX1, gY2 - gY1);
-              oCtx.strokeStyle = '#EF4444';
-              oCtx.lineWidth = 2;
-              oCtx.strokeRect(gX1, gY1, gX2 - gX1, gY2 - gY1);
-            } else if (computedBox && isProductBigEnough) {
-              // Scale box back to overlay coordinates
-              const oX = (computedBox.x / vw) * 160;
-              const oY = (computedBox.y / vh) * 120;
-              const oW = (computedBox.width / vw) * 160;
-              const oH = (computedBox.height / vh) * 120;
-
+            // 1. Draw Product Bounding Box
+            if (computedBox && isProductBigEnough) {
               oCtx.strokeStyle = '#10B981';
-              oCtx.lineWidth = 2;
-              oCtx.strokeRect(oX, oY, oW, oH);
-
+              oCtx.lineWidth = 2.5;
+              oCtx.strokeRect(computedBox.x, computedBox.y, computedBox.width, computedBox.height);
               oCtx.fillStyle = 'rgba(16, 185, 129, 0.12)';
-              oCtx.fillRect(oX, oY, oW, oH);
+              oCtx.fillRect(computedBox.x, computedBox.y, computedBox.width, computedBox.height);
+
+              // Product label tag
+              oCtx.fillStyle = '#10B981';
+              oCtx.fillRect(computedBox.x, Math.max(0, computedBox.y - 20), 130, 20);
+              oCtx.fillStyle = '#FFFFFF';
+              oCtx.font = 'bold 11px monospace';
+              oCtx.fillText(`PRODUCT (${blurScore} shp)`, computedBox.x + 6, Math.max(14, computedBox.y - 5));
             }
+
+            // 2. Draw Hand Bounding Boxes
+            det.hand_boxes.forEach((hBox, idx) => {
+              const bx = hBox.x * vw;
+              const by = hBox.y * vh;
+              const bw = hBox.width * vw;
+              const bh = hBox.height * vh;
+              oCtx.strokeStyle = '#06B6D4';
+              oCtx.lineWidth = 2;
+              oCtx.strokeRect(bx, by, bw, bh);
+              oCtx.fillStyle = '#06B6D4';
+              oCtx.fillRect(bx, Math.max(0, by - 18), 70, 18);
+              oCtx.fillStyle = '#070A12';
+              oCtx.font = 'bold 10px monospace';
+              oCtx.fillText(`HAND #${idx + 1}`, bx + 4, Math.max(13, by - 4));
+            });
+
+            // 3. Draw Face Bounding Boxes with Detailed Telemetry
+            det.face_boxes.forEach((fb, idx) => {
+              const bx = fb.x * vw;
+              const by = fb.y * vh;
+              const bw = fb.width * vw;
+              const bh = fb.height * vh;
+
+              const isBlocking = activeBlockingFaces.some(
+                (ab) => Math.abs(ab.x - fb.x) < 0.02 && Math.abs(ab.y - fb.y) < 0.02
+              );
+
+              let strokeColor = '#F59E0B'; // Amber: Outside guide box (allowed)
+              let fillColor = 'rgba(245, 158, 11, 0.15)';
+              let labelText = `FACE #${idx + 1}: ${Math.round(fb.score * 100)}% (${(fb.widthFraction * 100).toFixed(1)}%w) [OUTSIDE - ALLOWED]`;
+
+              if (fb.isStaticBackground) {
+                strokeColor = '#64748B'; // Slate: Static poster ignored
+                fillColor = 'rgba(100, 116, 139, 0.15)';
+                labelText = `POSTER / STATIC REF (IGNORED)`;
+              } else if (isBlocking) {
+                strokeColor = '#EF4444'; // Red: Blocking
+                fillColor = 'rgba(239, 68, 68, 0.25)';
+                labelText = `FACE #${idx + 1}: ${Math.round(fb.score * 100)}% | ${(fb.widthFraction * 100).toFixed(1)}%w x ${(fb.heightFraction * 100).toFixed(1)}%h (${(fb.areaFraction * 100).toFixed(1)}%a) | ${fb.consecutiveFrames}f [BLOCKING]`;
+              }
+
+              oCtx.strokeStyle = strokeColor;
+              oCtx.lineWidth = isBlocking ? 3.5 : 2;
+              oCtx.strokeRect(bx, by, bw, bh);
+              oCtx.fillStyle = fillColor;
+              oCtx.fillRect(bx, by, bw, bh);
+
+              oCtx.font = 'bold 11px monospace';
+              const textWidth = oCtx.measureText(labelText).width;
+              oCtx.fillStyle = strokeColor;
+              const tagY = Math.max(0, by - 22);
+              oCtx.fillRect(bx, tagY, textWidth + 12, 22);
+              oCtx.fillStyle = '#FFFFFF';
+              oCtx.fillText(labelText, bx + 6, tagY + 15);
+            });
           }
         }
+
+        // Determine Exact Reason "Why is capture blocked?"
+        let blockedReason: string | null = null;
+        if (detectorStatus !== 'ready') {
+          blockedReason = detectorStatus === 'loading'
+            ? 'Privacy detector loading self-hosted models...'
+            : 'Privacy detector offline (error loading models)';
+        } else if (isFaceBlocking) {
+          const topF = activeBlockingFaces[0];
+          const overlapMsg = (topF.areaFraction >= 0.15 || topF.widthFraction >= 0.38)
+            ? 'covers >15% of frame'
+            : 'overlaps guide box / product crop';
+          blockedReason = `Face detected in frame (${overlapMsg}, Confidence: ${Math.round(topF.score * 100)}%, Size: ${(topF.widthFraction * 100).toFixed(1)}%w x ${(topF.heightFraction * 100).toFixed(1)}%h, Persisted: ${topF.consecutiveFrames}f). Move face away.`;
+        } else if (isHandCoveringProduct) {
+          blockedReason = `Hand covering product by ${Math.round(handOverlapRatio * 100)}% (max 8% allowed). Remove hands from product.`;
+        } else if (!productConfirmedRef.current) {
+          blockedReason = 'Confirm product placement in guide box to begin.';
+        } else if (!isLightingOk) {
+          blockedReason = `Lighting too dim (Brightness: ${avgBrightness} / min 35). Move into better lighting.`;
+        } else if (!isProductBigEnough) {
+          blockedReason = `Product occupies ${Math.round(currentProdRatio * 100)}% of guide box (needs ≥15%). Bring product closer.`;
+        } else if (!isSteady) {
+          blockedReason = `Camera or item moving (Motion: ${motionDiff.toFixed(1)} / max 10.0). Hold still.`;
+        } else if (!isSharp) {
+          blockedReason = `Image slightly blurry (Sharpness: ${blurScore} / required 45). Hold steady.`;
+        }
+        setCaptureBlockedReason(blockedReason);
 
         // Visual HUD Feedback
         if (detectorStatus !== 'ready') {
           setCameraFeedback(detectorStatus === 'loading' ? 'Loading privacy detector...' : 'Privacy detector error — capture disabled');
           setFocusStatus('BLURRY');
-        } else if (isFaceIntrusion) {
-          setCameraFeedback('Show only the product. Keep your face out of the frame');
+        } else if (isFaceBlocking) {
+          setCameraFeedback('Face detected in capture region — move face away');
           setFocusStatus('BLURRY');
+        } else if (hasOutsideHint) {
+          setCameraFeedback('Product isolated & sharp! (Background face in room ignored)');
+          setFocusStatus(isSharp && isSteady ? 'SHARP' : 'STEADY');
         } else if (isHandCoveringProduct) {
           setCameraFeedback('Keep hands clear of the product');
           setFocusStatus('BLURRY');
@@ -688,7 +827,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
         }
 
         // Automatic Guided Capture Execution
-        if (!isPausedRef.current && autoCaptureEnabled && productConfirmedRef.current && !isFaceIntrusion && !isHandCoveringProduct && detectorStatus === 'ready' && isProductBigEnough) {
+        // Captures only when capture is NOT blocked by face or hand and criteria are satisfied
+        if (!isPausedRef.current && autoCaptureEnabled && productConfirmedRef.current && !isFaceBlocking && !isHandCoveringProduct && detectorStatus === 'ready' && isProductBigEnough) {
           const currentPhase = phaseRef.current;
           const now = Date.now();
           const stepElapsed = now - stepStartTimeRef.current;
@@ -712,7 +852,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
           // Phase 2: Countdown "Hold still... 3, 2, 1" (at least 3 seconds)
           else if (currentPhase === 'COUNTDOWN') {
-            if (motionDiff > 25.0 || isFaceIntrusion || isHandCoveringProduct || detectorStatus !== 'ready') {
+            if (motionDiff > 25.0 || isFaceBlocking || isHandCoveringProduct || detectorStatus !== 'ready') {
               setStepPhase('WAITING_STEADY');
               steadyCounterRef.current = 0;
               setCountdown(3);
@@ -732,7 +872,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
           // Phase 3: Capturing 5 to 8 frames spaced >= 300ms apart with near-duplicate skip
           else if (currentPhase === 'CAPTURING') {
-            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk && !isFaceIntrusion && !isHandCoveringProduct && detectorStatus === 'ready') {
+            if (now - lastCaptureTimeRef.current >= 300 && isLightingOk && !isFaceBlocking && !isHandCoveringProduct && detectorStatus === 'ready') {
               let isDuplicate = false;
               if (lastCapturedGrayRef.current) {
                 let dupSum = 0;
@@ -831,7 +971,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       return;
     }
     if (faceDetectedWarning) {
-      alert('Show only the product. Keep your face out of the frame');
+      setBlockedAttemptsCount((prev) => prev + 1);
+      alert('Cannot capture: Face detected overlapping product crop or covering >15% of frame. Keep your face clear of the capture area.');
       return;
     }
     if (handDetectedWarning) {
@@ -852,6 +993,47 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       }
       return updated;
     });
+  };
+
+  // Admin Override: Capture anyway after 3 blocked attempts with explicit confirmation
+  const handleAdminOverrideCapture = async () => {
+    if (detectorStatus !== 'ready') return;
+    if (!adminConfirmNoFace) {
+      alert('Please check the confirmation box: "I confirm there is no face in the saved crop"');
+      return;
+    }
+
+    const newFrame = captureFrameInternal();
+    if (!newFrame) return;
+
+    // Send audit log to backend
+    try {
+      await api.logAuditOverride({
+        product_id: product.id,
+        angle_tag: REQUIRED_ANGLES[currentStepIdx].tag,
+        reason: 'Admin verified no face in cropped product region after 3 blocked attempts.',
+        confirmed_by: 'admin',
+        face_details: blockingFaces
+      });
+      console.log('[Guided360] Admin override audit log recorded on server.');
+    } catch (err) {
+      console.warn('[Guided360] Failed to send audit log to server:', err);
+    }
+
+    setStepFrames((prev) => {
+      const updated = [...prev, newFrame];
+      lastCaptureTimeRef.current = Date.now();
+      const step = REQUIRED_ANGLES[currentStepIdx];
+      console.log(`[Guided360] Admin Override Capture Now on Step ${currentStepIdx + 1}/9 (${step.tag}): total ${updated.length} frames.`);
+      if (updated.length >= 5 && (Date.now() - stepStartTimeRef.current) >= 2000) {
+        finishStep(updated);
+      }
+      return updated;
+    });
+
+    // Reset override states
+    setBlockedAttemptsCount(0);
+    setAdminConfirmNoFace(false);
   };
 
   const handleRetakeInGallery = (tag: string) => {
@@ -1525,18 +1707,12 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   </div>
                 )}
 
-                {/* Face Warning Banner: "Show only the product. Keep your face out of the frame" */}
+                {/* Face Warning Top Pill (Never blackouts viewfinder so box is visible) */}
                 {faceDetectedWarning && !isCalibratingBg && (
-                  <div className="absolute inset-0 bg-red-950/90 backdrop-blur-sm flex flex-col items-center justify-center p-4 text-center z-30 animate-pulse">
-                    <ShieldAlert className="w-12 h-12 text-red-400 mb-2" />
-                    <span className="text-xs font-bold text-white uppercase tracking-wider text-red-200">
-                      Face Detected in Frame
-                    </span>
-                    <p className="text-xs font-bold text-white mt-1 leading-snug">
-                      &ldquo;Show only the product. Keep your face out of the frame&rdquo;
-                    </p>
-                    <span className="text-[10px] text-red-300 mt-1.5 font-mono">
-                      Face intrusion blocked by MediaPipe detector
+                  <div className="absolute top-2 left-2 right-2 bg-red-950/90 border border-red-500/80 rounded-xl p-2 flex items-center justify-center gap-2 z-30 animate-pulse shadow-lg">
+                    <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
+                    <span className="text-[11px] font-bold text-white leading-tight font-mono">
+                      Face blocking crop ({blockingFaces.length > 0 ? `${Math.round(blockingFaces[0].score*100)}% conf, ${(blockingFaces[0].widthFraction*100).toFixed(1)}%w` : 'detected'}) — keep face clear
                     </span>
                   </div>
                 )}
@@ -1695,6 +1871,89 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                 Frames: {totalCapturedFrames} / 54 (Target: 40-80)
               </span>
             </div>
+          </div>
+
+          {/* Exact Reason Line: Why is capture blocked? */}
+          <div className="max-w-md mx-auto space-y-2">
+            <div className={`p-3 rounded-2xl border font-mono text-xs flex items-start gap-2.5 transition-all shadow-md ${
+              captureBlockedReason
+                ? 'bg-amber-950/40 border-amber-500/50 text-amber-200'
+                : 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+            }`}>
+              {captureBlockedReason ? (
+                <>
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                  <div className="space-y-0.5 leading-snug">
+                    <span className="font-bold text-amber-300 mr-1.5 uppercase text-[11px]">Why is capture blocked?</span>
+                    <span className="text-amber-100">{captureBlockedReason}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
+                  <div className="space-y-0.5 leading-snug">
+                    <span className="font-bold text-emerald-300 mr-1.5 uppercase text-[11px]">Capture Ready:</span>
+                    <span className="text-emerald-100">Product isolated, sharp ({liveBlurScore} ≥ 45) and steady. Auto-capture armed.</span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Non-blocking background face gentle hint */}
+            {outsideFaces.length > 0 && !faceDetectedWarning && (
+              <div className="px-3 py-1.5 rounded-xl bg-cyan-950/30 border border-cyan-500/30 text-cyan-200 text-[11px] font-mono flex items-center gap-2">
+                <Info className="w-3.5 h-3.5 shrink-0 text-cyan-400" />
+                <span>Notice: Background face in room ({outsideFaces.length}) is outside the capture box — capture is allowed.</span>
+              </div>
+            )}
+
+            {/* Step 0 static reference note */}
+            {staticRefFacesCount > 0 && (
+              <div className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-300 text-[11px] font-mono flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                <span>Ignoring {staticRefFacesCount} static background detection(s) (poster/texture) calibrated in Step 0.</span>
+              </div>
+            )}
+
+            {/* Admin Override: "Capture anyway" button after 3 blocked attempts */}
+            {blockedAttemptsCount >= 3 && faceDetectedWarning && detectorStatus === 'ready' && (
+              <div className="p-4 rounded-2xl bg-red-950/40 border border-red-500/60 text-xs font-mono space-y-3 shadow-xl animate-fade-in">
+                <div className="flex items-center gap-2 text-red-300 font-bold uppercase tracking-wider text-xs">
+                  <ShieldAlert className="w-4 h-4 text-red-400" />
+                  <span>Admin Override ({blockedAttemptsCount} Blocked Attempts Recorded)</span>
+                </div>
+                <p className="text-[11px] text-red-200 leading-relaxed">
+                  A face is detected overlapping the crop region or covering &gt;15% of the frame. If this detection is a false positive on product artwork or packaging graphics, you may confirm and capture the product crop.
+                </p>
+                {blockingFaces.length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-black/60 border border-red-500/30 text-[10px] text-red-300 space-y-1">
+                    <div>Box Telemetry: <strong>Score: {Math.round(blockingFaces[0].score * 100)}%</strong> | Size: {(blockingFaces[0].widthFraction * 100).toFixed(1)}%w x {(blockingFaces[0].heightFraction * 100).toFixed(1)}%h ({(blockingFaces[0].areaFraction * 100).toFixed(1)}% area)</div>
+                    <div>Location: ({(blockingFaces[0].x * 100).toFixed(1)}%, {(blockingFaces[0].y * 100).toFixed(1)}%) | Persisted: {blockingFaces[0].consecutiveFrames} consecutive frames</div>
+                  </div>
+                )}
+                <label className="flex items-center gap-2.5 text-white font-medium cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={adminConfirmNoFace}
+                    onChange={(e) => setAdminConfirmNoFace(e.target.checked)}
+                    className="w-4 h-4 rounded text-red-600 focus:ring-red-500 border-slate-700 bg-slate-900 cursor-pointer"
+                  />
+                  <span>I confirm there is no face in the saved crop</span>
+                </label>
+                <button
+                  onClick={handleAdminOverrideCapture}
+                  disabled={!adminConfirmNoFace}
+                  className={`w-full py-2.5 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all ${
+                    adminConfirmNoFace
+                      ? 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/30 active:scale-95'
+                      : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                  }`}
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Capture anyway (Save Product Crop Only)</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Action Deck: Pause, Capture Now, Retry Angle, Skip Angle */}

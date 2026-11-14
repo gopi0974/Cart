@@ -202,7 +202,7 @@ export class CartCameraManager {
       return false;
     }
 
-    const det = privacyDetector.detect(this.config.videoElement);
+    const det = privacyDetector.detect(this.config.videoElement, 'privacy');
     if (!det.detector_ready) {
       this.config.onLog('Cannot capture reference: Privacy detector is not ready.', 'error');
       return false;
@@ -426,7 +426,7 @@ export class CartCameraManager {
       const now = Date.now();
 
       // 1. Run real MediaPipe detector on downscaled copy (~320 px)
-      const det = privacyDetector.detect(this.config.videoElement);
+      const det = privacyDetector.detect(this.config.videoElement, 'privacy');
       this.handPresent = det.hand_present;
       this.facePresent = det.face_present;
       this.detectorReady = det.detector_ready;
