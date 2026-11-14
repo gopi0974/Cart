@@ -442,6 +442,8 @@ def get_cart_verification_trace(
             "cart_number": cart.cart_number,
             "session_id": d.session_id,
             "item_id": d.item_id,
+            "pending_items": trace_obj.get("pending_items", []),
+            "unscanned_alert_reason": trace_obj.get("unscanned_alert_reason"),
             "timestamp": d.created_at.isoformat() if d.created_at else None,
             "frame_received_time": trace_obj.get("frame_received_time") or (d.created_at.isoformat() if d.created_at else None),
             "camera_online": trace_obj.get("camera_online", cart.camera_status == "ONLINE"),
@@ -584,20 +586,28 @@ async def run_cart_verification_now(
             "trace": trace_failed
         }
 
-    # Find active session & pending item
-    active_session = db.query(CartSession).filter(
-        CartSession.cart_id == cart.id,
-        CartSession.status == "ACTIVE"
-    ).first()
+    # Find active session & pending items (enforces single active session per cart)
+    active_session = SessionService.ensure_single_active_session(db, cart.id)
 
-    pending_item = None
+    pending_items_query = []
     if active_session:
-        pending_item = db.query(CartItem).join(CartItem.product).filter(
+        pending_items_query = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
             CartItem.status == "PENDING"
-        ).order_by(CartItem.scanned_at.desc()).first()
+        ).order_by(CartItem.scanned_at.desc()).all()
+
+    pending_item = pending_items_query[0] if pending_items_query else None
+    pending_items_summary = [
+        {"id": itm.id, "barcode": itm.product.barcode, "product_name": itm.product.name}
+        for itm in pending_items_query
+    ]
 
     claimed_barcode = pending_item.product.barcode if pending_item else None
+    unscanned_alert_reason = (
+        f"N/A (Pending item evaluated: {pending_item.product.name} [{claimed_barcode}])"
+        if pending_item else "No pending items in active session"
+    )
+
     eval_result = verification_engine.evaluate_item_placement(
         db=db,
         claimed_barcode=claimed_barcode,
@@ -605,7 +615,9 @@ async def run_cart_verification_now(
         ref_background=tracker.ref_background,
         cart_id=cart.id,
         session_id=active_session.id if active_session else None,
-        item_id=pending_item.id if pending_item else None
+        item_id=pending_item.id if pending_item else None,
+        pending_items=pending_items_summary,
+        unscanned_alert_reason=unscanned_alert_reason
     )
 
     decision = eval_result.get("decision")

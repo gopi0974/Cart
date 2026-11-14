@@ -15,6 +15,35 @@ from app.ai.verification_engine import verification_engine
 
 class SessionService:
     @staticmethod
+    def ensure_single_active_session(db: Session, cart_id: str) -> Optional[CartSession]:
+        """
+        Enforces strict single ACTIVE session per cart policy.
+        If >1 ACTIVE session exists for a cart, logs warning, terminates all older sessions
+        (sets status='ENDED', ended_at=datetime.utcnow()), commits, and returns the single latest active session.
+        """
+        import logging
+        logger = logging.getLogger("smartcart.session")
+        active_sessions = db.query(CartSession).filter(
+            CartSession.cart_id == cart_id,
+            CartSession.status == "ACTIVE"
+        ).order_by(CartSession.started_at.desc(), CartSession.id.desc()).all()
+
+        if not active_sessions:
+            return None
+
+        if len(active_sessions) > 1:
+            logger.warning(
+                f"[Cart {cart_id}] Multiple ({len(active_sessions)}) ACTIVE sessions detected. "
+                f"Retaining latest session {active_sessions[0].id} and closing {len(active_sessions) - 1} stale session(s)."
+            )
+            for stale in active_sessions[1:]:
+                stale.status = "ENDED"
+                stale.ended_at = datetime.utcnow()
+            db.commit()
+
+        return active_sessions[0]
+
+    @staticmethod
     def recalculate_session_totals(db: Session, session: CartSession):
         """Recalculate subtotal, tax, and total for active verified/pending items."""
         active_items = db.query(CartItem).filter(
@@ -87,10 +116,7 @@ class SessionService:
                 )
 
         # 4. Enforce ONE active session per cart rule
-        existing_session = db.query(CartSession).filter(
-            CartSession.cart_id == cart.id,
-            CartSession.status == "ACTIVE"
-        ).first()
+        existing_session = SessionService.ensure_single_active_session(db, cart.id)
 
         if existing_session:
             # If same customer is reconnecting, allow resume
@@ -291,11 +317,19 @@ class SessionService:
     @staticmethod
     async def scan_item(db: Session, session_id: str, barcode: str) -> CartItem:
         """User scans a product barcode. Sets item in PENDING state awaiting cart placement."""
+        import time
+        import logging
+        t0 = time.perf_counter()
+        logger = logging.getLogger("smartcart.session")
+
         session = db.query(CartSession).filter(CartSession.id == session_id).first()
         if not session or session.status != "ACTIVE":
             raise ValueError("No active shopping session found.")
 
-        product = db.query(Product).filter(Product.barcode == barcode).first()
+        clean_barcode = str(barcode).strip()
+        product = db.query(Product).filter(Product.barcode == clean_barcode).first()
+        if not product:
+            product = db.query(Product).filter(Product.barcode.ilike(clean_barcode)).first()
         if not product:
             raise ValueError(f"Product with barcode '{barcode}' not found in supermarket catalog.")
 
@@ -311,8 +345,50 @@ class SessionService:
         db.add(item)
         db.flush()
         SessionService.recalculate_session_totals(db, session)
+
+        # 1. AUTO-CLEAR: Resolve any open UNSCANNED_ITEM alerts for this session
+        open_unscanned_alerts = db.query(Alert).filter(
+            Alert.session_id == session.id,
+            Alert.alert_type == "UNSCANNED_ITEM",
+            Alert.status == "OPEN"
+        ).all()
+        for al in open_unscanned_alerts:
+            al.status = "RESOLVED"
+            al.resolution_notes = f"Auto-cleared by shopper barcode scan for '{product.name}' ({product.barcode})."
+            al.resolved_at = datetime.utcnow()
+
+        # Remove or merge any placeholder WARNING_UNSCANNED items
+        unscanned_placeholders = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.status == "WARNING_UNSCANNED"
+        ).all()
+        for placeholder in unscanned_placeholders:
+            db.delete(placeholder)
+        if unscanned_placeholders:
+            db.flush()
+            SessionService.recalculate_session_totals(db, session)
+
         db.commit()
         db.refresh(item)
+
+        # 2. Notify camera handler tracker in memory immediately
+        from app.websocket.device_handler import get_tracker
+        tracker = get_tracker(session.cart_id)
+        now_ts = time.time()
+        tracker.last_scanned_time = now_ts
+        tracker.last_pending_barcode = product.barcode
+        tracker.last_pending_item_id = item.id
+        tracker.has_pending_items = True
+
+        server_duration_ms = (time.perf_counter() - t0) * 1000.0
+        logger.info(f"[{session.cart.cart_number if session.cart else session.cart_id}] scan_item committed in {server_duration_ms:.2f}ms: barcode={product.barcode}")
+
+        # If unscanned alerts were cleared, broadcast ALERT_CLEARED
+        if open_unscanned_alerts or unscanned_placeholders:
+            await ws_manager.broadcast_to_cart(session.cart_id, "ALERT_CLEARED", {
+                "alert_type": "UNSCANNED_ITEM",
+                "message": f"Unscanned item warning cleared by scanning '{product.name}'."
+            })
 
         # Notify mobile app and cart camera agent
         await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_SCANNED_PENDING", {
@@ -322,7 +398,8 @@ class SessionService:
             "barcode": product.barcode,
             "unit_price": item.unit_price,
             "status": "PENDING",
-            "message": "Item scanned! Please place this item in your cart."
+            "message": "Item scanned! Please place this item in your cart.",
+            "server_duration_ms": round(server_duration_ms, 2)
         })
 
         return item
@@ -341,9 +418,10 @@ class SessionService:
             return None
 
         # Find pending item for this product
+        clean_barcode = str(barcode).strip()
         item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == session.id,
-            Product.barcode == barcode,
+            (Product.barcode == clean_barcode) | (Product.barcode.ilike(clean_barcode)),
             CartItem.status == "PENDING"
         ).order_by(CartItem.scanned_at.desc()).first()
 
@@ -355,8 +433,48 @@ class SessionService:
         item.confidence_score = confidence
         item.verification_evidence_url = evidence_url
         SessionService.recalculate_session_totals(db, session)
+
+        # AUTO-CLEAR: Resolve any open UNSCANNED_ITEM alerts for this session
+        open_unscanned_alerts = db.query(Alert).filter(
+            Alert.session_id == session.id,
+            Alert.alert_type == "UNSCANNED_ITEM",
+            Alert.status == "OPEN"
+        ).all()
+        for al in open_unscanned_alerts:
+            al.status = "RESOLVED"
+            al.resolution_notes = f"Auto-cleared: item verified as '{item.product.name}'."
+            al.resolved_at = datetime.utcnow()
+
+        unscanned_placeholders = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.status == "WARNING_UNSCANNED"
+        ).all()
+        for placeholder in unscanned_placeholders:
+            db.delete(placeholder)
+        if unscanned_placeholders:
+            db.flush()
+            SessionService.recalculate_session_totals(db, session)
+
         db.commit()
         db.refresh(item)
+
+        # Invalidate / update tracker
+        from app.websocket.device_handler import get_tracker
+        tracker = get_tracker(session.cart_id)
+        # Check if more pending items remain
+        remaining_pending = db.query(CartItem).filter(
+            CartItem.session_id == session.id,
+            CartItem.status == "PENDING"
+        ).count()
+        tracker.has_pending_items = (remaining_pending > 0)
+        if not tracker.has_pending_items:
+            tracker.last_pending_item_id = None
+
+        if open_unscanned_alerts or unscanned_placeholders:
+            await ws_manager.broadcast_to_cart(session.cart_id, "ALERT_CLEARED", {
+                "alert_type": "UNSCANNED_ITEM",
+                "message": f"Unscanned item warning cleared: verified as '{item.product.name}'."
+            })
 
         # Real-time WebSocket announcement: Item is verified!
         await ws_manager.broadcast_to_cart(session.cart_id, "ITEM_VERIFIED", {

@@ -113,6 +113,7 @@ class Settings(BaseModel):
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))
     CONFIDENCE_MEDIUM: float = float(os.getenv("CONFIDENCE_MEDIUM", "0.65"))
     CONFIDENCE_LOW: float = float(os.getenv("CONFIDENCE_LOW", "0.65"))
+    UNSCANNED_GRACE_PERIOD_SECONDS: float = float(os.getenv("UNSCANNED_GRACE_PERIOD_SECONDS", "10.0"))
     EVIDENCE_RETENTION_DAYS: int = int(os.getenv("EVIDENCE_RETENTION_DAYS", "14"))
     CURRENT_PREPROCESSING_VERSION: str = os.getenv("CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224")
     

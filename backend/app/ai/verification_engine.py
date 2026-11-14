@@ -100,7 +100,9 @@ class AIVerificationEngine:
         face_present: bool = False,
         cart_id: Optional[str] = None,
         session_id: Optional[str] = None,
-        item_id: Optional[str] = None
+        item_id: Optional[str] = None,
+        pending_items: Optional[list] = None,
+        unscanned_alert_reason: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Evaluate physical item placement in cart against claimed barcode using ONNX INT8 CLIP pipeline.
@@ -135,6 +137,8 @@ class AIVerificationEngine:
                 "cart_id": cart_id,
                 "session_id": session_id,
                 "item_id": item_id,
+                "pending_items": pending_items or [],
+                "unscanned_alert_reason": unscanned_alert_reason or "N/A (Hand in cart)",
                 "timestamp": datetime.utcnow().isoformat(),
                 "frame_received_time": datetime.utcnow().isoformat(),
                 "camera_online": True,
@@ -205,6 +209,8 @@ class AIVerificationEngine:
                 "cart_id": cart_id,
                 "session_id": session_id,
                 "item_id": item_id,
+                "pending_items": pending_items or [],
+                "unscanned_alert_reason": unscanned_alert_reason or "N/A (Face detected)",
                 "timestamp": datetime.utcnow().isoformat(),
                 "frame_received_time": datetime.utcnow().isoformat(),
                 "camera_online": True,
@@ -347,6 +353,8 @@ class AIVerificationEngine:
                 "cart_id": cart_id,
                 "session_id": session_id,
                 "item_id": item_id,
+                "pending_items": pending_items or [],
+                "unscanned_alert_reason": unscanned_alert_reason or "No pending barcode scanned",
                 "timestamp": datetime.utcnow().isoformat(),
                 "frame_received_time": datetime.utcnow().isoformat(),
                 "camera_online": True,
@@ -477,6 +485,8 @@ class AIVerificationEngine:
             "cart_id": cart_id,
             "session_id": session_id,
             "item_id": item_id,
+            "pending_items": pending_items or [],
+            "unscanned_alert_reason": unscanned_alert_reason or f"N/A (Pending item evaluated: {scanned_product_name} [{claimed_barcode}])",
             "timestamp": datetime.utcnow().isoformat(),
             "frame_received_time": datetime.utcnow().isoformat(),
             "camera_online": True,

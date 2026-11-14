@@ -330,10 +330,53 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
                 {/* Expanded 10-Stage Pipeline Deep-Dive */}
                 {isExpanded && (
                   <div className="border-t border-slate-100 dark:border-slate-800 p-5 bg-slate-50/50 dark:bg-slate-900/40 space-y-4">
-                    <h4 className="text-xs font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400 flex items-center gap-2">
-                      <Sliders className="w-3.5 h-3.5" />
-                      10-Stage Pipeline Evaluation Trace
-                    </h4>
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400 flex items-center gap-2">
+                        <Sliders className="w-3.5 h-3.5" />
+                        10-Stage Pipeline Evaluation Trace
+                      </h4>
+                    </div>
+
+                    {/* Cart Session & Pending Verification Context */}
+                    <div className="p-3 bg-purple-500/5 dark:bg-purple-900/10 border border-purple-500/20 rounded-2xl grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                      <div>
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">
+                          Cart & Session Context
+                        </span>
+                        <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 truncate">
+                          Cart: <span className="font-bold text-slate-900 dark:text-white">{trace.cart_number || trace.cart_id}</span>
+                        </div>
+                        <div className="font-mono text-[10px] text-slate-500 truncate" title={trace.session_id || 'None'}>
+                          Session: {trace.session_id ? trace.session_id.slice(0, 13) + '...' : 'No active session'}
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">
+                          Pending Items Found ({trace.pending_items?.length || 0})
+                        </span>
+                        {trace.pending_items && trace.pending_items.length > 0 ? (
+                          <div className="space-y-0.5 mt-0.5">
+                            {trace.pending_items.map((pi: any, idx: number) => (
+                              <div key={idx} className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold truncate" title={`${pi.product_name} (${pi.barcode})`}>
+                                • {pi.product_name} <span className="text-slate-400">[{pi.barcode}]</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-500 italic block mt-0.5">0 items pending</span>
+                        )}
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">
+                          Unscanned Alert Evaluation
+                        </span>
+                        <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 mt-0.5">
+                          {trace.unscanned_alert_reason || 'N/A (Pending item evaluated)'}
+                        </div>
+                      </div>
+                    </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
                       {/* Stage 1: Frame Received */}

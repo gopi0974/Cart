@@ -240,6 +240,15 @@ async def end_session(session: CartSession = Depends(verify_shopper_session), db
         session.ended_at = datetime.utcnow()
 
     if cart:
+        # Close any other active sessions that might be lingering for this cart
+        stale_sessions = db.query(CartSession).filter(
+            CartSession.cart_id == cart.id,
+            CartSession.status == "ACTIVE"
+        ).all()
+        for s in stale_sessions:
+            s.status = "ENDED"
+            s.ended_at = datetime.utcnow()
+
         cart.status = "IDLE"
         cart.last_heartbeat = datetime.utcnow()
 

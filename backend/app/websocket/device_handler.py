@@ -9,7 +9,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.cart import Cart
-from app.models.session import CartSession, CartItem
+from app.models.session import CartItem
 from app.models.transaction import AuditLog
 from app.websocket.manager import ws_manager
 from app.services.session_service import SessionService
@@ -74,7 +74,10 @@ class CartVisionTracker:
         self.stable_start_time: float = 0.0
         self.last_motion_time: float = 0.0
         self.last_judged_time: float = 0.0
+        self.last_scanned_time: float = 0.0
+        self.last_pending_barcode: Optional[str] = None
         self.last_pending_item_id: Optional[str] = None
+        self.has_pending_items: bool = False
         self.face_seen_start_time: float = 0.0
         self.ref_background: Optional[np.ndarray] = load_persisted_cart_reference(cart_id)
         self.last_stable_frame: Optional[np.ndarray] = None
@@ -115,6 +118,12 @@ async def process_camera_frame(
       4. Detect changed region and run recognition matching enrollment pipeline.
     """
     try:
+        # Expire cached query results/snapshots in long-lived db session so committed rows from shopper HTTP scans are immediately visible
+        try:
+            db.expire_all()
+        except Exception:
+            pass
+
         tracker = get_tracker(cart_id)
         now = time.time()
 
@@ -127,10 +136,7 @@ async def process_camera_frame(
 
             # If face_present stays true for about 1 second on a stable object:
             if (now - tracker.face_seen_start_time) >= 1.0:
-                active_session = db.query(CartSession).filter(
-                    CartSession.cart_id == cart_id,
-                    CartSession.status == "ACTIVE"
-                ).first()
+                active_session = SessionService.ensure_single_active_session(db, cart_id)
                 if active_session:
                     pending_item = db.query(CartItem).join(CartItem.product).filter(
                         CartItem.session_id == active_session.id,
@@ -208,11 +214,8 @@ async def process_camera_frame(
         img_bgr, _ = verification_engine._decode_to_cv2(image_data)
         tracker.last_stable_frame = img_bgr.copy()
 
-        # 4. Check active session on this cart
-        active_session = db.query(CartSession).filter(
-            CartSession.cart_id == cart_id,
-            CartSession.status == "ACTIVE"
-        ).first()
+        # 4. Check active session on this cart (enforces single active session per cart)
+        active_session = SessionService.ensure_single_active_session(db, cart_id)
 
         if tracker.ref_background is None:
             tracker.ref_background = load_persisted_cart_reference(cart_id)
@@ -245,10 +248,17 @@ async def process_camera_frame(
         ).first()
 
         # 6. Check for pending item scanned on mobile waiting for camera confirmation
-        pending_item = db.query(CartItem).join(CartItem.product).filter(
+        pending_items_query = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
             CartItem.status == "PENDING"
-        ).order_by(CartItem.scanned_at.desc()).first()
+        ).order_by(CartItem.scanned_at.desc()).all()
+
+        pending_item = pending_items_query[0] if pending_items_query else None
+        pending_items_summary = [
+            {"id": itm.id, "barcode": itm.product.barcode, "product_name": itm.product.name}
+            for itm in pending_items_query
+        ]
+        tracker.has_pending_items = len(pending_items_query) > 0
 
         # Evaluation eligibility rules:
         # A) PENDING item exists: evaluate immediately if new scan, or retry every 1.0s on steady frames
@@ -327,7 +337,9 @@ async def process_camera_frame(
                 ref_background=tracker.ref_background,
                 cart_id=cart_id,
                 session_id=active_session.id,
-                item_id=pending_item.id
+                item_id=pending_item.id,
+                pending_items=pending_items_summary,
+                unscanned_alert_reason=f"N/A (Pending item evaluated: {pending_item.product.name} [{claimed_barcode}])"
             )
             tracker.last_stable_frame = img_bgr.copy()
 
@@ -469,16 +481,34 @@ async def process_camera_frame(
 
         else:
             # 7. No pending item: Check for Unscanned Item Placement
+            grace_period = getattr(settings, "UNSCANNED_GRACE_PERIOD_SECONDS", 10.0)
+            time_since_last_scan = (now - tracker.last_scanned_time) if tracker.last_scanned_time > 0 else 999.0
+
+            # GRACE PERIOD CHECK: "Unscanned item" alert may ONLY fire when cart has no PENDING item
+            # AND no item was scanned in the last 10 seconds.
+            if time_since_last_scan < grace_period:
+                await websocket.send_json({
+                    "type": "vision_status",
+                    "status": "AWAITING_PLACEMENT",
+                    "message": f"Grace period active ({time_since_last_scan:.1f}s / {grace_period}s). Waiting for scanned item placement."
+                })
+                return
+
             motion_box = object_detector.compute_motion_box(tracker.ref_background, img_bgr)
 
             if motion_box is not None:
+                unscanned_alert_reason = (
+                    f"No pending items found in active session and grace period expired ({time_since_last_scan:.1f}s >= {grace_period}s)."
+                )
                 eval_result = verification_engine.evaluate_item_placement(
                     db=db,
                     claimed_barcode=None,
                     image_data=img_bgr,
                     ref_background=tracker.ref_background,
                     cart_id=cart_id,
-                    session_id=active_session.id
+                    session_id=active_session.id,
+                    pending_items=pending_items_summary,
+                    unscanned_alert_reason=unscanned_alert_reason
                 )
                 tracker.last_stable_frame = img_bgr.copy()
                 detected_prod = eval_result.get("top_match")
@@ -489,6 +519,12 @@ async def process_camera_frame(
                     detected_product_id=detected_prod["id"] if detected_prod else None,
                     evidence_url=eval_result.get("evidence_url")
                 )
+                trace_data = eval_result.get("trace")
+                if trace_data:
+                    trace_data["cart_number"] = cart_number
+                    trace_data["sent_to_shopper"] = True
+                    tracker.add_trace(trace_data)
+
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "UNSCANNED_ITEM_DETECTED",

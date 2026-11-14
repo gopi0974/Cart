@@ -273,8 +273,8 @@ export const api = {
     return request<CartSession>(`/shopper/${sessionId}`);
   },
 
-  async scanItem(sessionId: string, barcode: string) {
-    return request(`/shopper/${sessionId}/scan-item`, {
+  async scanItem(sessionId: string, barcode: string): Promise<CartItem> {
+    return request<CartItem>(`/shopper/${sessionId}/scan-item`, {
       method: 'POST',
       body: JSON.stringify({ barcode }),
     });

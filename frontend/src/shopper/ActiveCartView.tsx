@@ -101,7 +101,7 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
             setRemovalStep('AWAITING_RESCAN');
             setRemovalStatusMsg('Item removed. Please rescan its barcode to take it off your bill.');
             refreshSession();
-          } else if (evtType === 'WARNING_CLEARED' || evtType === 'ITEM_SCANNED_PENDING' || evtType === 'REMOVAL_CANCELLED') {
+          } else if (evtType === 'WARNING_CLEARED' || evtType === 'ALERT_CLEARED' || evtType === 'ITEM_SCANNED_PENDING' || evtType === 'REMOVAL_CANCELLED') {
             refreshSession();
           } else if (evtType === 'CART_CAMERA_STATUS') {
             setSession((prev) => ({
@@ -276,8 +276,22 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
       }
     } else {
       try {
-        await api.scanItem(session.id, barcode);
-        await refreshSession();
+        const newItem = await api.scanItem(session.id, barcode);
+        if (newItem && newItem.id) {
+          setSession((prev) => {
+            const existingIdx = prev.items.findIndex((i) => i.id === newItem.id);
+            const updatedItems: CartItem[] = existingIdx >= 0
+              ? prev.items.map((it, idx) => (idx === existingIdx ? newItem : it))
+              : [newItem, ...prev.items];
+            return {
+              ...prev,
+              items: updatedItems,
+              can_checkout: false
+            };
+          });
+        }
+        // Background refresh to sync calculated totals without blocking scanner completion
+        refreshSession().catch(() => {});
       } catch (err: any) {
         throw new Error(err.message || `Product not found (barcode ${barcode})`);
       }
