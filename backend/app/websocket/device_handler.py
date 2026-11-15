@@ -166,7 +166,8 @@ async def process_camera_frame(
             if active_session:
                 pending_item = db.query(CartItem).join(CartItem.product).filter(
                     CartItem.session_id == active_session.id,
-                    CartItem.status.in_(["PENDING", "NEEDS_STAFF_CHECK"])
+                    CartItem.status.in_(["PENDING", "NEEDS_STAFF_CHECK"]),
+                    CartItem.staff_approved.is_(False)
                 ).order_by(CartItem.scanned_at.desc()).first()
 
             # If mode is mask_and_judge and frame image is available, mask face and allow evaluation
@@ -331,7 +332,8 @@ async def process_camera_frame(
         # 6. Check for pending item scanned on mobile waiting for camera confirmation
         pending_items_query = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
-            CartItem.status == "PENDING"
+            CartItem.status == "PENDING",
+            CartItem.staff_approved.is_(False)
         ).order_by(CartItem.scanned_at.desc()).all()
 
         pending_item = pending_items_query[0] if pending_items_query else None

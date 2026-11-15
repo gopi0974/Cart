@@ -25,6 +25,9 @@ class CartItemResponse(BaseModel):
     confidence_score: Optional[float] = None
     verification_evidence_url: Optional[str] = None
     pending_reason: Optional[str] = None
+    staff_approved: bool = False
+    staff_approved_at: Optional[datetime] = None
+    staff_approved_by: Optional[str] = None
 
     class Config:
         from_attributes = True

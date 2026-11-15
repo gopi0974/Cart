@@ -239,6 +239,9 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
                   <th className="py-2 px-2">Status</th>
                   <th className="py-2 px-2">Created By Stage</th>
                   <th className="py-2 px-2">Created At</th>
+                  <th className="py-2 px-2">Resolved By</th>
+                  <th className="py-2 px-2">Resolved At</th>
+                  <th className="py-2 px-2">Recreated?</th>
                   <th className="py-2 px-2">Message</th>
                 </tr>
               </thead>
@@ -259,6 +262,27 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
                     </td>
                     <td className="py-2 px-2 font-mono text-purple-600 dark:text-purple-400 font-medium">{alt.created_by_stage}</td>
                     <td className="py-2 px-2 text-slate-400">{alt.created_at ? new Date(alt.created_at).toLocaleTimeString() : 'N/A'}</td>
+                    <td className="py-2 px-2 text-slate-600 dark:text-slate-300">
+                      {alt.resolved_by ? (
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold" title={alt.resolved_by}>
+                          {alt.resolved_by_name || alt.resolved_by}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-slate-400">
+                      {alt.resolved_at ? new Date(alt.resolved_at).toLocaleTimeString() : '—'}
+                    </td>
+                    <td className="py-2 px-2 font-bold">
+                      {alt.recreated_after ? (
+                        <span className="text-red-500" title="Alert was re-created after staff resolution">
+                          YES
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 font-normal">No</span>
+                      )}
+                    </td>
                     <td className="py-2 px-2 font-sans text-slate-700 dark:text-slate-300 truncate max-w-xs" title={alt.message}>
                       {alt.message}
                     </td>

@@ -1,7 +1,7 @@
 import uuid
 import secrets
 from datetime import datetime
-from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -56,6 +56,10 @@ class CartItem(Base):
     top2_score = Column(Float, nullable=True)
     matched_product_id = Column(String(36), ForeignKey("products.id"), nullable=True)
     verification_evidence_url = Column(Text, nullable=True)
+
+    staff_approved = Column(Boolean, default=False, nullable=False)
+    staff_approved_at = Column(DateTime, nullable=True)
+    staff_approved_by = Column(String(36), ForeignKey("users.id"), nullable=True)
 
     session = relationship("CartSession", back_populates="items")
     product = relationship("Product", foreign_keys=[product_id], back_populates="cart_items")

@@ -310,7 +310,10 @@ def _format_item_response(itm) -> CartItemResponse:
         scanned_at=itm.scanned_at,
         verified_at=itm.verified_at,
         confidence_score=itm.confidence_score,
-        verification_evidence_url=itm.verification_evidence_url
+        verification_evidence_url=itm.verification_evidence_url,
+        staff_approved=getattr(itm, "staff_approved", False) or False,
+        staff_approved_at=getattr(itm, "staff_approved_at", None),
+        staff_approved_by=getattr(itm, "staff_approved_by", None)
     )
 
 def _format_session_response(details) -> SessionResponse:

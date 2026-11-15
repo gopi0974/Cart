@@ -443,7 +443,9 @@ class SessionService:
         session_id: str,
         barcode: str,
         confidence: float = 0.94,
-        evidence_url: Optional[str] = None
+        evidence_url: Optional[str] = None,
+        staff_approved: bool = False,
+        staff_user_id: Optional[str] = None
     ) -> Optional[CartItem]:
         """AI cart camera confirms matching item has physically been placed in cart."""
         session = db.query(CartSession).filter(CartSession.id == session_id).first()
@@ -465,6 +467,10 @@ class SessionService:
         item.verified_at = datetime.utcnow()
         item.confidence_score = confidence
         item.verification_evidence_url = evidence_url
+        if staff_approved:
+            item.staff_approved = True
+            item.staff_approved_at = datetime.utcnow()
+            item.staff_approved_by = staff_user_id
         SessionService.recalculate_session_totals(db, session)
 
         # AUTO-CLEAR: Resolve any open alerts for this session
@@ -517,6 +523,7 @@ class SessionService:
             "product_name": item.product.name,
             "barcode": item.product.barcode,
             "status": "VERIFIED",
+            "staff_approved": getattr(item, "staff_approved", False),
             "confidence": confidence,
             "subtotal": session.subtotal_amount,
             "total": session.total_amount

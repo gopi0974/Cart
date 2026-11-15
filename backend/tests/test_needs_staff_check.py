@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import time
 import pytest
 from datetime import datetime, timedelta
@@ -13,7 +12,6 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.main import app
-from app.config import settings
 from app.database import Base, get_db
 from app.models.product import Product
 from app.models.cart import Cart
@@ -432,3 +430,246 @@ async def test_session_cleanup_closes_older_sessions_and_resolves_alerts():
     db.refresh(old_alert)
     assert old_alert.status == "RESOLVED"
     assert old_alert.resolved_at is not None
+
+
+@pytest.mark.anyio
+async def test_staff_resolve_alert_verifies_item_and_stops_recreation():
+    """Verify staff resolving an alert sets item to VERIFIED (staff approved) and stops re-creation on 10 subsequent frames."""
+    db = TestingSessionLocal()
+
+    cart = Cart(
+        cart_number="CART-RES1",
+        qr_code_token="qr-res1",
+        device_token_hash="hash-res1",
+        is_enabled=True,
+        status="ACTIVE"
+    )
+    db.add(cart)
+    db.commit()
+
+    staff_user = User(
+        email="manager@smartcart.com",
+        password_hash="dummy_hash",
+        full_name="Store Manager",
+        role="MANAGER"
+    )
+    db.add(staff_user)
+    db.commit()
+
+    session = CartSession(cart_id=cart.id, status="ACTIVE", session_token="tok-res1")
+    db.add(session)
+    db.commit()
+
+    prod = Product(
+        name="Biography Book",
+        barcode="8901234567890",
+        price=450.0,
+        brand="Penguin",
+        category="Books"
+    )
+    db.add(prod)
+    db.commit()
+
+    item = CartItem(
+        session_id=session.id,
+        product_id=prod.id,
+        status="PENDING",
+        quantity=1,
+        unit_price=450.0
+    )
+    db.add(item)
+    db.commit()
+
+    # Trigger initial NEEDS_STAFF_CHECK alert
+    tracker = get_tracker(cart.id)
+    tracker.face_seen_start_time = time.time() - 2.0
+
+    dummy_ws = AsyncMock()
+    dummy_ws.send_json = AsyncMock()
+
+    with patch("app.websocket.manager.ws_manager.broadcast_to_cart", new_callable=AsyncMock):
+        with patch("app.websocket.manager.ws_manager.broadcast_to_admin", new_callable=AsyncMock):
+            await process_camera_frame(
+                db=db,
+                cart_id=cart.id,
+                cart_number=cart.cart_number,
+                image_data=None,
+                websocket=dummy_ws,
+                hand_present=False,
+                face_present=True,
+                motion=False,
+                face_boxes=[{"x": 0.2, "y": 0.2, "width": 0.3, "height": 0.3, "score": 0.9}],
+                detector_profile="privacy"
+            )
+
+    db.refresh(item)
+    assert item.status == "NEEDS_STAFF_CHECK"
+
+    alert = db.query(Alert).filter(
+        Alert.cart_id == cart.id,
+        Alert.session_id == session.id,
+        Alert.status == "OPEN"
+    ).first()
+    assert alert is not None
+    assert alert.item_id == item.id
+
+    # Now staff resolves the alert
+    with patch("app.websocket.manager.ws_manager.broadcast_to_cart", new_callable=AsyncMock) as mock_cart_resolve:
+        with patch("app.websocket.manager.ws_manager.broadcast_to_admin", new_callable=AsyncMock):
+            resolved_alert = await AlertService.resolve_alert(
+                db=db,
+                alert_id=alert.id,
+                user_id=staff_user.id,
+                notes="Checked customer basket in person, book cover has face image.",
+                action="RESOLVED"
+            )
+
+    assert resolved_alert is not None
+    assert resolved_alert.status == "RESOLVED"
+    assert resolved_alert.resolved_by == staff_user.id
+    assert resolved_alert.resolved_at is not None
+
+    # Cart item must now be VERIFIED and staff_approved
+    db.refresh(item)
+    assert item.status == "VERIFIED"
+    assert item.staff_approved is True
+    assert item.staff_approved_at is not None
+    assert item.staff_approved_by == staff_user.id
+
+    # Verify WebSocket broadcast to shopper cart
+    cart_broadcast_events = [call.args[1] for call in mock_cart_resolve.call_args_list]
+    assert "ITEM_VERIFIED" in cart_broadcast_events
+    assert "ALERT_CLEARED" in cart_broadcast_events
+
+    # Send 10 more withheld frames with face detected while the book remains in front of the camera
+    tracker.face_seen_start_time = time.time() - 2.0
+    with patch("app.websocket.manager.ws_manager.broadcast_to_cart", new_callable=AsyncMock) as mock_cart_spam:
+        with patch("app.websocket.manager.ws_manager.broadcast_to_admin", new_callable=AsyncMock):
+            for _ in range(10):
+                await process_camera_frame(
+                    db=db,
+                    cart_id=cart.id,
+                    cart_number=cart.cart_number,
+                    image_data=None,
+                    websocket=dummy_ws,
+                    hand_present=False,
+                    face_present=True,
+                    motion=False,
+                    face_boxes=[{"x": 0.2, "y": 0.2, "width": 0.3, "height": 0.3, "score": 0.9}],
+                    detector_profile="privacy"
+                )
+
+    # Verify no new alert was created!
+    open_alerts = db.query(Alert).filter(
+        Alert.cart_id == cart.id,
+        Alert.session_id == session.id,
+        Alert.status == "OPEN"
+    ).all()
+    assert len(open_alerts) == 0
+
+    # Total alerts must still be 1 (the resolved one)
+    total_alerts = db.query(Alert).filter(
+        Alert.cart_id == cart.id,
+        Alert.session_id == session.id
+    ).all()
+    assert len(total_alerts) == 1
+
+    # Item must remain VERIFIED and staff_approved
+    db.refresh(item)
+    assert item.status == "VERIFIED"
+    assert item.staff_approved is True
+
+    # Shopper received no ITEM_WARNING spam
+    shopper_spam_events = [call.args[1] for call in mock_cart_spam.call_args_list]
+    assert "ITEM_WARNING" not in shopper_spam_events
+
+
+@pytest.mark.anyio
+async def test_verification_trace_includes_resolver_and_recreated_flag():
+    """Verify get_cart_verification_trace returns resolver user info and recreated_after flag."""
+    db = TestingSessionLocal()
+
+    cart = Cart(
+        cart_number="CART-TRACE1",
+        qr_code_token="qr-trace1",
+        device_token_hash="hash-trace1",
+        is_enabled=True,
+        status="ACTIVE"
+    )
+    db.add(cart)
+    db.commit()
+
+    admin_user = User(
+        email="admin@smartcart.com",
+        password_hash="dummy_hash",
+        full_name="Admin Supervisor",
+        role="ADMIN"
+    )
+    db.add(admin_user)
+    db.commit()
+
+    session = CartSession(cart_id=cart.id, status="ACTIVE", session_token="tok-trace1")
+    db.add(session)
+    db.commit()
+
+    prod = Product(
+        name="Novel",
+        barcode="8909999888877",
+        price=299.0,
+        brand="Standard",
+        category="Books"
+    )
+    db.add(prod)
+    db.commit()
+
+    item = CartItem(
+        session_id=session.id,
+        product_id=prod.id,
+        status="NEEDS_STAFF_CHECK",
+        quantity=1,
+        unit_price=299.0
+    )
+    db.add(item)
+    db.commit()
+
+    # Create alert
+    alert = Alert(
+        cart_id=cart.id,
+        session_id=session.id,
+        item_id=item.id,
+        alert_type="NEEDS_STAFF_CHECK",
+        severity="MEDIUM",
+        message="We can't check this item automatically. Please ask staff.",
+        status="OPEN"
+    )
+    db.add(alert)
+    db.commit()
+
+    # Resolve alert
+    await AlertService.resolve_alert(
+        db=db,
+        alert_id=alert.id,
+        user_id=admin_user.id,
+        notes="Verified visually",
+        action="RESOLVED"
+    )
+
+    token = create_access_token({"sub": admin_user.email, "role": "ADMIN"})
+    resp = client.get(
+        f"/api/v1/admin/carts/{cart.id}/verification-trace",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "session_alerts" in data
+    assert len(data["session_alerts"]) >= 1
+
+    trace_alert = next((a for a in data["session_alerts"] if a["id"] == alert.id), None)
+    assert trace_alert is not None
+    assert trace_alert["status"] == "RESOLVED"
+    assert trace_alert["resolved_by"] == admin_user.email
+    assert trace_alert["resolved_by_name"] == admin_user.full_name
+    assert trace_alert["resolved_at"] is not None
+    assert trace_alert["recreated_after"] is False
+

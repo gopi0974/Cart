@@ -105,6 +105,25 @@ def _ensure_baseline_pieces_idempotent(bind_or_conn) -> None:
                     conn.execute(sa.text("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS item_id VARCHAR(36);"))
                 else:
                     conn.execute(sa.text("ALTER TABLE alerts ADD COLUMN item_id VARCHAR(36);"))
+
+        # Cart items table columns
+        if "cart_items" in existing_tables:
+            ci_cols = {c["name"] for c in inspector.get_columns("cart_items")}
+            if "staff_approved" not in ci_cols:
+                if is_postgres:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS staff_approved BOOLEAN DEFAULT false NOT NULL;"))
+                else:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN staff_approved BOOLEAN DEFAULT 0 NOT NULL;"))
+            if "staff_approved_at" not in ci_cols:
+                if is_postgres:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS staff_approved_at TIMESTAMP;"))
+                else:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN staff_approved_at TIMESTAMP;"))
+            if "staff_approved_by" not in ci_cols:
+                if is_postgres:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS staff_approved_by VARCHAR(36);"))
+                else:
+                    conn.execute(sa.text("ALTER TABLE cart_items ADD COLUMN staff_approved_by VARCHAR(36);"))
         
         if is_connection and conn.in_transaction():
             conn.commit()

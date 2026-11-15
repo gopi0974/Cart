@@ -69,6 +69,17 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     return () => clearInterval(timer);
   }, [session.items]);
 
+  // Fallback: refetch session every 5s while any warning or staff-check is open
+  useEffect(() => {
+    const hasWarnings = (session.active_warnings && session.active_warnings.length > 0) ||
+      session.items?.some((i) => i.status === 'NEEDS_STAFF_CHECK' || i.status === 'WARNING' || i.status === 'WARNING_MISMATCH');
+    if (!hasWarnings) return;
+    const timer = setInterval(() => {
+      refreshSession();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [session.active_warnings, session.items]);
+
   // Sync state & connect to Cart WebSocket (authenticated with shopper session token)
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -78,6 +89,9 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
     try {
       ws = new WebSocket(`${getWsBaseUrl()}/ws/cart/${session.cart_id}${tokenQuery}`);
       unregisterWs = wsRegistry.register(ws);
+      ws.onopen = () => {
+        refreshSession();
+      };
       ws.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data);
@@ -596,8 +610,8 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
                       {item.status === 'VERIFIED' && (
                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800/40">
                           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                          Verified by camera
-                          {item.confidence_score && (
+                          {item.staff_approved ? 'Verified • Approved by staff' : 'Verified by camera'}
+                          {!item.staff_approved && item.confidence_score && (
                             <span className="opacity-75 font-mono text-[10px]">
                               ({(item.confidence_score * 100).toFixed(0)}%)
                             </span>

@@ -514,6 +514,18 @@ def get_cart_verification_trace(
                 else "grace_period" if a.alert_type == "UNSCANNED_ITEM"
                 else "device_monitor"
             )
+            resolver_user = None
+            if a.resolved_by:
+                resolver_user = db.query(User).filter(User.id == a.resolved_by).first()
+            resolved_by_text = resolver_user.email if resolver_user else (a.resolved_by or None)
+
+            recreated_after = False
+            if a.item_id and a.resolved_at:
+                recreated_after = any(
+                    other.item_id == a.item_id and other.id != a.id and other.created_at and other.created_at > a.resolved_at
+                    for other in raw_alerts
+                )
+
             session_alerts.append({
                 "id": a.id,
                 "type": a.alert_type,
@@ -522,7 +534,11 @@ def get_cart_verification_trace(
                 "message": a.message,
                 "item_id": a.item_id,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
-                "created_by_stage": created_stage
+                "created_by_stage": created_stage,
+                "resolved_by": resolved_by_text,
+                "resolved_by_name": resolver_user.full_name if resolver_user else None,
+                "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+                "recreated_after": recreated_after
             })
 
     return {
@@ -1210,7 +1226,9 @@ async def submit_review_decision(
                     session_id=active_session.id,
                     barcode=case.scanned_barcode,
                     confidence=1.0,
-                    evidence_url=case.evidence_image_url
+                    evidence_url=case.evidence_image_url,
+                    staff_approved=True,
+                    staff_user_id=current_user.id
                 )
         
         # Write immutable audit log entry
