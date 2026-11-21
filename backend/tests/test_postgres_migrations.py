@@ -72,7 +72,9 @@ def postgres_service():
         "-E", "UTF8"
     ]
     try:
-        res = subprocess.run(init_cmd, capture_output=True, text=True)
+        res = subprocess.run(init_cmd, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        pytest.skip("PostgreSQL initdb timed out.")
     except OSError as e:
         pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res.returncode != 0:
@@ -89,7 +91,9 @@ def postgres_service():
         "-w"
     ]
     try:
-        res_start = subprocess.run(start_cmd, capture_output=True, text=True)
+        res_start = subprocess.run(start_cmd, capture_output=True, text=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        pytest.skip("PostgreSQL pg_ctl start timed out.")
     except OSError as e:
         pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res_start.returncode != 0:
@@ -99,7 +103,7 @@ def postgres_service():
     ready = False
     for _ in range(15):
         try:
-            conn = psycopg2.connect(dbname="postgres", user=PG_USER, host="localhost", port=PG_PORT)
+            conn = psycopg2.connect(dbname="postgres", user=PG_USER, host="localhost", port=PG_PORT, connect_timeout=1)
             conn.close()
             ready = True
             break
@@ -107,7 +111,10 @@ def postgres_service():
             time.sleep(0.5)
 
     if not ready:
-        subprocess.run([str(pg_ctl_exe), "stop", "-D", str(PG_DATA), "-m", "immediate", "-w"])
+        try:
+            subprocess.run([str(pg_ctl_exe), "stop", "-D", str(PG_DATA), "-m", "immediate", "-w"], timeout=10)
+        except Exception:
+            pass
         pytest.fail("PostgreSQL test server failed to accept connections.")
 
     yield {
@@ -126,9 +133,12 @@ def postgres_service():
         "-w"
     ]
     try:
-        subprocess.run(stop_cmd, capture_output=True, text=True)
-    except Exception:
-        pass
+        subprocess.run(stop_cmd, capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, Exception):
+        try:
+            subprocess.run([str(pg_ctl_exe), "stop", "-D", str(PG_DATA), "-m", "immediate", "-w"], timeout=10)
+        except Exception:
+            pass
     try:
         shutil.rmtree(PG_DATA, ignore_errors=True)
     except Exception:

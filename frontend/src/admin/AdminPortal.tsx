@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard, ShoppingCart, AlertTriangle, Layers, Camera, CheckSquare,
   QrCode, Cpu, ShieldCheck, ChevronRight, Menu, X, Eye, BarChart3, Users,
-  LogOut, Sun, Moon, Activity
+  LogOut, Sun, Moon, Activity, FlaskConical
 } from 'lucide-react';
 import { AdminDashboard } from './AdminDashboard';
 import { LiveCartMonitor } from './LiveCartMonitor';
@@ -11,6 +11,7 @@ import { ReviewQueueView } from './ReviewQueueView';
 import { ProductCatalogView } from './ProductCatalogView';
 import { Guided360ScanView } from './Guided360ScanView';
 import { PreviewTestView } from './PreviewTestView';
+import { RecognitionLabView } from './RecognitionLabView';
 import { CartFleetView } from './CartFleetView';
 import { ModelManagerView } from './ModelManagerView';
 import { SystemDiagnosticsView } from './SystemDiagnosticsView';
@@ -164,6 +165,7 @@ export const AdminPortal: React.FC = () => {
     { id: 'REVIEWS', label: 'AI Review Queue', icon: CheckSquare },
     { id: 'PRODUCTS', label: 'Product Inventory', icon: Layers },
     { id: 'SCAN_360', label: '360° Vision Scan', icon: Camera },
+    { id: 'RECOGNITION_LAB', label: 'Recognition Lab', icon: FlaskConical },
     { id: 'MODELS', label: 'AI Models & Stats', icon: Cpu },
     { id: 'SYSTEM', label: 'Settings & System', icon: Activity },
     { id: 'REPORTS', label: 'Financial & Loss Reports', icon: BarChart3 },
@@ -386,6 +388,7 @@ export const AdminPortal: React.FC = () => {
         {currentTab === 'PREVIEW_TEST' && (
           <PreviewTestView initialProduct={targetProduct} onBackToCatalog={() => setCurrentTab('PRODUCTS')} />
         )}
+        {currentTab === 'RECOGNITION_LAB' && <RecognitionLabView />}
         {currentTab === 'MODELS' && <ModelManagerView />}
         {currentTab === 'SYSTEM' && (
           <SystemDiagnosticsView

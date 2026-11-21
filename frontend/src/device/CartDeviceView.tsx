@@ -21,7 +21,8 @@ import {
   Target,
   CheckCircle2,
   BarChart2,
-  Download
+  Download,
+  FlaskConical
 } from 'lucide-react';
 import { CartCameraManager } from './cartCamera';
 import { getApiBaseUrl, api } from '../services/api';
@@ -179,6 +180,47 @@ export const CartDeviceView: React.FC = () => {
       setCalStats(stats);
     } catch (e: any) {
       addLog(`Calibration error: ${e.message}`, 'error');
+    } finally {
+      setIsRecordingCal(false);
+    }
+  };
+
+  const handleSendToRecognitionLab = async () => {
+    if (!videoRef.current || !calTargetBarcode) {
+      addLog('Cannot send to Recognition Lab: camera not running or no target product selected.', 'warn');
+      return;
+    }
+    if (handPresent) {
+      addLog('Recognition Lab capture aborted: Hand detected in frame.', 'warn');
+      return;
+    }
+    if (facePresent) {
+      addLog('Recognition Lab capture aborted: Face detected in frame.', 'warn');
+      return;
+    }
+
+    setIsRecordingCal(true);
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 480;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not create canvas context');
+      ctx.drawImage(video, 0, 0, 640, 480);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+      const res = await api.recordRecognitionLabSample({
+        expected_barcode: calTargetBarcode,
+        image_data_url: dataUrl,
+        angle_label: calAngleLabel,
+        source: 'cart-device',
+        filename: `cart_device_${calAngleLabel.toLowerCase()}_${Date.now()}.jpg`
+      });
+
+      addLog(`Recognition Lab: ${res.message}`, 'success');
+    } catch (e: any) {
+      addLog(`Recognition Lab error: ${e.message}`, 'error');
     } finally {
       setIsRecordingCal(false);
     }
@@ -714,22 +756,32 @@ export const CartDeviceView: React.FC = () => {
                 </div>
 
                 {/* Capture & Reset Actions */}
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleRecordCalibrationSample}
+                      disabled={!isRunning || isRecordingCal}
+                      className="flex-1 py-2.5 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-md"
+                    >
+                      <Target className="w-3.5 h-3.5" />
+                      <span>{isRecordingCal ? 'Recording...' : 'Record Sample Frame'}</span>
+                    </button>
+                    <button
+                      onClick={handleResetCalibration}
+                      disabled={!calStats || calStats.total_samples === 0}
+                      className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 font-bold text-xs"
+                      title="Reset calibration session samples"
+                    >
+                      Reset
+                    </button>
+                  </div>
                   <button
-                    onClick={handleRecordCalibrationSample}
+                    onClick={handleSendToRecognitionLab}
                     disabled={!isRunning || isRecordingCal}
-                    className="flex-1 py-2.5 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-md"
+                    className="w-full py-2 px-3 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 font-bold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all"
                   >
-                    <Target className="w-3.5 h-3.5" />
-                    <span>{isRecordingCal ? 'Recording...' : 'Record Sample Frame'}</span>
-                  </button>
-                  <button
-                    onClick={handleResetCalibration}
-                    disabled={!calStats || calStats.total_samples === 0}
-                    className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 font-bold text-xs"
-                    title="Reset calibration session samples"
-                  >
-                    Reset
+                    <FlaskConical className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Send Crop to Recognition Lab</span>
                   </button>
                 </div>
 

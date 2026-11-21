@@ -856,4 +856,69 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+
+  async recordRecognitionLabSample(payload: {
+    expected_barcode: string;
+    image_data_url: string;
+    angle_label?: string;
+    source?: string;
+    filename?: string;
+  }) {
+    return request<{
+      status: string;
+      sample: any;
+      message: string;
+    }>('/vision/recognition-lab/sample', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getRecognitionLabResults() {
+    return request<{
+      total_samples: number;
+      unique_products_count: number;
+      overall_top1_accuracy: number;
+      samples: any[];
+      per_product_accuracy: Array<{
+        barcode: string;
+        product_name: string;
+        sample_count: number;
+        correct_top1_count: number;
+        accuracy_percent: number;
+        avg_score_scanned: number;
+        avg_margin: number;
+      }>;
+      sensitivity_matrix: Array<{
+        threshold: number;
+        margin: number;
+        true_accepts: number;
+        false_rejects: number;
+        false_reject_rate: number;
+        false_accepts: number;
+        false_accept_rate: number;
+        total_samples_evaluated: number;
+      }>;
+      confusion_matrix: {
+        labels: string[];
+        matrix: Array<{
+          expected: string;
+          predictions: number[];
+        }>;
+      };
+      data_origin_statement: string;
+    }>('/vision/recognition-lab/results');
+  },
+
+  async resetRecognitionLab() {
+    return request<{ status: string; cleared_count: number; message: string }>('/vision/recognition-lab/reset', {
+      method: 'POST',
+    });
+  },
+
+  async deleteRecognitionLabSample(sampleId: string) {
+    return request<{ status: string; sample_id: string }>(`/vision/recognition-lab/sample/${sampleId}`, {
+      method: 'DELETE',
+    });
+  },
 };

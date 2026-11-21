@@ -1147,3 +1147,141 @@ def save_debug_frame(
         "product_name": req.product_name,
         "saved_at": datetime.utcnow().isoformat()
     }
+
+
+# =========================================================================
+# Recognition Lab (Phase 0: Measure First from Real User Photos)
+# =========================================================================
+
+class RecognitionLabSampleRequest(BaseModel):
+    expected_barcode: str
+    image_data_url: str
+    angle_label: Optional[str] = "OVERHEAD"
+    source: Optional[str] = "upload"
+    filename: Optional[str] = "photo.jpg"
+
+
+@router.post("/recognition-lab/sample")
+def record_recognition_lab_sample(
+    req: RecognitionLabSampleRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Evaluates a single test photo crop for the Recognition Lab using the exact cart camera pipeline.
+    Computes expected product score, top-1 and top-2 candidates, score_scanned, best_other, and margin.
+    """
+    from app.services.recognition_lab_service import recognition_lab_service
+
+    if not req.image_data_url or len(req.image_data_url) < 50:
+        raise HTTPException(status_code=400, detail="Invalid photo data provided.")
+
+    raw_b64 = req.image_data_url
+    if "," in raw_b64:
+        raw_b64 = raw_b64.split(",", 1)[1]
+
+    try:
+        raw_bytes = base64.b64decode(raw_b64)
+        pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to decode photo image: {e}")
+
+    sample = recognition_lab_service.evaluate_and_record_photo(
+        db=db,
+        image_pil=pil_img,
+        expected_barcode=req.expected_barcode,
+        filename=req.filename or "photo.jpg",
+        angle_label=req.angle_label or "OVERHEAD",
+        source=req.source or "upload"
+    )
+
+    return {
+        "status": "SUCCESS",
+        "sample": sample,
+        "message": f"Sample evaluated: {sample['expected_product_name']} (Top-1: {sample['top1_product_name']} {sample['top1_score']*100:.1f}%, margin: {sample['margin']:.2f})"
+    }
+
+
+@router.post("/recognition-lab/upload")
+async def upload_recognition_lab_file(
+    expected_barcode: str = Form(...),
+    angle_label: Optional[str] = Form("OVERHEAD"),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Multipart upload for Recognition Lab test photos.
+    """
+    from app.services.recognition_lab_service import recognition_lab_service
+
+    try:
+        contents = await file.read()
+        pil_img = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image file uploaded: {e}")
+
+    sample = recognition_lab_service.evaluate_and_record_photo(
+        db=db,
+        image_pil=pil_img,
+        expected_barcode=expected_barcode,
+        filename=file.filename or "uploaded_photo.jpg",
+        angle_label=angle_label or "OVERHEAD",
+        source="upload"
+    )
+
+    return {
+        "status": "SUCCESS",
+        "sample": sample,
+        "message": f"File '{file.filename}' evaluated: Top-1 match {sample['top1_product_name']} ({sample['top1_score']*100:.1f}%)"
+    }
+
+
+@router.get("/recognition-lab/results")
+def get_recognition_lab_results(
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Returns full Recognition Lab report:
+    - All recorded test photo evaluations
+    - Per-product accuracy breakdown
+    - False Accept and False Reject matrix across thresholds (0.50 - 0.90) and margins (0.05 - 0.15)
+    - Empirical confusion table
+    """
+    from app.services.recognition_lab_service import recognition_lab_service
+    return recognition_lab_service.get_analysis_report()
+
+
+@router.post("/recognition-lab/reset")
+def reset_recognition_lab(
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Clears all recorded Recognition Lab test photos and analysis data.
+    """
+    from app.services.recognition_lab_service import recognition_lab_service
+    count = recognition_lab_service.reset_all()
+    return {
+        "status": "RESET",
+        "cleared_count": count,
+        "message": f"Recognition Lab reset. {count} samples cleared."
+    }
+
+
+@router.delete("/recognition-lab/sample/{sample_id}")
+def delete_recognition_lab_sample(
+    sample_id: str,
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Deletes a single test photo sample from the Recognition Lab.
+    """
+    from app.services.recognition_lab_service import recognition_lab_service
+    deleted = recognition_lab_service.delete_sample(sample_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Sample ID not found in Recognition Lab.")
+    return {
+        "status": "DELETED",
+        "sample_id": sample_id
+    }
+
