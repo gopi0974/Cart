@@ -823,6 +823,13 @@ export const api = {
       empty_reference_present: boolean;
       total_judgements: number;
       session_alerts?: any[];
+      recent_close_events?: Array<{
+        closed_at: string;
+        code: number;
+        reason: string;
+        cart_id: string;
+        cart_number: string;
+      }>;
       traces: any[];
     }>(`/admin/carts/${cartId}/verification-trace?limit=${limit}`);
   },

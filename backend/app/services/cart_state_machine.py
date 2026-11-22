@@ -703,12 +703,13 @@ class CartStateMachine:
                 )
                 return None
 
+        alert_type_val = "UNSCANNED_ITEM" if violation_type == ViolationType.UNSCANNED_ADD else violation_type.value
         existing = (
             db.query(Alert)
             .filter(
                 Alert.session_id == session_id,
                 Alert.status == "OPEN",
-                Alert.violation_type == violation_type.value,
+                (Alert.violation_type == violation_type.value) | (Alert.alert_type == alert_type_val),
                 Alert.item_id == item_id,
             )
             .first()
@@ -717,6 +718,8 @@ class CartStateMachine:
         if existing:
             # Update existing alert in-place
             existing.message = message
+            existing.alert_type = alert_type_val
+            existing.violation_type = violation_type.value
             if evidence_path:
                 existing.evidence_path = evidence_path
                 existing.evidence_snapshot_url = evidence_path
@@ -729,7 +732,7 @@ class CartStateMachine:
             cart_id=cart_id,
             session_id=session_id,
             item_id=item_id,
-            alert_type=violation_type.value,
+            alert_type=alert_type_val,
             violation_type=violation_type.value,
             severity="HIGH",
             message=message,
@@ -940,3 +943,48 @@ class CartStateMachine:
         db.add(item)
         db.flush()
         return item
+
+    # --------------------------------------------------------------------------
+    # SCHEMA READINESS GUARD
+    # --------------------------------------------------------------------------
+    _schema_readiness_cache: dict[str, Any] = {"ready": None, "checked_at": 0.0, "reason": ""}
+
+    @classmethod
+    def check_schema_readiness(cls, db: Session) -> tuple[bool, str]:
+        """Verify required migration columns exist before judging writes them.
+
+        Cached for 60 seconds to minimize database reflection overhead.
+        """
+        import time
+        from sqlalchemy import inspect
+
+        now = time.time()
+        if cls._schema_readiness_cache["ready"] is not None and (now - cls._schema_readiness_cache["checked_at"] < 60.0):
+            return cls._schema_readiness_cache["ready"], cls._schema_readiness_cache["reason"]
+
+        try:
+            bind = db.get_bind()
+            if bind.dialect.name == "sqlite":
+                return True, "Schema ready (sqlite)"
+            inspector = inspect(bind)
+            required_cols = {
+                "cart_items": ["crop_embedding", "bounding_box", "last_known_crop_path"],
+                "alerts": ["violation_type", "evidence_path"],
+                "cart_sessions": ["cart_empty_verified"],
+            }
+            for table, cols in required_cols.items():
+                existing_cols = {c["name"] for c in inspector.get_columns(table)}
+                missing = [c for c in cols if c not in existing_cols]
+                if missing:
+                    reason = f"Database schema missing columns in table '{table}': {missing}. Migration pending on live database."
+                    cls._schema_readiness_cache = {"ready": False, "checked_at": now, "reason": reason}
+                    logger.warning(f"Schema readiness check failed: {reason}")
+                    return False, reason
+
+            cls._schema_readiness_cache = {"ready": True, "checked_at": now, "reason": "Schema ready"}
+            return True, "Schema ready"
+        except Exception as e:
+            reason = f"Schema check inspection error: {str(e)}"
+            cls._schema_readiness_cache = {"ready": False, "checked_at": now, "reason": reason}
+            logger.warning(reason)
+            return False, reason

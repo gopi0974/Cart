@@ -339,6 +339,13 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
     except Exception:
         pass
 
+    judgement_mem = {}
+    try:
+        from app.services.device_watchdog import get_judgement_memory_metrics
+        judgement_mem = get_judgement_memory_metrics()
+    except Exception:
+        pass
+
     # Fall back to DB last_job_data if worker hasn't processed a scan job during this process runtime
     if not worker_metrics.get("last_job_id") and last_job_data:
         worker_metrics["last_job_id"] = last_job_data["id"]
@@ -431,6 +438,8 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
         "embed_ms_avg": metrics["embed_ms_avg"],
         "scan_worker_metrics": worker_metrics,
         "memory_rss_mb": memory_rss_mb,
+        "memory_peak_judgement_mb": judgement_mem.get("memory_peak_judgement_mb", 0.0),
+        "memory_judgement_active": judgement_mem.get("memory_judgement_active", False),
         "ram_budget_mb": 512.0,
         "demo_mode": settings.DEMO_MODE,
         "use_mock": settings.USE_MOCK,

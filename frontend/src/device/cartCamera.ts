@@ -341,15 +341,27 @@ export class CartCameraManager {
           return;
         }
 
-        this.config.onStatusChange('OFFLINE', 'Connection lost');
-        this.config.onLog(`WebSocket closed (${event.code}). Attempting reconnect...`, 'warn');
+        const closeCode = event.code;
+        const closeReason = event.reason || (
+          event.code === 1006 ? 'Abnormal closure (network drop / server restarted)' :
+          event.code === 1000 ? 'Normal closure' : 'Connection closed'
+        );
+
+        // Exponential backoff with random jitter: base 1s * (1.5 ^ attempts) + jitter (0-500ms), max 10s
+        const baseDelay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 10000);
+        const jitter = Math.floor(Math.random() * 500);
+        const delayMs = Math.round(baseDelay + jitter);
+        const delaySec = Math.max(1, Math.round(delayMs / 1000));
+
+        const retryMsg = `Server restarting, retrying in ${delaySec} seconds`;
+        this.config.onStatusChange('RECONNECTING', retryMsg);
+        this.config.onLog(`WebSocket closed (${closeCode}: ${closeReason}). ${retryMsg}...`, 'warn');
 
         if (this.isRunning) {
-          const delay = Math.min(1000 * Math.pow(1.5, this.reconnectAttempts), 8000);
           this.reconnectAttempts++;
           this.reconnectTimer = setTimeout(() => {
             this.connectWebSocket();
-          }, delay);
+          }, delayMs);
         }
       };
     } catch (err: any) {

@@ -700,6 +700,7 @@ def get_cart_verification_trace(
                 "recreated_after": recreated_after
             })
 
+    from app.services.device_watchdog import get_recent_close_events
     return {
         "cart_id": cart.id,
         "cart_number": cart.cart_number,
@@ -707,6 +708,7 @@ def get_cart_verification_trace(
         "empty_reference_present": tracker.ref_background is not None,
         "total_judgements": len(traces_final),
         "session_alerts": session_alerts,
+        "recent_close_events": get_recent_close_events(cart.id),
         "traces": traces_final
     }
 

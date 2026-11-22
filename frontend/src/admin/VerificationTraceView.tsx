@@ -38,6 +38,7 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
 
   const [traces, setTraces] = useState<any[]>([]);
   const [sessionAlerts, setSessionAlerts] = useState<any[]>([]);
+  const [closeEvents, setCloseEvents] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [runningNow, setRunningNow] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +69,7 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
       const resp = await api.getCartVerificationTrace(activeCart.id, 20);
       setTraces(resp.traces || []);
       setSessionAlerts(resp.session_alerts || []);
+      setCloseEvents(resp.recent_close_events || []);
       if (resp.traces && resp.traces.length > 0 && !expandedTraceId) {
         setExpandedTraceId(resp.traces[0].id);
       }
@@ -382,6 +384,62 @@ export const VerificationTraceView: React.FC<Props> = ({ cart, onBack }) => {
                         <td className="py-2 px-2 font-sans text-slate-700 dark:text-slate-300 truncate max-w-xs" title={alt.message}>
                           {alt.message}
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* WebSocket Disconnect History (Last 20 Events) */}
+          <div className="p-4 bg-white dark:bg-[#131B2E] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-rose-500" />
+                WebSocket Disconnect History ({closeEvents.length})
+              </span>
+              <span className="text-[11px] text-slate-400 font-mono">
+                Last 20 WebSocket disconnects recorded on server for {activeCart?.cart_number}
+              </span>
+            </div>
+
+            {closeEvents.length === 0 ? (
+              <div className="py-2 text-center text-xs text-slate-400">
+                No WebSocket close events recorded for this cart.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-100 dark:border-slate-800 text-[10px] uppercase font-semibold text-slate-400 tracking-wider">
+                      <th className="py-2 px-2">Time</th>
+                      <th className="py-2 px-2">Code</th>
+                      <th className="py-2 px-2">Classification</th>
+                      <th className="py-2 px-2">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-mono text-[11px]">
+                    {closeEvents.map((evt: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30">
+                        <td className="py-2 px-2 text-slate-400">
+                          {evt.closed_at ? new Date(evt.closed_at).toLocaleTimeString() : 'N/A'}
+                        </td>
+                        <td className="py-2 px-2 font-bold">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] ${
+                            evt.code === 1000
+                              ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                              : evt.code === 1006
+                              ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
+                              : 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'
+                          }`}>
+                            {evt.code}
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 font-semibold text-slate-700 dark:text-slate-300">
+                          {evt.code === 1006 ? 'Abnormal Closure (Network / Proxy timeout)' : evt.code === 1000 ? 'Normal Close' : 'Protocol Close'}
+                        </td>
+                        <td className="py-2 px-2 text-slate-600 dark:text-slate-400">{evt.reason}</td>
                       </tr>
                     ))}
                   </tbody>

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections import deque
 from datetime import datetime
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
@@ -16,10 +17,48 @@ cart_device_last_seen: Dict[str, datetime] = {}
 cart_frame_timestamps: Dict[str, List[float]] = {}
 # Single latest frame per cart for staff "Test camera" preview (never stored to disk or DB)
 cart_latest_frames: Dict[str, dict] = {}
+# Ring buffer tracking last 20 close events per cart
+cart_close_events: Dict[str, deque] = {}
+
+# Global memory tracking for judging process
+_peak_judgement_memory_mb: float = 0.0
+_is_judging_active: bool = False
 
 def record_device_activity(cart_id: str):
     """Record heartbeat, motion, or frame activity timestamp in memory."""
     cart_device_last_seen[cart_id] = datetime.utcnow()
+
+def record_device_close(cart_id: str, cart_number: str, code: int, reason: Optional[str] = None):
+    """Record WebSocket close event with code and reason into rolling 20-event buffer."""
+    if cart_id not in cart_close_events:
+        cart_close_events[cart_id] = deque(maxlen=20)
+    event = {
+        "closed_at": datetime.utcnow().isoformat(),
+        "code": code,
+        "reason": reason or ("Abnormal closure / network cut" if code == 1006 else "Normal close" if code == 1000 else "Connection closed"),
+        "cart_id": cart_id,
+        "cart_number": cart_number
+    }
+    cart_close_events[cart_id].appendleft(event)
+    logger.info(f"[{cart_number}] Logged WebSocket close event: code={code}, reason='{event['reason']}'")
+
+def get_recent_close_events(cart_id: str) -> List[dict]:
+    """Retrieve last 20 WebSocket close events for a cart."""
+    return list(cart_close_events.get(cart_id, []))
+
+def record_judgement_memory(rss_mb: float, active: bool = False):
+    """Record peak memory RSS during a verification judgement."""
+    global _peak_judgement_memory_mb, _is_judging_active
+    _is_judging_active = active
+    if rss_mb > _peak_judgement_memory_mb:
+        _peak_judgement_memory_mb = round(rss_mb, 1)
+
+def get_judgement_memory_metrics() -> dict:
+    """Return live peak judgement memory metrics for /admin/system-health."""
+    return {
+        "memory_peak_judgement_mb": _peak_judgement_memory_mb,
+        "memory_judgement_active": _is_judging_active
+    }
 
 def record_device_frame(cart_id: str, frame_data: Optional[str] = None, is_reference: bool = False):
     """Record incoming frame for rolling frames-per-minute metric and staff test preview."""

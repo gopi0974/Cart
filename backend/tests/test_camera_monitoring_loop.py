@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.database import Base
 from app.models.alert import Alert
@@ -39,7 +40,11 @@ from app.websocket.device_handler import (
 @pytest.fixture
 def db_session():
     """In-memory SQLite database for camera monitoring loop testing."""
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool
+    )
     Base.metadata.create_all(bind=engine)
     TestingSession = sessionmaker(bind=engine)
     session = TestingSession()
