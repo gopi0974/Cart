@@ -152,7 +152,8 @@ class SessionService:
             cart_id=cart.id,
             session_token=secrets.token_urlsafe(32),
             customer_phone=customer_phone,
-            status="ACTIVE"
+            status="ACTIVE",
+            cart_empty_verified=False if not settings.DEMO_MODE else True,
         )
         db.add(session)
         cart.status = "ACTIVE"
@@ -365,6 +366,18 @@ class SessionService:
             product = db.query(Product).filter(Product.barcode.ilike(clean_barcode)).first()
         if not product:
             raise ValueError(f"Product with barcode '{barcode}' not found in supermarket catalog.")
+
+        # R1, R2, R5, R6: Server-side state machine scan validation
+        from app.services.cart_state_machine import CartStateMachine
+        cart = session.cart
+        camera_online = (cart.camera_status == "ONLINE") if cart else False
+        CartStateMachine.validate_can_scan(
+            session=session,
+            db=db,
+            cart_empty_verified=session.cart_empty_verified or settings.DEMO_MODE,
+            cart_camera_online=camera_online or settings.DEMO_MODE,
+            has_reference=True,
+        )
 
         # Create cart item with status PENDING
         item = CartItem(

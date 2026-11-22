@@ -17,6 +17,7 @@ from app.schemas.session import (
 from app.schemas.transaction import CheckoutRequest, ReceiptResponse
 from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
+from app.services.cart_state_machine import ScanBlockedError
 
 router = APIRouter(prefix="/shopper", tags=["Shopper Mobile App"])
 
@@ -149,6 +150,15 @@ async def scan_item(req: ScanItemRequest, session: CartSession = Depends(verify_
     try:
         item = await SessionService.scan_item(db, session.id, req.barcode)
         return _format_item_response(item)
+    except ScanBlockedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": e.message,
+                "reason_code": e.reason_code.value if hasattr(e.reason_code, "value") else str(e.reason_code),
+                "details": e.details,
+            }
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

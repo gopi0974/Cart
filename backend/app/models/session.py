@@ -23,6 +23,11 @@ class CartSession(Base):
     total_amount = Column(Float, default=0.0)
     item_count = Column(Integer, default=0)
 
+    # R1: Empty cart verification at session start
+    cart_empty_verified = Column(Boolean, default=True, nullable=False)
+    empty_override_by = Column(String(36), ForeignKey("users.id"), nullable=True)
+    empty_override_reason = Column(Text, nullable=True)
+
     # Relationships
     cart = relationship("Cart", back_populates="sessions")
     items = relationship("CartItem", back_populates="session", cascade="all, delete-orphan")
@@ -56,6 +61,11 @@ class CartItem(Base):
     top2_score = Column(Float, nullable=True)
     matched_product_id = Column(String(36), ForeignKey("products.id"), nullable=True)
     verification_evidence_url = Column(Text, nullable=True)
+
+    # R3 & R4: Cart-state memory snapshot (crop embedding vector, bounding box, crop image path)
+    crop_embedding = Column(Text, nullable=True)
+    bounding_box = Column(Text, nullable=True)
+    last_known_crop_path = Column(Text, nullable=True)
 
     staff_approved = Column(Boolean, default=False, nullable=False)
     staff_approved_at = Column(DateTime, nullable=True)

@@ -13,9 +13,11 @@ class Alert(Base):
     session_id = Column(String(36), ForeignKey("cart_sessions.id"), nullable=True, index=True)
     item_id = Column(String(36), ForeignKey("cart_items.id"), nullable=True, index=True)
     alert_type = Column(String(50), nullable=False)  # UNSCANNED_ITEM, MISMATCH_ITEM, REMOVAL_WITHOUT_RESCAN, CAMERA_OCCLUSION, CART_OFFLINE, NEEDS_STAFF_CHECK
+    violation_type = Column(String(50), nullable=True)  # R6: UNSCANNED_ADD, UNAUTHORIZED_REMOVE, WRONG_ITEM_REMOVED, CART_NOT_EMPTY_AT_START
     severity = Column(String(20), nullable=False, default="MEDIUM")  # LOW, MEDIUM, HIGH, CRITICAL
     message = Column(Text, nullable=False)
     evidence_snapshot_url = Column(Text, nullable=True)
+    evidence_path = Column(Text, nullable=True)  # R6: Private storage path to cropped evidence (never faces)
     status = Column(String(20), nullable=False, default="OPEN", index=True)  # OPEN, IN_REVIEW, RESOLVED, DISMISSED
     resolved_by = Column(String(36), ForeignKey("users.id"), nullable=True)
     resolution_notes = Column(Text, nullable=True)
