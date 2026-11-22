@@ -100,6 +100,21 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
           if (evtType === 'ITEM_VERIFIED') {
             audioFeedback.playItemVerified();
             refreshSession();
+          } else if (evtType === 'CART_NOT_EMPTY') {
+            audioFeedback.playWarning();
+            setRemovalToast('Please empty the cart.');
+            setTimeout(() => setRemovalToast(null), 4000);
+            refreshSession();
+          } else if (evtType === 'CART_EMPTY_VERIFIED') {
+            audioFeedback.playItemVerified();
+            setRemovalToast('Cart verified empty. Ready to scan items.');
+            setTimeout(() => setRemovalToast(null), 3000);
+            refreshSession();
+          } else if (evtType === 'ITEM_REMOVED') {
+            audioFeedback.playItemVerified();
+            setRemovalToast(payload.message || 'Item removed from cart.');
+            setTimeout(() => setRemovalToast(null), 3500);
+            refreshSession();
           } else if (
             evtType === 'ITEM_MISMATCH' ||
             evtType === 'UNSCANNED_ITEM_DETECTED' ||
@@ -313,6 +328,33 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
   };
 
   const openAddScanner = () => {
+    // R1: Check empty cart verified
+    const hasCartNotEmptyAlert = session.active_warnings?.some(w => w.type === 'CART_NOT_EMPTY_AT_START');
+    if (session.cart_empty_verified === false || hasCartNotEmptyAlert) {
+      setRemovalToast('Please empty the cart first.');
+      setTimeout(() => setRemovalToast(null), 3500);
+      audioFeedback.playWarning();
+      return;
+    }
+
+    // R2: One pending at a time
+    const hasPendingItem = session.items?.some(i => i.status === 'PENDING');
+    if (hasPendingItem) {
+      setRemovalToast('Place the scanned item first.');
+      setTimeout(() => setRemovalToast(null), 3500);
+      audioFeedback.playWarning();
+      return;
+    }
+
+    // R5: Cannot scan while an item is REMOVING
+    const hasRemovingItem = session.items?.some(i => i.status === 'REMOVING' || i.status === 'REMOVED_PENDING_RESCAN');
+    if (hasRemovingItem) {
+      setRemovalToast('Item removal in progress. Complete removal first.');
+      setTimeout(() => setRemovalToast(null), 3500);
+      audioFeedback.playWarning();
+      return;
+    }
+
     setScannerMode('ADD');
     setScannerOpen(true);
   };
@@ -635,8 +677,31 @@ export const ActiveCartView: React.FC<Props> = ({ session: initialSession, onDis
 
                       {item.status === 'PENDING' && (() => {
                         const elapsedSec = item.scanned_at ? (Date.now() - new Date(item.scanned_at).getTime()) / 1000 : 0;
+                        const isPast60s = elapsedSec >= 60;
                         const isDelayed = elapsedSec > 15;
                         const reason = item.pending_reason || (session.camera_status === 'OFFLINE' ? 'camera offline' : 'waiting for steady placement');
+
+                        if (isPast60s) {
+                          return (
+                            <div className="flex flex-col gap-1.5 w-full p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-900 dark:text-amber-200">
+                              <div className="flex items-center justify-between">
+                                <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-300">
+                                  <Clock className="w-4 h-4 text-amber-600 animate-pulse shrink-0" />
+                                  <span>Reminder: Place scanned item</span>
+                                </span>
+                                <button
+                                  onClick={() => handleInitiateRemove(item)}
+                                  className="text-[11px] font-semibold text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-950/60 hover:bg-red-200 px-2.5 py-1 rounded-lg border border-red-300 dark:border-red-800 transition-colors"
+                                >
+                                  Cancel item
+                                </button>
+                              </div>
+                              <p className="text-[11px] leading-relaxed font-medium">
+                                Please place '{item.product_name}' in the cart or tap Cancel to remove it ({Math.floor(elapsedSec)}s elapsed).
+                              </p>
+                            </div>
+                          );
+                        }
 
                         return isDelayed ? (
                           <div className="flex flex-col gap-1 w-full">

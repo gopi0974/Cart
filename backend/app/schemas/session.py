@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -39,6 +39,11 @@ class ActiveWarning(BaseModel):
     action_required: str
     item_id: Optional[str] = None
     product_name: Optional[str] = None
+    evidence_url: Optional[str] = None
+    confidence: Optional[float] = None
+    last_known_image: Optional[str] = None
+    current_evidence: Optional[str] = None
+    top_candidates: Optional[List[Dict[str, Any]]] = None
 
 class SessionResponse(BaseModel):
     id: str

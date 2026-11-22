@@ -18,6 +18,8 @@ export interface CartItem {
   top1_score?: number;
   top2_score?: number;
   verification_evidence_url?: string;
+  last_known_crop_path?: string;
+  bounding_box?: string;
   pending_reason?: string;
   staff_approved?: boolean;
   staff_approved_at?: string;
@@ -25,12 +27,17 @@ export interface CartItem {
 }
 
 export interface ActiveWarning {
-  type: 'UNSCANNED_ITEM' | 'MISMATCH_ITEM' | 'REMOVAL_WITHOUT_RESCAN' | 'ITEM_REMOVING' | 'REMOVED_PENDING_RESCAN' | 'WARNING_ITEM' | 'PENDING_ITEM' | 'FACE_IN_PACKAGING_WITHHELD' | 'NEEDS_STAFF_CHECK';
+  type: string;
   message: string;
   target_barcode?: string;
   action_required: string;
   item_id?: string;
   product_name?: string;
+  confidence?: number;
+  last_known_image?: string;
+  evidence_url?: string;
+  current_evidence?: string;
+  top_candidates?: Array<{ item_id?: string; product_name: string; missing_confidence?: number }>;
 }
 
 export interface CartSession {
@@ -39,6 +46,8 @@ export interface CartSession {
   cart_number: string;
   session_token?: string;
   camera_status?: 'ONLINE' | 'OFFLINE';
+  cart_empty_verified?: boolean;
+  unstable_motion?: boolean;
   status: 'ACTIVE' | 'COMPLETED' | 'ABANDONED';
   started_at: string;
   subtotal_amount: number;

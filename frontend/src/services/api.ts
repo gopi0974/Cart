@@ -84,6 +84,8 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retries =
           const errorBody = await response.json();
           if (typeof errorBody.detail === 'string') {
             errorDetail = errorBody.detail;
+          } else if (errorBody.detail && typeof errorBody.detail === 'object') {
+            errorDetail = errorBody.detail.message || errorBody.detail.reason_code || JSON.stringify(errorBody.detail);
           } else if (Array.isArray(errorBody.detail)) {
             errorDetail = errorBody.detail.map((d: any) => d.msg || d.detail || JSON.stringify(d)).join(', ');
           } else if (errorBody.message) {
