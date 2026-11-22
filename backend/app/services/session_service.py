@@ -310,23 +310,36 @@ class SessionService:
                     "product_name": itm.product.name
                 })
 
-        # Check for open removal or unscanned warnings in alerts
+        # Check for open removal, violation, or unscanned warnings in alerts
         seen_warning_item_ids = {w.get("item_id") for w in active_warnings if w.get("item_id")}
         unresolved_alerts = db.query(Alert).filter(
             Alert.session_id == session.id,
-            Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "UNSCANNED_ITEM", "NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD"]),
             Alert.status == "OPEN"
         ).all()
 
         for r_alert in unresolved_alerts:
             if r_alert.item_id and r_alert.item_id in seen_warning_item_ids:
                 continue
+
+            v_type = r_alert.violation_type or r_alert.alert_type
+            if v_type in ("UNSCANNED_ADD", "UNSCANNED_ITEM"):
+                act = "SCAN_BARCODE"
+            elif v_type in ("UNAUTHORIZED_REMOVE", "REMOVAL_WITHOUT_RESCAN"):
+                act = "REPLACE_ITEM_OR_CALL_STAFF"
+            elif v_type == "CART_NOT_EMPTY_AT_START":
+                act = "EMPTY_CART"
+            elif v_type in ("NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD"):
+                act = "CALL_STAFF"
+            else:
+                act = "RESCAN_OR_CALL_STAFF"
+
             active_warnings.append({
-                "type": r_alert.alert_type,
+                "type": v_type,
                 "message": r_alert.message,
                 "target_barcode": None,
-                "action_required": "SCAN_BARCODE" if r_alert.alert_type == "UNSCANNED_ITEM" else "CALL_STAFF" if r_alert.alert_type in ("NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD") else "RESCAN_TO_REMOVE",
-                "item_id": r_alert.item_id
+                "action_required": act,
+                "item_id": r_alert.item_id,
+                "evidence_url": r_alert.evidence_path or r_alert.evidence_snapshot_url
             })
 
         is_camera_online = (cart.camera_status == "ONLINE") if cart else False

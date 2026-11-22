@@ -642,6 +642,12 @@ class CartStateMachine:
                     return False
 
         item.status = "REMOVED"
+        db.flush()
+        from app.models.session import CartSession
+        from app.services.session_service import SessionService
+        sess = item.session or db.query(CartSession).filter(CartSession.id == item.session_id).first()
+        if sess:
+            SessionService.recalculate_session_totals(db, sess)
         db.commit()
         logger.info("R5: Camera confirmed removal of item %s. Dropped from bill.", item.id)
         return True
@@ -668,12 +674,35 @@ class CartStateMachine:
         message: str,
         evidence_path: str | None = None,
         item_id: str | None = None,
-    ) -> Alert:
+    ) -> Alert | None:
         """Creates or updates a single open violation alert (R6).
 
         Enforces: exactly ONE open alert per (session, violation_type, item).
         Never creates duplicate open alerts.
+        Enforces: resolved violation cannot be re-created within 60s cooldown (R8).
         """
+        # 1. Check 60s cooldown against previously resolved violations for this session/condition (R8)
+        recent_resolved = (
+            db.query(Alert)
+            .filter(
+                Alert.session_id == session_id,
+                Alert.status.in_(["RESOLVED", "DISMISSED"]),
+                Alert.violation_type == violation_type.value,
+                Alert.item_id == item_id,
+            )
+            .order_by(Alert.resolved_at.desc())
+            .first()
+        )
+        if recent_resolved and recent_resolved.resolved_at:
+            if not cls.can_recreate_violation(recent_resolved.resolved_at):
+                logger.info(
+                    "R8: Suppressed recreating violation %s for session %s (item %s) within 60s cooldown.",
+                    violation_type.value,
+                    session_id,
+                    item_id,
+                )
+                return None
+
         existing = (
             db.query(Alert)
             .filter(

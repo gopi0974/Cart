@@ -393,13 +393,25 @@ async def process_camera_frame(
                 })
             else:
                 if block_reason == ScanBlockReason.CART_NOT_EMPTY:
-                    CartStateMachine.record_violation(
+                    v_alert = CartStateMachine.record_violation(
                         db=db,
                         session_id=active_session.id,
                         cart_id=cart_id,
                         violation_type=ViolationType.CART_NOT_EMPTY_AT_START,
                         message=empty_msg
                     )
+                    if v_alert:
+                        await ws_manager.broadcast_to_admin("NEW_INCIDENT_ALERT", {
+                            "id": v_alert.id,
+                            "cart_id": cart_id,
+                            "cart_number": cart_number,
+                            "session_id": active_session.id,
+                            "alert_type": "CART_NOT_EMPTY_AT_START",
+                            "violation_type": "CART_NOT_EMPTY_AT_START",
+                            "severity": "HIGH",
+                            "message": empty_msg,
+                            "created_at": v_alert.created_at.isoformat()
+                        })
                     await ws_manager.broadcast_to_cart(cart_id, "CART_NOT_EMPTY", {
                         "message": "Please empty the cart. Remove any items inside before scanning."
                     })
@@ -546,6 +558,8 @@ async def process_camera_frame(
                     "product_name": matched_itm.product.name,
                     "barcode": matched_itm.product.barcode,
                     "status": "REMOVED",
+                    "subtotal": active_session.subtotal_amount,
+                    "total": active_session.total_amount,
                     "message": f"'{matched_itm.product.name}' removed from cart."
                 })
                 await websocket.send_json({
@@ -562,7 +576,7 @@ async def process_camera_frame(
                 )
                 ev_url = object_detector.save_evidence_snapshot(img_bgr, status="UNAUTHORIZED_REMOVE")
                 alert_msg = f"This item appears to have been removed: {missing_snap.product_name}"
-                CartStateMachine.record_violation(
+                v_alert = CartStateMachine.record_violation(
                     db=db,
                     session_id=active_session.id,
                     cart_id=cart_id,
@@ -571,19 +585,92 @@ async def process_camera_frame(
                     evidence_path=ev_url,
                     item_id=missing_snap.item_id
                 )
+                if v_alert and missing_conf < 0.65 and top_cands:
+                    from app.models.alert import ReviewCase
+                    existing_case = db.query(ReviewCase).filter(ReviewCase.alert_id == v_alert.id).first()
+                    if not existing_case:
+                        rc = ReviewCase(
+                            alert_id=v_alert.id,
+                            cart_id=cart_id,
+                            confidence=missing_conf,
+                            evidence_image_url=ev_url or (missing_snap.last_known_crop_path or ""),
+                            top_candidates_json=json.dumps([{
+                                "item_id": c["item_id"],
+                                "product_name": c["product_name"],
+                                "missing_confidence": c["missing_confidence"]
+                            } for c in top_cands]),
+                            status="PENDING"
+                        )
+                        db.add(rc)
+                        db.commit()
+
+                if v_alert:
+                    await ws_manager.broadcast_to_admin("NEW_INCIDENT_ALERT", {
+                        "id": v_alert.id,
+                        "cart_id": cart_id,
+                        "cart_number": cart_number,
+                        "session_id": active_session.id,
+                        "alert_type": "UNAUTHORIZED_REMOVE",
+                        "violation_type": "UNAUTHORIZED_REMOVE",
+                        "severity": "HIGH",
+                        "message": alert_msg,
+                        "item_id": missing_snap.item_id,
+                        "product_name": missing_snap.product_name,
+                        "confidence": missing_conf,
+                        "last_known_image": missing_snap.last_known_crop_path,
+                        "evidence_snapshot_url": ev_url,
+                        "requires_staff_review": missing_conf < 0.65,
+                        "top_candidates": top_cands if missing_conf < 0.65 else None,
+                        "created_at": v_alert.created_at.isoformat()
+                    })
+
                 await ws_manager.broadcast_to_cart(cart_id, "ITEM_REMOVAL_DETECTED", {
                     "message": alert_msg,
                     "item_id": missing_snap.item_id,
                     "product_name": missing_snap.product_name,
                     "confidence": missing_conf,
                     "last_known_image": missing_snap.last_known_crop_path,
-                    "current_evidence": ev_url
+                    "current_evidence": ev_url,
+                    "top_candidates": top_cands if missing_conf < 0.65 else None
                 })
                 await websocket.send_json({
                     "type": "verification_result",
                     "action": "UNAUTHORIZED_REMOVE_DETECTED",
                     "product_name": missing_snap.product_name,
                     "confidence": missing_conf
+                })
+
+        # R8: Automatic clearance when cart view matches the scanned list over a stable window
+        if not full_match.unmatched_items and not full_match.unmatched_objects and not has_pending:
+            open_violations = (
+                db.query(Alert)
+                .filter(
+                    Alert.session_id == active_session.id,
+                    Alert.status == "OPEN",
+                    Alert.violation_type.in_([
+                        ViolationType.UNSCANNED_ADD.value,
+                        ViolationType.UNAUTHORIZED_REMOVE.value,
+                        ViolationType.CART_NOT_EMPTY_AT_START.value,
+                    ]),
+                )
+                .all()
+            )
+            for ov in open_violations:
+                ov.status = "RESOLVED"
+                ov.resolved_at = datetime.utcnow()
+                ov.resolution_notes = "Auto-cleared: cart items match scanned list over stable frame"
+                db.commit()
+                await ws_manager.broadcast_to_cart(cart_id, "ALERT_CLEARED", {
+                    "alert_id": ov.id,
+                    "alert_type": ov.alert_type,
+                    "violation_type": ov.violation_type,
+                    "message": "Cart items match your scanned list."
+                })
+                await ws_manager.broadcast_to_admin("ALERT_RESOLVED", {
+                    "alert_id": ov.id,
+                    "cart_id": cart_id,
+                    "status": "RESOLVED",
+                    "reason": "Auto-cleared: cart items match scanned list"
                 })
 
         # 10. Handle Unmatched Objects (Add Events - R3 & R4.a)
@@ -679,7 +766,7 @@ async def process_camera_frame(
                     pending_item.confidence_score = scanned_score
                     pending_item.verification_evidence_url = evidence_url
                     db.commit()
-                    CartStateMachine.record_violation(
+                    w_alert = CartStateMachine.record_violation(
                         db=db,
                         session_id=active_session.id,
                         cart_id=cart_id,
@@ -688,6 +775,21 @@ async def process_camera_frame(
                         evidence_path=evidence_url,
                         item_id=pending_item.id
                     )
+                    if w_alert:
+                        await ws_manager.broadcast_to_admin("NEW_INCIDENT_ALERT", {
+                            "id": w_alert.id,
+                            "cart_id": cart_id,
+                            "cart_number": cart_number,
+                            "session_id": active_session.id,
+                            "alert_type": "WRONG_ITEM_REMOVED",
+                            "violation_type": "WRONG_ITEM_REMOVED",
+                            "severity": "HIGH",
+                            "message": reason_text,
+                            "evidence_snapshot_url": evidence_url,
+                            "item_id": pending_item.id,
+                            "product_name": pending_item.product.name,
+                            "created_at": w_alert.created_at.isoformat()
+                        })
                     await ws_manager.broadcast_to_cart(cart_id, "ITEM_WARNING", {
                         "item_id": pending_item.id,
                         "product_name": pending_item.product.name,
@@ -791,7 +893,7 @@ async def process_camera_frame(
                 nearest = VectorStoreMatcher.find_nearest_product(db, target_region.embedding, top_k=1)
                 pred_name = nearest[0]["product_name"] if nearest else "Unscanned item"
 
-                CartStateMachine.record_violation(
+                u_alert = CartStateMachine.record_violation(
                     db=db,
                     session_id=active_session.id,
                     cart_id=cart_id,
@@ -799,6 +901,19 @@ async def process_camera_frame(
                     message=f"Unscanned item placed in cart: {pred_name}",
                     evidence_path=ev_url
                 )
+                if u_alert:
+                    await ws_manager.broadcast_to_admin("NEW_INCIDENT_ALERT", {
+                        "id": u_alert.id,
+                        "cart_id": cart_id,
+                        "cart_number": cart_number,
+                        "session_id": active_session.id,
+                        "alert_type": "UNSCANNED_ADD",
+                        "violation_type": "UNSCANNED_ADD",
+                        "severity": "HIGH",
+                        "message": f"Unscanned item placed in cart: {pred_name}",
+                        "evidence_snapshot_url": ev_url,
+                        "created_at": u_alert.created_at.isoformat()
+                    })
                 await SessionService.flag_unscanned_item(
                     db=db,
                     cart_id=cart_id,

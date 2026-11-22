@@ -1,6 +1,6 @@
 from datetime import datetime, date
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
@@ -900,13 +900,22 @@ async def resolve_alert(
     current_user: User = Depends(get_current_user)
 ):
     """Resolve or dismiss an active incident (All staff)."""
-    alert = await AlertService.resolve_alert(
-        db=db,
-        alert_id=alert_id,
-        user_id=current_user.id,
-        notes=req.resolution_notes,
-        action=req.action
-    )
+    if not req.resolution_notes or not req.resolution_notes.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Resolution requires a non-empty audit reason."
+        )
+    try:
+        alert = await AlertService.resolve_alert(
+            db=db,
+            alert_id=alert_id,
+            user_id=current_user.id,
+            notes=req.resolution_notes.strip(),
+            action=req.action
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     

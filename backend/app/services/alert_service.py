@@ -129,13 +129,23 @@ class AlertService:
         if not alert:
             return None
 
+        if not notes or not str(notes).strip():
+            raise ValueError("Resolution requires a non-empty audit reason.")
+
+        clean_notes = str(notes).strip()
         from app.models.session import CartItem
         from app.services.session_service import SessionService
+        from app.services.cart_state_machine import CartStateMachine
 
-        alert.status = action
-        alert.resolved_by = user_id
-        alert.resolution_notes = notes
-        alert.resolved_at = datetime.utcnow()
+        # R8: Delegate resolution to CartStateMachine to enforce audit reason, who/when/why, and 60s cooldown
+        CartStateMachine.resolve_violation(
+            db=db,
+            alert=alert,
+            staff_user_id=user_id,
+            reason=clean_notes
+        )
+        if action in ("DISMISSED", "REJECTED"):
+            alert.status = action
 
         # Find associated cart item to mark as staff-approved and verified
         target_item = None
