@@ -827,6 +827,40 @@ export const api = {
     }>(`/admin/carts/${cartId}/verification-trace?limit=${limit}`);
   },
 
+  async getRulesChecklist(cartId?: string) {
+    const query = cartId ? `?cart_id=${encodeURIComponent(cartId)}` : '';
+    return request<{
+      rules: Array<{
+        id: string;
+        name: string;
+        summary: string;
+        enforcement: string;
+        reason_code: string;
+        privacy_gate: string;
+        status: string;
+      }>;
+      total_rules: number;
+      cart_status?: {
+        cart_id: string;
+        cart_number: string;
+        camera_status: string;
+        has_active_session: boolean;
+        session_id: string | null;
+        cart_empty_verified: boolean | null;
+        pending_count: number;
+        removing_count: number;
+        verified_count: number;
+        open_alerts_count: number;
+        open_alert_types: string[];
+        r1_passed: boolean;
+        r2_passed: boolean;
+        r5_passed: boolean;
+        r6_passed: boolean;
+        r9_passed: boolean;
+      };
+    }>(`/admin/rules/checklist${query}`);
+  },
+
   async runCartVerificationNow(cartId: string) {
     return request<{
       status: string;

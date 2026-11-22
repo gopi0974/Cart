@@ -401,6 +401,165 @@ def get_cart_camera_preview(
         "warning": None if has_frame else "No camera frames received recently from this cart."
     }
 
+@router.get("/rules/checklist")
+def get_rules_checklist(
+    cart_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Returns the comprehensive 10-rule verification state machine checklist (R1 - R10).
+    Optionally evaluates live compliance status for a specified cart.
+    """
+    rules = [
+        {
+            "id": "R1",
+            "name": "Empty Start",
+            "summary": "At session start, the camera must see an empty cart (~2s stable, no objects, no hand or face, diff below threshold). Scans blocked with CART_NOT_EMPTY if not empty. Staff override requires audit reason.",
+            "enforcement": "CartStateMachine.verify_empty_start & staff_override_empty_cart",
+            "reason_code": "CART_NOT_EMPTY",
+            "privacy_gate": "No face or full frame stored; diff threshold compared to calibration reference.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R2",
+            "name": "One Pending at a Time",
+            "summary": "Item enters PENDING after barcode scan. Only 1 pending item allowed; further scans blocked with 409 ITEM_PENDING. Pending item deleted directly on cancel without camera check. 60s reminder displayed.",
+            "enforcement": "CartStateMachine.check_scan_allowed & cancel_pending_item",
+            "reason_code": "ITEM_PENDING",
+            "privacy_gate": "Direct deletion of pending item bypasses camera; scan lock prevents concurrent placements.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R3",
+            "name": "Placement Check",
+            "summary": "Wait ~1s for stable object without hand/face. Decides VERIFIED, REPOSITION, WRONG_ITEM, or REVIEW based on score & runner-up margin. Stores snapshot (crop embedding, bounding box, crop image path; never faces).",
+            "enforcement": "CartStateMachine.evaluate_placement_decision & StoredItemSnapshot",
+            "reason_code": "PLACEMENT_VERIFICATION",
+            "privacy_gate": "Crop only, faces withheld unconditionally with face box size logging.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R4",
+            "name": "Movement is Not a Change",
+            "summary": "Full match of all objects after every motion burst and stable window. 1-to-1 matching with position tie-breaker. Count check mismatch escalates. Hand departure triggers full match. Long motion (>20s warning, >60s staff check). Overlap (>0.45 IoU) & ambiguity go to staff.",
+            "enforcement": "CartStateMachine.full_match_cart_contents, hand tracking marker, motion timers",
+            "reason_code": "UNSCANNED_ADD, NEEDS_STAFF_CHECK",
+            "privacy_gate": "Multi-region object detection isolates product bounding boxes without face capture.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R5",
+            "name": "Removal Flow",
+            "summary": "Shopper tap Delete sets REMOVING, server blocks scans with 409 ITEM_REMOVING. Camera confirms departure before item leaves list. Cancel/keep restores exact VERIFIED state. Pending item deleted directly.",
+            "enforcement": "CartStateMachine.start_removal, confirm_removal, cancel_removal",
+            "reason_code": "ITEM_REMOVING",
+            "privacy_gate": "Re-evaluates remaining objects; departures verified against stored snapshot embeddings.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R6",
+            "name": "Violations",
+            "summary": "UNSCANNED_ADD, UNAUTHORIZED_REMOVE, WRONG_ITEM_REMOVED, CART_NOT_EMPTY_AT_START. Saves evidence crop (never faces, private storage, retention), shows warning card, notifies staff, blocks scan. 1 open alert per (session, type, item).",
+            "enforcement": "CartStateMachine.record_violation, AlertService deduplication",
+            "reason_code": "VIOLATION_OPEN",
+            "privacy_gate": "Product crop evidence stored in private directory; face crops strictly withheld.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R7",
+            "name": "Which Item Was Removed",
+            "summary": "On UNAUTHORIZED_REMOVE, compares stored cart state with current frame to identify missing item with confidence. Displays last-known image beside current evidence. Top 3 candidates sent to staff if low confidence (<0.65).",
+            "enforcement": "CartStateMachine.identify_missing_item, side-by-side evidence, ReviewCase generation",
+            "reason_code": "UNAUTHORIZED_REMOVE",
+            "privacy_gate": "Compares stored embeddings; surfaces top candidates without exposing customer imagery.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R8",
+            "name": "Resolving a Violation",
+            "summary": "Clears automatically when cart view matches list over stable window. Staff can resolve with required audit reason (false alarm, approved, item removed). 60s cooldown prevents re-creation.",
+            "enforcement": "CartStateMachine.resolve_violation, can_recreate_violation, AlertService.resolve_alert",
+            "reason_code": "RESOLVED",
+            "privacy_gate": "Mandatory non-empty audit rationale logged with staff identity and timestamp.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R9",
+            "name": "Checkout",
+            "summary": "Enforced server-side: allowed only with 0 pending, 0 removing, 0 violations, camera online, and final full match count matching list.",
+            "enforcement": "CartStateMachine.validate_checkout, SessionService.can_checkout",
+            "reason_code": "CHECKOUT_BLOCKED",
+            "privacy_gate": "Final physical count matches electronic list before transaction authorization.",
+            "status": "ENFORCED"
+        },
+        {
+            "id": "R10",
+            "name": "Quantity",
+            "summary": "Scanning same product again creates a separate item with its own stored crop, bounding box, and region assignment.",
+            "enforcement": "CartStateMachine.handle_quantity_item, separate CartItem records",
+            "reason_code": "SEPARATE_ITEMS",
+            "privacy_gate": "Independent tracking prevents ambiguity between duplicate units.",
+            "status": "ENFORCED"
+        }
+    ]
+
+    cart_status = None
+    if cart_id:
+        cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+        if cart:
+            active_session = db.query(CartSession).filter(
+                CartSession.cart_id == cart.id,
+                CartSession.status == "ACTIVE"
+            ).first()
+            
+            pending_items = []
+            removing_items = []
+            verified_items = []
+            if active_session:
+                items = db.query(CartItem).filter(CartItem.session_id == active_session.id).all()
+                pending_items = [i.id for i in items if i.status == "PENDING"]
+                removing_items = [i.id for i in items if i.status == "REMOVING"]
+                verified_items = [i.id for i in items if i.status == "VERIFIED"]
+
+            open_alerts = db.query(Alert).filter(
+                Alert.cart_id == cart.id,
+                Alert.status == "OPEN"
+            ).all()
+
+            cart_status = {
+                "cart_id": cart.id,
+                "cart_number": cart.cart_number,
+                "camera_status": cart.camera_status,
+                "has_active_session": active_session is not None,
+                "session_id": active_session.id if active_session else None,
+                "cart_empty_verified": getattr(active_session, "cart_empty_verified", False) if active_session else None,
+                "pending_count": len(pending_items),
+                "removing_count": len(removing_items),
+                "verified_count": len(verified_items),
+                "open_alerts_count": len(open_alerts),
+                "open_alert_types": [a.alert_type for a in open_alerts],
+                "r1_passed": getattr(active_session, "cart_empty_verified", False) if active_session else True,
+                "r2_passed": len(pending_items) <= 1,
+                "r5_passed": len(removing_items) == 0,
+                "r6_passed": len(open_alerts) == 0,
+                "r9_passed": (
+                    active_session is not None and
+                    len(pending_items) == 0 and
+                    len(removing_items) == 0 and
+                    len(open_alerts) == 0 and
+                    cart.camera_status == "ONLINE" and
+                    len(verified_items) > 0
+                )
+            }
+
+    return {
+        "rules": rules,
+        "total_rules": len(rules),
+        "cart_status": cart_status
+    }
+
+
 @router.get("/carts/{cart_id}/verification-trace")
 def get_cart_verification_trace(
     cart_id: str,

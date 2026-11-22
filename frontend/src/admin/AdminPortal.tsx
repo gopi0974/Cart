@@ -18,6 +18,7 @@ import { ModelManagerView } from './ModelManagerView';
 import { SystemDiagnosticsView } from './SystemDiagnosticsView';
 import { ReportsView } from './ReportsView';
 import { StaffRolesView } from './StaffRolesView';
+import { VerificationTraceView } from './VerificationTraceView';
 import { AdminLogin } from './AdminLogin';
 import { Product } from '../types';
 import { api } from '../services/api';
@@ -51,6 +52,7 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: 'SYSTEM', label: 'Settings & System', path: '/admin/system', icon: Activity, pageTitle: 'Backend System Diagnostics & Telemetry' },
   { id: 'REPORTS', label: 'Financial & Loss Reports', path: '/admin/reports', icon: BarChart3, pageTitle: 'Loss Prevention & Financial Telemetry Reports' },
   { id: 'CARTS_REGISTRY', label: 'Fleet & QR Sheet', path: '/admin/carts', icon: QrCode, pageTitle: 'Cart Fleet Registry & Pair QR Sheet' },
+  { id: 'TRACE', label: 'Trace & Rules', path: '/admin/trace', icon: Activity, pageTitle: 'Verification Trace & Rules Checklist' },
   { id: 'STAFF', label: 'Staff & Roles', path: '/admin/staff', icon: Users, pageTitle: 'Staff Directory & Role Assignments' },
 ];
 
@@ -67,6 +69,7 @@ export type AdminRouteKey =
   | 'SYSTEM'
   | 'REPORTS'
   | 'CARTS_REGISTRY'
+  | 'TRACE'
   | 'STAFF'
   | 'NOT_FOUND';
 
@@ -84,6 +87,7 @@ export const matchAdminRoute = (pathname: string): AdminRouteKey => {
   if (normalized === '/admin/system') return 'SYSTEM';
   if (normalized === '/admin/reports') return 'REPORTS';
   if (normalized === '/admin/carts') return 'CARTS_REGISTRY';
+  if (normalized === '/admin/trace' || normalized.startsWith('/admin/trace/')) return 'TRACE';
   if (normalized === '/admin/staff') return 'STAFF';
   return 'NOT_FOUND';
 };
@@ -678,6 +682,7 @@ export const AdminPortal: React.FC = () => {
         )}
         {currentRouteKey === 'REPORTS' && <ReportsView />}
         {currentRouteKey === 'CARTS_REGISTRY' && <CartFleetView />}
+        {currentRouteKey === 'TRACE' && <VerificationTraceView />}
         {currentRouteKey === 'STAFF' && <StaffRolesView />}
         {currentRouteKey === 'NOT_FOUND' && (
           <AdminNotFound

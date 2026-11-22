@@ -31,6 +31,7 @@ def test_admin_portal_source_routes_exist():
         "/admin/system",
         "/admin/reports",
         "/admin/carts",
+        "/admin/trace",
         "/admin/staff",
     ]
 
@@ -61,6 +62,7 @@ def test_admin_route_matcher_logic():
         "/admin/system": "SYSTEM",
         "/admin/reports": "REPORTS",
         "/admin/carts": "CARTS_REGISTRY",
+        "/admin/trace": "TRACE",
         "/admin/staff": "STAFF",
     }
 
