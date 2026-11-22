@@ -7,11 +7,12 @@ import {
 import { Product } from '../types';
 import { api } from '../services/api';
 import { privacyDetector, DetectedFaceBox } from '../services/privacyDetector';
+import { CameraHelper } from '../services/cameraHelper';
 
 interface Props {
   product: Product;
   onComplete: () => void;
-  onPreviewTest: () => void;
+  onPreviewTest?: () => void;
 }
 
 export interface ProductBoundingBox {
@@ -181,6 +182,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    CameraHelper.stopAllStreams();
   }, []);
 
   // Check if this product already has an active background job
@@ -215,6 +217,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
     async function startCamera() {
       try {
         setCameraError(null);
+        CameraHelper.stopAllStreams();
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: 1280 },
@@ -229,6 +232,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
           return;
         }
 
+        CameraHelper.registerStream(stream);
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -237,11 +241,13 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
       } catch (err: any) {
         console.error('Camera access failed:', err);
         try {
+          CameraHelper.stopAllStreams();
           const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
           if (!active) {
             fallbackStream.getTracks().forEach((t) => t.stop());
             return;
           }
+          CameraHelper.registerStream(fallbackStream);
           streamRef.current = fallbackStream;
           if (videoRef.current) {
             videoRef.current.srcObject = fallbackStream;
@@ -257,9 +263,8 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
     return () => {
       active = false;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
+      stopCamera();
+      CameraHelper.stopAllStreams();
       if (animFrameRef.current) {
         cancelAnimationFrame(animFrameRef.current);
       }
@@ -1438,11 +1443,26 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
 
   const handleDiscardScan = () => {
     stopCamera();
+    CameraHelper.stopAllStreams();
     setCaptures({});
     setStepFrames([]);
     setShowDiscardConfirm(false);
     setIsProcessing(false);
     onComplete();
+  };
+
+  const handleExitToComplete = () => {
+    stopCamera();
+    CameraHelper.stopAllStreams();
+    onComplete();
+  };
+
+  const handleExitToPreviewTest = () => {
+    stopCamera();
+    CameraHelper.stopAllStreams();
+    if (onPreviewTest) {
+      onPreviewTest();
+    }
   };
 
   const handleCancelProcessing = async () => {
@@ -2505,7 +2525,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                     </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={onComplete}
+                        onClick={handleExitToComplete}
                         className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
                       >
                         Done
@@ -2591,7 +2611,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                     </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={onComplete}
+                        onClick={handleExitToComplete}
                         className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
                       >
                         Done
@@ -2614,7 +2634,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                       Retry
                     </button>
                     <button
-                      onClick={onComplete}
+                      onClick={handleExitToComplete}
                       className="flex-1 py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
                     >
                       Done
@@ -2641,7 +2661,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   Retry
                 </button>
                 <button
-                  onClick={onComplete}
+                  onClick={handleExitToComplete}
                   className="flex-1 py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-all"
                 >
                   Done
@@ -2662,7 +2682,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   <button
                     onClick={() => {
                       setIsProcessing(false);
-                      onPreviewTest();
+                      handleExitToPreviewTest();
                     }}
                     className="flex-1 py-2.5 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20"
                   >
@@ -2671,7 +2691,7 @@ export const Guided360ScanView: React.FC<Props> = ({ product, onComplete, onPrev
                   </button>
                 )}
                 <button
-                  onClick={onComplete}
+                  onClick={handleExitToComplete}
                   className="flex-1 py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition-all shadow-md shadow-emerald-600/20"
                 >
                   Done

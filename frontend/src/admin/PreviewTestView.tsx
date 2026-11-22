@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { api } from '../services/api';
 import { Product } from '../types';
+import { CameraHelper } from '../services/cameraHelper';
 
 interface Props {
   initialProduct?: Product | null;
@@ -40,6 +41,7 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
     async function initCamera() {
       try {
         setCameraError(null);
+        CameraHelper.stopAllStreams();
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: 1280 },
@@ -54,6 +56,7 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
           return;
         }
 
+        CameraHelper.registerStream(stream);
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -62,11 +65,13 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
       } catch (err: any) {
         console.error('Camera access failed:', err);
         try {
+          CameraHelper.stopAllStreams();
           const fallback = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
           if (!active) {
             fallback.getTracks().forEach((t) => t.stop());
             return;
           }
+          CameraHelper.registerStream(fallback);
           streamRef.current = fallback;
           if (videoRef.current) {
             videoRef.current.srcObject = fallback;
@@ -84,7 +89,9 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
       active = false;
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
       }
+      CameraHelper.stopAllStreams();
     };
   }, [initialProduct]);
 
@@ -143,6 +150,11 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
     }, 1200);
   };
 
+  const handleBackToCatalog = () => {
+    CameraHelper.stopAllStreams();
+    onBackToCatalog();
+  };
+
   const topMatches = testResult?.top_matches || [];
 
   return (
@@ -172,7 +184,7 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
           </button>
 
           <button
-            onClick={onBackToCatalog}
+            onClick={handleBackToCatalog}
             className="text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-emerald-600 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
           >
             ← Back to Products
@@ -363,7 +375,7 @@ export const PreviewTestView: React.FC<Props> = ({ initialProduct, onBackToCatal
             )}
 
             <button
-              onClick={onBackToCatalog}
+              onClick={handleBackToCatalog}
               className="w-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold py-3 rounded-2xl text-xs active:scale-95 transition-all"
             >
               Return to Products Catalog
