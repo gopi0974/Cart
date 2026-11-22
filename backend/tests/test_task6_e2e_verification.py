@@ -1,17 +1,13 @@
-import sys
-import os
 import asyncio
 import uuid
 import pytest
 import psycopg2
-from sqlalchemy import text
 from app.config import settings
 from app.database import SessionLocal
 from app.models.user import User
 from app.models.product import Product
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem
-from app.models.transaction import AuditLog
 from app.services.session_service import SessionService
 from app.api.v1.products import create_product, delete_product, list_products, restore_product
 from app.schemas.product import ProductCreate

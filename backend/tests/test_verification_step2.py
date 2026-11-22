@@ -17,7 +17,6 @@ from app.database import Base
 from app.models.product import Product, ProductEmbedding
 from app.models.cart import Cart
 from app.models.session import CartSession, CartItem, VerificationDecision
-from app.models.alert import Alert, ReviewCase
 from app.services.scan_worker import preprocess_product_image_for_embedding
 from app.ai.verification_engine import verification_engine
 from app.ai.object_detector import object_detector
@@ -357,7 +356,6 @@ def test_removal_and_rescan_flow(db, sample_data):
         assert rem.previous_status == "VERIFIED"
 
         # 3. Camera confirms departure -> transitions to REMOVED_PENDING_RESCAN
-        synthetic_frame = np.full((480, 640, 3), 120, dtype=np.uint8)
         mock_eval_rem = {
             "decision": "CONFIRMED_REMOVED",
             "message": "Item removal confirmed",

@@ -19,15 +19,11 @@ from app.models.user import User
 from app.models.cart import Cart
 from app.utils.security import hash_password, create_access_token
 from app.services.device_watchdog import (
-    record_device_activity,
-    record_device_frame,
     clear_device_activity,
     get_latest_frame,
-    get_frames_per_minute,
     check_cart_timeouts,
     cart_device_last_seen
 )
-from app.websocket.manager import ws_manager
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
 test_engine = create_engine(

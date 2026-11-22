@@ -3,21 +3,17 @@ from starlette.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from fastapi import Request
 
 from app.main import app
 from app.database import Base, get_db
 from app.models.user import User
 from app.models.product import Product, ProductEmbedding
 from app.models.transaction import MaintenanceFlag
-from app.models.cart import Cart
-from app.models.session import CartSession
 from app.utils.security import hash_password, create_access_token
 from app.api.v1.auth import get_client_ip, login_rate_limiter
 from app.utils.cache import catalog_cache
-from app.utils.sanitization import sanitize_secrets, SanitizingLogFilter
+from app.utils.sanitization import sanitize_secrets
 from app.utils.seed_data import purge_fake_vectors_once, audit_insecure_admins_once
-import logging
 
 # In-memory SQLite test database with StaticPool so all threads share memory
 TEST_DB_URL = "sqlite:///:memory:"

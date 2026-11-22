@@ -1,14 +1,12 @@
 import os
 import sys
 import json
-import time
 import base64
 import io
 import pytest
 import numpy as np
 from PIL import Image
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -21,9 +19,9 @@ import app.database as app_db
 from app.main import app
 from app.config import settings, CURRENT_PREPROCESSING_VERSION
 from app.database import Base, get_db
-from app.models.product import Product, ProductEmbedding
+from app.models.product import Product
 from app.models.cart import Cart
-from app.models.session import CartSession, CartItem, VerificationDecision
+from app.models.session import CartSession, CartItem
 from app.models.user import User
 from app.ai.verification_engine import verification_engine
 from app.ai.feature_extractor import feature_extractor
@@ -193,7 +191,6 @@ def test_trace_product_a_scan_and_verification_trace(db, setup_data):
     cart = setup_data["cart"]
     prod_a = setup_data["prod_a"]
     session = setup_data["session"]
-    img_a = setup_data["img_a"]
 
     # 1. Shopper scans Product A -> enters PENDING
     pending_item = CartItem(
@@ -369,7 +366,6 @@ def test_system_health_pending_items_diagnostics(db, setup_data, auth_headers):
 # 4. Test Pending Item > 15s Computes Clear Diagnostic Reason
 # =========================================================================
 def test_pending_item_exceeding_15_seconds_shows_reason(db, setup_data):
-    cart = setup_data["cart"]
     prod_c = setup_data["prod_c"]
     session = setup_data["session"]
 

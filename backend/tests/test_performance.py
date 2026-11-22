@@ -16,7 +16,7 @@ from app.models.user import User
 from app.models.cart import Cart
 from app.models.product import Product, ProductEmbedding
 from app.models.session import CartSession, CartItem
-from app.utils.security import hash_password, create_access_token
+from app.utils.security import hash_password
 from app.utils.cache import catalog_cache
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -209,7 +209,7 @@ def test_benchmark_endpoint_latencies(monkeypatch):
     ms_prod_cached = (time.perf_counter() - t0) * 1000
     assert res_prod_cached.status_code == 200
 
-    print(f"\n--- BENCHMARK LATENCY REPORT ---")
+    print("\n--- BENCHMARK LATENCY REPORT ---")
     print(f"GET /health: {ms_health:.2f}ms | Queries: {res_health.headers.get('X-DB-Queries')}")
     print(f"GET /api/v1/shopper/{{id}}: {ms_shopper:.2f}ms | Queries: {res_shopper.headers.get('X-DB-Queries')}")
     print(f"GET /api/v1/products (DB query): {ms_prod_uncached:.2f}ms | Queries: {res_prod_uncached.headers.get('X-DB-Queries')}")

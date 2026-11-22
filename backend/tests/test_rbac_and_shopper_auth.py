@@ -16,7 +16,7 @@ from app.models.user import User
 from app.models.cart import Cart
 from app.models.product import Product
 from app.models.session import CartSession
-from app.models.transaction import ModelVersion, AuditLog
+from app.models.transaction import ModelVersion
 from app.utils.security import hash_password, create_access_token
 
 # Standalone fast in-memory SQLite database for test suite isolation

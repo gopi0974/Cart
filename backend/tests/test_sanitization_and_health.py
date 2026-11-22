@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.main import app, _get_public_health_data, _get_detailed_health_data
+from app.main import app
 from app.config import settings
 from app.utils.sanitization import sanitize_secrets, mask_url
 from app.migrations import get_alembic_config

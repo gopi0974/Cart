@@ -7,19 +7,14 @@ from pathlib import Path
 import pytest
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-import sqlalchemy as sa
 from sqlalchemy import create_engine, inspect, text
-from alembic.config import Config
-from alembic import command
-from fastapi.testclient import TestClient
 
 # Ensure backend root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.main import app, _get_public_health_data, _get_detailed_health_data
+from app.main import _get_public_health_data, _get_detailed_health_data
 from app.config import settings
-from app.database import get_db, SessionLocal
-from app.migrations import run_db_migrations, get_schema_info, check_schema_health
+from app.migrations import run_db_migrations, get_schema_info
 
 PG_BIN = Path("C:/Program Files/PostgreSQL/18/bin")
 PG_PORT = 5433

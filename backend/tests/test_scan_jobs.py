@@ -3,7 +3,7 @@ import io
 import json
 import base64
 import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from PIL import Image
 from starlette.testclient import TestClient
 from sqlalchemy import create_engine
@@ -14,14 +14,13 @@ from app.main import app
 from app.database import Base, get_db
 import app.database as app_db
 from app.models.user import User
-from app.models.product import Product, ProductImage, ProductEmbedding
+from app.models.product import Product, ProductEmbedding
 from app.models.scan_job import ScanJob
 from app.utils.security import hash_password, create_access_token
 from app.services.storage_service import storage_service
 from app.services.scan_worker import (
     _downscale_and_remove_background,
-    _execute_scan_job_internal,
-    run_scan_job_with_watchdog
+    _execute_scan_job_internal
 )
 
 # Shared in-memory SQLite database
@@ -797,7 +796,6 @@ def test_atomic_vector_enrollment_rolls_back_on_failure(test_db):
 
     with patch("app.services.scan_worker.SessionLocal", lambda: test_db):
         # Patch store_embedding to raise an error during insertion
-        original_store = VectorStoreMatcher.store_embedding
         def failing_store(*args, **kwargs):
             raise RuntimeError("Simulated DB connection drop during vector insert")
 

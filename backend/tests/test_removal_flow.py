@@ -8,7 +8,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.models.cart import Cart
 from app.models.product import Product
-from app.models.session import CartSession, CartItem
+from app.models.session import CartSession
 from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 

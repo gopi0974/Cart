@@ -26,18 +26,18 @@ class ObjectDetector:
     def __init__(self):
         pass
 
-    def compute_motion_box(
+    def detect_all_objects(
         self,
         ref_bgr: Optional[np.ndarray],
         curr_bgr: np.ndarray,
         min_area: int = 1200
-    ) -> Optional[Tuple[int, int, int, int]]:
+    ) -> list[Tuple[int, int, int, int]]:
         """
-        Compute bounding box of pixel difference against reference cart background.
-        Used to pinpoint grocery items placed into or removed from the cart.
+        Compute all distinct foreground bounding boxes against reference cart background (R4).
+        Returns list of (min_x, min_y, max_x, max_y) for each detected object in the cart.
         """
         if ref_bgr is None or curr_bgr is None or not HAS_CV2:
-            return None
+            return []
 
         try:
             if ref_bgr.shape != curr_bgr.shape:
@@ -62,18 +62,31 @@ class ObjectDetector:
                     x, y, w, h = cv2.boundingRect(cnt)
                     valid_boxes.append((x, y, x + w, y + h))
 
-            if not valid_boxes:
-                return None
-
-            min_x = min(b[0] for b in valid_boxes)
-            min_y = min(b[1] for b in valid_boxes)
-            max_x = max(b[2] for b in valid_boxes)
-            max_y = max(b[3] for b in valid_boxes)
-
-            return (min_x, min_y, max_x, max_y)
+            return valid_boxes
         except Exception as e:
-            logger.warning(f"Error computing motion box: {e}")
+            logger.warning(f"Error detecting all objects: {e}")
+            return []
+
+    def compute_motion_box(
+        self,
+        ref_bgr: Optional[np.ndarray],
+        curr_bgr: np.ndarray,
+        min_area: int = 1200
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Compute bounding box of pixel difference against reference cart background.
+        Used to pinpoint grocery items placed into or removed from the cart.
+        """
+        valid_boxes = self.detect_all_objects(ref_bgr, curr_bgr, min_area=min_area)
+        if not valid_boxes:
             return None
+
+        min_x = min(b[0] for b in valid_boxes)
+        min_y = min(b[1] for b in valid_boxes)
+        max_x = max(b[2] for b in valid_boxes)
+        max_y = max(b[3] for b in valid_boxes)
+
+        return (min_x, min_y, max_x, max_y)
 
     def crop_object(
         self,

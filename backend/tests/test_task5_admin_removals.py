@@ -13,7 +13,6 @@ from app.models.session import CartSession, CartItem
 from app.models.alert import Alert
 from app.models.transaction import AuditLog
 from app.services.session_service import SessionService
-from app.services.alert_service import AlertService
 
 def run_task5_verification():
     db = SessionLocal()
