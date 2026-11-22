@@ -1,6 +1,8 @@
 # pyrefly: ignore[missing-import]
 import pytest
+import psycopg2
 from fastapi.testclient import TestClient
+from app.config import settings
 from app.main import app
 from app.database import init_db, SessionLocal
 from app.utils.seed_data import seed_database
@@ -9,6 +11,11 @@ client = TestClient(app)
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_test_db():
+    try:
+        conn = psycopg2.connect(settings.DATABASE_URL, connect_timeout=1)
+        conn.close()
+    except Exception as e:
+        pytest.skip(f"Live database not reachable: {e}")
     init_db()
     db = SessionLocal()
     seed_database(db)

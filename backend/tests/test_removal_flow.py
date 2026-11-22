@@ -2,6 +2,9 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath("."))
 import asyncio
+import pytest
+import psycopg2
+from app.config import settings
 from app.database import SessionLocal
 from app.models.cart import Cart
 from app.models.product import Product
@@ -9,7 +12,13 @@ from app.models.session import CartSession, CartItem
 from app.services.session_service import SessionService
 from app.services.billing_service import BillingService
 
+@pytest.mark.anyio
 async def test_removal_flow():
+    try:
+        conn = psycopg2.connect(settings.DATABASE_URL, connect_timeout=1)
+        conn.close()
+    except Exception as e:
+        pytest.skip(f"Live database not reachable: {e}")
     db = SessionLocal()
     try:
         cart = db.query(Cart).filter(Cart.is_enabled == True).first()

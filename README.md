@@ -138,6 +138,33 @@ Evaluated via `python backend/test_recognition_accuracy.py` across 3 enrolled re
 
 ---
 
+## 🧪 How to Run the Recognition Lab with Real Photos
+
+The **Recognition Lab** provides an empirical evaluation bench in Admin to benchmark real-world camera accuracy, evaluate recognition margins, and tune confidence thresholds without synthetic assumptions or fake data.
+
+### 1. Access the Recognition Lab
+- Log in to the Admin Portal (`/admin`).
+- In the sidebar navigation, click **Recognition Lab** (Flask icon).
+
+### 2. Add Test Photos
+You can populate test samples in two ways:
+- **Direct Upload**: Click **Upload Real Photos** to upload single or batch product crops directly from your computer or phone.
+- **Overhead Cart Capture**: Open `/cart-device`, aim the camera at a physical product inside the cart, and click **Send Crop to Recognition Lab** under the live video stream. This captures the cropped product region (MediaPipe privacy filters ensure no human faces or full frames are ever uploaded).
+
+### 3. Assign Ground Truth Labels
+- In the **Test Samples & Evaluation** table, select the expected catalog item from the **True Product** dropdown for each photo (e.g. `Cadbury Dairy Milk 130g`, `Amul Gold Milk 500ml`, or `Empty Cart`).
+
+### 4. Run Empirical Evaluation
+- Click **Run Empirical Evaluation**.
+- The service processes each photo through the **identical production pipeline**:
+  1. Validates privacy gates (face/hand withholding).
+  2. Applies standard 320px GrabCut background segmentation.
+  3. Computes 512-dim normalized visual embeddings via ONNX ViT-B/32.
+  4. Queries live enrolled product vectors stored in PostgreSQL `pgvector`.
+- Review the **KPI Summary Cards**, the **Threshold Sensitivity Grid (0.50–0.90 confidence vs. 0.05–0.15 margin)**, **Per-Product Confusion Matrix**, and individual photo diagnosis (`score_scanned`, `best_other`, and margin).
+
+---
+
 ## 🔒 Security & Safety Controls
 - **HMAC QR Verification**: URLs signed with SHA-256 HMAC prevent shoppers from spoofing cart IDs.
 - **Single Active Session Policy**: An occupied cart rejects second pairing attempts until the active customer checks out or staff resets the session.

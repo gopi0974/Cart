@@ -30,6 +30,12 @@ PG_URL = f"postgresql://{PG_USER}@localhost:{PG_PORT}/{TEST_DB_NAME}"
 POSTGRES_BASE_URL = f"postgresql://{PG_USER}@localhost:{PG_PORT}/postgres"
 
 
+def ci_skip(reason: str):
+    if os.environ.get("CI", "").strip().lower() in ("true", "1", "yes"):
+        pytest.fail(f"CI mode failure: PostgreSQL migration test cannot be skipped in CI: {reason}")
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="module")
 def postgres_service():
     """
@@ -53,7 +59,7 @@ def postgres_service():
     pg_ctl_exe = PG_BIN / "pg_ctl.exe"
 
     if not initdb_exe.exists():
-        pytest.skip("PostgreSQL 18 binaries not found on this system.")
+        ci_skip("PostgreSQL 18 binaries not found on this system.")
 
     # 1. Clean existing temp directory if any
     if PG_DATA.exists():
@@ -74,9 +80,9 @@ def postgres_service():
     try:
         res = subprocess.run(init_cmd, capture_output=True, text=True, timeout=20)
     except subprocess.TimeoutExpired:
-        pytest.skip("PostgreSQL initdb timed out.")
+        ci_skip("PostgreSQL initdb timed out.")
     except OSError as e:
-        pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
+        ci_skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res.returncode != 0:
         pytest.fail(f"initdb failed: {res.stderr}")
 
@@ -91,13 +97,13 @@ def postgres_service():
         "-w"
     ]
     try:
-        res_start = subprocess.run(start_cmd, capture_output=True, text=True, timeout=25)
+        res_start = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=25)
     except subprocess.TimeoutExpired:
-        pytest.skip("PostgreSQL pg_ctl start timed out.")
+        ci_skip("PostgreSQL pg_ctl start timed out.")
     except OSError as e:
-        pytest.skip(f"PostgreSQL binary execution blocked by system policy: {e}")
+        ci_skip(f"PostgreSQL binary execution blocked by system policy: {e}")
     if res_start.returncode != 0:
-        pytest.fail(f"pg_ctl start failed: {res_start.stderr}")
+        pytest.fail("pg_ctl start failed")
 
     # Wait for PostgreSQL to be ready
     ready = False
@@ -133,10 +139,10 @@ def postgres_service():
         "-w"
     ]
     try:
-        subprocess.run(stop_cmd, capture_output=True, text=True, timeout=10)
+        subprocess.run(stop_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except (subprocess.TimeoutExpired, Exception):
         try:
-            subprocess.run([str(pg_ctl_exe), "stop", "-D", str(PG_DATA), "-m", "immediate", "-w"], timeout=10)
+            subprocess.run([str(pg_ctl_exe), "stop", "-D", str(PG_DATA), "-m", "immediate", "-w"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         except Exception:
             pass
     try:

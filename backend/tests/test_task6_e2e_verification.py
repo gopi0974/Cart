@@ -2,10 +2,10 @@ import sys
 import os
 import asyncio
 import uuid
-
-# Ensure backend directory is in python path
-sys.path.insert(0, os.path.abspath("."))
-
+import pytest
+import psycopg2
+from sqlalchemy import text
+from app.config import settings
 from app.database import SessionLocal
 from app.models.user import User
 from app.models.product import Product
@@ -17,6 +17,11 @@ from app.api.v1.products import create_product, delete_product, list_products, r
 from app.schemas.product import ProductCreate
 
 def test_full_e2e():
+    try:
+        conn = psycopg2.connect(settings.DATABASE_URL, connect_timeout=1)
+        conn.close()
+    except Exception as e:
+        pytest.skip(f"Live database not reachable: {e}")
     db = SessionLocal()
     loop = asyncio.get_event_loop()
     print("=================================================================")
