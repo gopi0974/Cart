@@ -145,9 +145,117 @@ async def check_cart_timeouts(db: Session, now: Optional[datetime] = None, timeo
                 timed_out_ids.append(cart.id)
     return timed_out_ids
 
+async def release_idle_sessions(
+    db: Session,
+    now: Optional[datetime] = None,
+    empty_timeout_minutes: Optional[float] = None,
+    active_timeout_minutes: Optional[float] = None,
+) -> List[str]:
+    """
+    End ACTIVE sessions that have been idle beyond configured thresholds:
+    - Empty session (0 non-removed items): IDLE_EMPTY_SESSION_MINUTES (default 30 min)
+    - Non-empty session (>=1 item, no checkout): IDLE_ACTIVE_SESSION_MINUTES (default 120 min)
+    Writes an AuditLog entry, resolves open alerts, frees the cart, and notifies shopper via WebSocket.
+    """
+    import json
+    from app.config import settings
+    from app.models.session import CartSession, CartItem
+    from app.models.alert import Alert
+    from app.models.transaction import AuditLog
+
+    if now is None:
+        now = datetime.utcnow()
+
+    empty_mins = empty_timeout_minutes if empty_timeout_minutes is not None else float(
+        getattr(settings, "IDLE_EMPTY_SESSION_MINUTES", 30.0)
+    )
+    active_mins = active_timeout_minutes if active_timeout_minutes is not None else float(
+        getattr(settings, "IDLE_ACTIVE_SESSION_MINUTES", 120.0)
+    )
+
+    released_ids: List[str] = []
+    active_sessions = db.query(CartSession).filter(CartSession.status == "ACTIVE").all()
+
+    for sess in active_sessions:
+        items = db.query(CartItem).filter(
+            CartItem.session_id == sess.id,
+            CartItem.status != "REMOVED",
+        ).all()
+
+        last_activity = sess.started_at or now
+        for itm in items:
+            if itm.scanned_at and itm.scanned_at > last_activity:
+                last_activity = itm.scanned_at
+            if itm.verified_at and itm.verified_at > last_activity:
+                last_activity = itm.verified_at
+
+        idle_seconds = max(0.0, (now - last_activity).total_seconds())
+        limit_seconds = (empty_mins * 60.0) if len(items) == 0 else (active_mins * 60.0)
+
+        if idle_seconds < limit_seconds:
+            continue
+
+        reason = (
+            f"Idle empty session released after {idle_seconds / 60.0:.1f} min (limit {empty_mins:.0f} min)."
+            if len(items) == 0
+            else f"Idle active session with {len(items)} item(s) released after {idle_seconds / 60.0:.1f} min (limit {active_mins:.0f} min)."
+        )
+
+        sess.status = "ENDED"
+        sess.ended_at = now
+
+        open_alerts = db.query(Alert).filter(
+            Alert.session_id == sess.id,
+            Alert.status == "OPEN",
+        ).all()
+        for al in open_alerts:
+            al.status = "RESOLVED"
+            al.resolved_at = now
+            al.resolution_notes = reason
+
+        cart = db.query(Cart).filter(Cart.id == sess.cart_id).first()
+        if cart and cart.status != "NEEDS_REFERENCE":
+            cart.status = "IDLE"
+
+        db.add(AuditLog(
+            user_id=None,
+            action="IDLE_SESSION_RELEASED",
+            entity_type="SESSION",
+            entity_id=sess.id,
+            details_json=json.dumps({
+                "session_id": sess.id,
+                "cart_id": sess.cart_id,
+                "cart_number": cart.cart_number if cart else None,
+                "item_count": len(items),
+                "idle_minutes": round(idle_seconds / 60.0, 2),
+                "reason": reason,
+                "released_at": now.isoformat(),
+            }),
+            created_at=now,
+        ))
+        db.commit()
+        released_ids.append(sess.id)
+        logger.info(f"Released idle session {sess.id} on cart {sess.cart_id}: {reason}")
+
+        await ws_manager.broadcast_to_cart(sess.cart_id, "SESSION_ENDED_IDLE", {
+            "session_id": sess.id,
+            "cart_id": sess.cart_id,
+            "reason": reason,
+            "message": "Your shopping session ended due to inactivity.",
+        })
+        await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+            "cart_id": sess.cart_id,
+            "cart_number": cart.cart_number if cart else sess.cart_id,
+            "status": cart.status if cart else "IDLE",
+            "session_id": None,
+        })
+
+    return released_ids
+
+
 async def run_camera_watchdog(check_interval_seconds: int = 2, timeout_seconds: int = 15):
     """
-    Background watchdog task that maintains cart camera status.
+    Background watchdog task that maintains cart camera status and releases idle sessions.
     If an ONLINE cart receives no frames or heartbeats for > timeout_seconds (15s),
     it transitions to OFFLINE, alerts Admin, and pushes status to Shopper session.
     """
@@ -158,6 +266,7 @@ async def run_camera_watchdog(check_interval_seconds: int = 2, timeout_seconds: 
             db = SessionLocal()
             try:
                 await check_cart_timeouts(db=db, timeout_seconds=timeout_seconds)
+                await release_idle_sessions(db=db)
             finally:
                 db.close()
         except asyncio.CancelledError:

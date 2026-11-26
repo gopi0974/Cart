@@ -120,6 +120,10 @@ class Settings(BaseModel):
     # Face on Packaging policy: "withhold" (default, privacy-first) or "mask_and_judge"
     FACE_ON_PACKAGING_MODE: str = os.getenv("FACE_ON_PACKAGING_MODE", "withhold").lower()
     
+    # Idle Session Release Timeouts (minutes)
+    IDLE_EMPTY_SESSION_MINUTES: float = float(os.getenv("IDLE_EMPTY_SESSION_MINUTES", "30"))
+    IDLE_ACTIVE_SESSION_MINUTES: float = float(os.getenv("IDLE_ACTIVE_SESSION_MINUTES", "120"))
+
     # Payment Gateway (Test mode only; no hardcoded secret defaults)
     PAYMENT_MODE: str = os.getenv("PAYMENT_MODE", "TEST")
     PAYMENT_KEY_ID: Optional[str] = os.getenv("PAYMENT_KEY_ID")
