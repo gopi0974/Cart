@@ -323,7 +323,7 @@ class CartStateMachine:
         if not cart_camera_online:
             raise ScanBlockedError(ScanBlockReason.CAMERA_OFFLINE, "Camera is offline. Please wait for camera connection.")
         if not has_reference:
-            raise ScanBlockedError(ScanBlockReason.NO_REFERENCE, "Camera calibration reference missing. Scanning paused.")
+            raise ScanBlockedError(ScanBlockReason.NO_REFERENCE, "This cart is being prepared")
 
         # R1 Check: Empty verified at start
         if not cart_empty_verified and not session.cart_empty_verified:

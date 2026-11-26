@@ -14,7 +14,8 @@ class Cart(Base):
     device_token_hash = Column(String(128), nullable=True)  # SHA-256 hash of device auth token
     is_enabled = Column(Boolean, default=True, nullable=False)  # Admin enable/disable toggle
     signed_connect_url = Column(Text, nullable=True)  # Cached HMAC-signed URL for shopper pairing
-    status = Column(String(20), nullable=False, default="IDLE")  # IDLE, ACTIVE, ALERT, MAINTENANCE
+    status = Column(String(20), nullable=False, default="IDLE")  # IDLE, ACTIVE, ALERT, MAINTENANCE, NEEDS_REFERENCE
+    reference_image_path = Column(Text, nullable=True)  # Private bucket path for empty-cart reference image
     battery_level = Column(Integer, default=100)
     camera_status = Column(String(20), default="ONLINE")  # ONLINE, DEGRADED, OFFLINE
     last_heartbeat = Column(DateTime, default=datetime.utcnow)

@@ -108,6 +108,7 @@ class Settings(BaseModel):
     SUPABASE_URL: Optional[str] = os.getenv("SUPABASE_URL")
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
     SUPABASE_STORAGE_BUCKET: str = os.getenv("SUPABASE_STORAGE_BUCKET", "smartcart-360-scans")
+    SUPABASE_EVIDENCE_BUCKET: str = os.getenv("SUPABASE_EVIDENCE_BUCKET", "smartcart-evidence")
     
     # AI / Vision Thresholds (uncalibrated defaults; overridden by DB system_settings when saved in Admin)
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))

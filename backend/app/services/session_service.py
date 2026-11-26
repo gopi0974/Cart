@@ -342,6 +342,16 @@ class SessionService:
                 "evidence_url": r_alert.evidence_path or r_alert.evidence_snapshot_url
             })
 
+        if cart and cart.status == "NEEDS_REFERENCE":
+            has_unverified = True
+            active_warnings.append({
+                "type": "NEEDS_REFERENCE",
+                "message": "This cart is being prepared",
+                "target_barcode": None,
+                "action_required": "WAIT_FOR_STAFF",
+                "item_id": None,
+            })
+
         is_camera_online = (cart.camera_status == "ONLINE") if cart else False
         can_checkout = (
             len(items) > 0 and
@@ -349,7 +359,8 @@ class SessionService:
             all(i.status == "VERIFIED" for i in items) and
             len(active_warnings) == 0 and
             session.status == "ACTIVE" and
-            is_camera_online
+            is_camera_online and
+            (not cart or cart.status != "NEEDS_REFERENCE")
         )
 
         return {
@@ -384,12 +395,13 @@ class SessionService:
         from app.services.cart_state_machine import CartStateMachine
         cart = session.cart
         camera_online = (cart.camera_status == "ONLINE") if cart else False
+        needs_ref = (cart is not None and cart.status == "NEEDS_REFERENCE")
         CartStateMachine.validate_can_scan(
             session=session,
             db=db,
             cart_empty_verified=session.cart_empty_verified or settings.DEMO_MODE,
             cart_camera_online=camera_online or settings.DEMO_MODE,
-            has_reference=True,
+            has_reference=not needs_ref,
         )
 
         # Create cart item with status PENDING

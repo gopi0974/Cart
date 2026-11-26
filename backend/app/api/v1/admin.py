@@ -401,6 +401,135 @@ def get_cart_camera_preview(
         "warning": None if has_frame else "No camera frames received recently from this cart."
     }
 
+
+class CaptureReferenceRequest(BaseModel):
+    image_data_url: Optional[str] = None
+    hand_present: bool = False
+    face_present: bool = False
+    objects_present: bool = False
+
+
+@router.post("/carts/{cart_id}/capture-reference")
+async def capture_cart_reference(
+    cart_id: str,
+    req: Optional[CaptureReferenceRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin_or_manager)
+):
+    """
+    Explicit staff capture of an empty-cart reference image (Admin and Manager only).
+    Refuses if objects, a hand, or a face are detected.
+    Stores the reference image in private bucket smartcart-evidence (path per cart).
+    """
+    from app.websocket.device_handler import get_tracker, save_persisted_cart_reference
+    from app.ai.verification_engine import verification_engine
+    from app.ai.object_detector import object_detector
+    from app.services.device_watchdog import get_latest_frame
+
+    cart = db.query(Cart).filter((Cart.id == cart_id) | (Cart.cart_number == cart_id.upper())).first()
+    if not cart:
+        raise HTTPException(status_code=404, detail="Cart not found.")
+
+    tracker = get_tracker(cart.id)
+    req_obj = req or CaptureReferenceRequest()
+
+    if req_obj.hand_present or req_obj.face_present or tracker.hand_in_frame or tracker.face_seen_start_time > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot capture empty-cart reference: hand or face detected in cart view."
+        )
+
+    img_bgr = None
+    if req_obj.image_data_url:
+        try:
+            img_bgr, _ = verification_engine._decode_to_cv2(req_obj.image_data_url)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid image payload: {e}")
+    elif tracker.last_stable_frame is not None:
+        img_bgr = tracker.last_stable_frame.copy()
+    else:
+        latest = get_latest_frame(cart.id)
+        if latest and latest.get("data"):
+            try:
+                img_bgr, _ = verification_engine._decode_to_cv2(latest["data"])
+            except Exception:
+                img_bgr = None
+
+    if img_bgr is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No camera frame available to capture reference. Ensure cart camera is streaming."
+        )
+
+    detected_objs = object_detector.detect_all_objects(tracker.ref_background, img_bgr) if tracker.ref_background is not None else []
+    if req_obj.objects_present or len(detected_objs) > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot capture empty-cart reference: objects detected inside the cart."
+        )
+
+    ref_uri = save_persisted_cart_reference(cart.id, img_bgr)
+    if not ref_uri:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage unavailable: could not persist empty-cart reference to smartcart-evidence bucket."
+        )
+
+    tracker.ref_background = img_bgr.copy()
+    cart.reference_image_path = ref_uri
+
+    active_sess = db.query(CartSession).filter(
+        CartSession.cart_id == cart.id,
+        CartSession.status == "ACTIVE"
+    ).first()
+    cart.status = "ACTIVE" if active_sess else "IDLE"
+
+    open_ref_alerts = db.query(Alert).filter(
+        Alert.cart_id == cart.id,
+        Alert.alert_type == "NEEDS_REFERENCE",
+        Alert.status == "OPEN"
+    ).all()
+    for al in open_ref_alerts:
+        al.status = "RESOLVED"
+        al.resolved_by = current_user.id
+        al.resolved_at = datetime.utcnow()
+        al.resolution_notes = "Empty-cart reference captured explicitly by staff."
+
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="CAPTURE_CART_REFERENCE",
+        entity_type="CART",
+        entity_id=cart.id,
+        details_json=json.dumps({
+            "cart_number": cart.cart_number,
+            "reference_image_path": ref_uri,
+            "captured_by": current_user.email,
+            "timestamp": datetime.utcnow().isoformat()
+        }),
+        created_at=datetime.utcnow()
+    ))
+    db.commit()
+
+    await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "status": cart.status,
+        "camera_status": cart.camera_status,
+    })
+    await ws_manager.broadcast_to_cart(cart.id, "CART_REFERENCE_CAPTURED", {
+        "cart_id": cart.id,
+        "status": cart.status,
+        "message": "Cart is ready."
+    })
+
+    return {
+        "status": "SUCCESS",
+        "cart_id": cart.id,
+        "cart_number": cart.cart_number,
+        "cart_status": cart.status,
+        "reference_image_path": ref_uri,
+    }
+
 @router.get("/rules/checklist")
 def get_rules_checklist(
     cart_id: Optional[str] = None,

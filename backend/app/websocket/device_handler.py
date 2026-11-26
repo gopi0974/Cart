@@ -56,15 +56,17 @@ except Exception:
 logger = logging.getLogger("smartcart.device")
 
 
-def load_persisted_cart_reference(cart_id: str) -> Optional[np.ndarray]:
-    """Retrieve persisted empty-cart reference image from disk cache."""
+def load_persisted_cart_reference(cart_id: str, reference_image_path: Optional[str] = None) -> Optional[np.ndarray]:
+    """Retrieve persisted empty-cart reference image from private smartcart-evidence bucket."""
     if not HAS_CV2:
         return None
     try:
-        ref_dir = os.path.join(settings.MODELS_DIR, "cart_references")
-        ref_path = os.path.join(ref_dir, f"{cart_id}.jpg")
-        if os.path.exists(ref_path):
-            img = cv2.imread(ref_path)
+        from app.services.storage_service import storage_service
+        ref_uri = reference_image_path or f"supabase://{storage_service.evidence_bucket}/cart_references/{cart_id}/reference.jpg"
+        raw_bytes = storage_service.download_bytes(ref_uri)
+        if raw_bytes:
+            arr = np.frombuffer(raw_bytes, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if img is not None and img.size > 0:
                 return img
     except Exception as e:
@@ -72,17 +74,37 @@ def load_persisted_cart_reference(cart_id: str) -> Optional[np.ndarray]:
     return None
 
 
-def save_persisted_cart_reference(cart_id: str, img_bgr: np.ndarray) -> None:
-    """Save empty-cart reference image to persistent disk cache across server restarts."""
+def save_persisted_cart_reference(cart_id: str, img_bgr: np.ndarray) -> Optional[str]:
+    """Upload empty-cart reference image to private smartcart-evidence bucket (path per cart)."""
     if img_bgr is None or not HAS_CV2:
-        return
+        return None
     try:
-        ref_dir = os.path.join(settings.MODELS_DIR, "cart_references")
-        os.makedirs(ref_dir, exist_ok=True)
-        ref_path = os.path.join(ref_dir, f"{cart_id}.jpg")
-        cv2.imwrite(ref_path, img_bgr)
+        from app.services.storage_service import storage_service
+        ok, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return None
+        object_path = f"cart_references/{cart_id}/reference.jpg"
+        return storage_service.upload_bytes(object_path=object_path, data=buf.tobytes(), content_type="image/jpeg")
     except Exception as e:
         logger.warning(f"Failed to persist cart reference for {cart_id}: {e}")
+        return None
+
+
+def reload_cart_references_on_startup(db: Session) -> int:
+    """Reload persisted empty-cart references from smartcart-evidence bucket into trackers on startup."""
+    loaded = 0
+    try:
+        carts = db.query(Cart).filter(Cart.reference_image_path.isnot(None)).all()
+        for c in carts:
+            img = load_persisted_cart_reference(c.id, c.reference_image_path)
+            if img is not None:
+                get_tracker(c.id).ref_background = img
+                loaded += 1
+        if loaded > 0:
+            logger.info(f"Reloaded {loaded} persisted empty-cart reference(s) from storage.")
+    except Exception as e:
+        logger.warning(f"Startup cart reference reload skipped: {e}")
+    return loaded
 
 
 class CartVisionTracker:
@@ -1023,14 +1045,44 @@ async def process_camera_frame(
 
         # 4. Check active session on this cart (enforces single active session per cart)
         active_session = SessionService.ensure_single_active_session(db, cart_id)
+        cart_obj = db.query(Cart).filter(Cart.id == cart_id).first()
 
         if tracker.ref_background is None:
-            tracker.ref_background = load_persisted_cart_reference(cart_id)
+            ref_path = getattr(cart_obj, "reference_image_path", None) if cart_obj else None
+            tracker.ref_background = load_persisted_cart_reference(cart_id, ref_path)
+
+        # Never auto-create empty-cart reference from live frames: require explicit staff capture
+        if tracker.ref_background is None:
+            await AlertService.create_alert(
+                db=db,
+                cart_id=cart_id,
+                session_id=active_session.id if active_session else None,
+                alert_type="NEEDS_REFERENCE",
+                message=f"Cart '{cart_number}' has no empty-cart reference. Staff must capture reference.",
+                severity="MEDIUM",
+            )
+            if cart_obj and cart_obj.status != "NEEDS_REFERENCE":
+                cart_obj.status = "NEEDS_REFERENCE"
+                db.commit()
+            await ws_manager.broadcast_to_admin("CART_STATUS_CHANGE", {
+                "cart_id": cart_id,
+                "cart_number": cart_number,
+                "status": "NEEDS_REFERENCE",
+                "camera_status": cart_obj.camera_status if cart_obj else "ONLINE",
+            })
+            await ws_manager.broadcast_to_cart(cart_id, "CART_NEEDS_REFERENCE", {
+                "cart_id": cart_id,
+                "status": "NEEDS_REFERENCE",
+                "message": "This cart is being prepared",
+            })
+            await websocket.send_json({
+                "type": "vision_status",
+                "status": "NEEDS_REFERENCE",
+                "message": "This cart is being prepared"
+            })
+            return
 
         if not active_session:
-            if tracker.ref_background is None:
-                tracker.ref_background = img_bgr.copy()
-                save_persisted_cart_reference(cart_id, img_bgr)
             await websocket.send_json({
                 "type": "frame_ack",
                 "status": "IDLE",
@@ -1038,15 +1090,10 @@ async def process_camera_frame(
             })
             return
 
-        # Auto-initialize empty-cart reference from first stable frame of session with no items
         active_items_count = db.query(CartItem).filter(
             CartItem.session_id == active_session.id,
             CartItem.status != "REMOVED"
         ).count()
-        if active_items_count == 0 and tracker.ref_background is None:
-            tracker.ref_background = img_bgr.copy()
-            save_persisted_cart_reference(cart_id, img_bgr)
-            logger.info(f"[{cart_number}] Empty cart reference auto-initialized from first stable frame.")
 
         # 5. R1: Empty Start Check if not verified
         if not active_session.cart_empty_verified and active_items_count == 0:

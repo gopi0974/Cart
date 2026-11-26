@@ -252,6 +252,117 @@ class StorageService:
 
         raise FileNotFoundError(f"Frame image not found at reference: {frame_ref}")
 
+    @property
+    def evidence_bucket(self) -> str:
+        return getattr(settings, "SUPABASE_EVIDENCE_BUCKET", "smartcart-evidence") or "smartcart-evidence"
+
+    def upload_bytes(
+        self,
+        object_path: str,
+        data: bytes,
+        content_type: str = "image/jpeg",
+        bucket: Optional[str] = None,
+    ) -> Optional[str]:
+        """Upload raw bytes to a private Supabase Storage bucket and return supabase://{bucket}/{path}."""
+        target_bucket = bucket or self.evidence_bucket
+        if not self.is_supabase_configured:
+            return None
+
+        upload_url = f"{self.supabase_url}/storage/v1/object/{target_bucket}/{object_path}"
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "apikey": self.service_key,
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        }
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.post(upload_url, content=data, headers=headers)
+                if resp.status_code in (200, 201):
+                    return f"supabase://{target_bucket}/{object_path}"
+                logger.warning(f"Supabase upload_bytes ({target_bucket}/{object_path}) returned HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Supabase upload_bytes failed: {sanitize_secrets(e)}")
+        return None
+
+    def download_bytes(self, object_ref: str) -> Optional[bytes]:
+        """Download raw bytes from supabase://{bucket}/{path}."""
+        if not object_ref or not object_ref.startswith("supabase://") or not self.is_supabase_configured:
+            return None
+        parts = object_ref[len("supabase://"):].split("/", 1)
+        if len(parts) != 2:
+            return None
+        bucket, path = parts
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "apikey": self.service_key,
+        }
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                url = f"{self.supabase_url}/storage/v1/object/authenticated/{bucket}/{path}"
+                resp = client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    return resp.content
+                url_direct = f"{self.supabase_url}/storage/v1/object/{bucket}/{path}"
+                resp_dir = client.get(url_direct, headers=headers)
+                if resp_dir.status_code == 200:
+                    return resp_dir.content
+        except Exception as e:
+            logger.warning(f"Supabase download_bytes failed: {sanitize_secrets(e)}")
+        return None
+
+    def create_signed_download_url(self, object_ref: str, expires_in: int = 300) -> Optional[str]:
+        """Generate a short-lived signed download URL for a private bucket object."""
+        if not object_ref or not object_ref.startswith("supabase://") or not self.is_supabase_configured:
+            return None
+        parts = object_ref[len("supabase://"):].split("/", 1)
+        if len(parts) != 2:
+            return None
+        bucket, path = parts
+        sign_url = f"{self.supabase_url}/storage/v1/object/sign/{bucket}/{path}"
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "apikey": self.service_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(sign_url, json={"expiresIn": expires_in}, headers=headers)
+                if resp.status_code in (200, 201):
+                    rel = resp.json().get("signedURL") or resp.json().get("signedUrl")
+                    if rel:
+                        if rel.startswith("http"):
+                            return rel
+                        if rel.startswith("/object/"):
+                            return f"{self.supabase_url}/storage/v1{rel}"
+                        if rel.startswith("/"):
+                            return f"{self.supabase_url}{rel}"
+                        return f"{self.supabase_url}/{rel}"
+        except Exception as e:
+            logger.warning(f"Supabase create_signed_download_url failed: {sanitize_secrets(e)}")
+        return None
+
+    def delete_object(self, object_ref: str) -> bool:
+        """Delete an object from a private Supabase Storage bucket."""
+        if not object_ref or not object_ref.startswith("supabase://") or not self.is_supabase_configured:
+            return False
+        parts = object_ref[len("supabase://"):].split("/", 1)
+        if len(parts) != 2:
+            return False
+        bucket, path = parts
+        del_url = f"{self.supabase_url}/storage/v1/object/{bucket}/{path}"
+        headers = {
+            "Authorization": f"Bearer {self.service_key}",
+            "apikey": self.service_key,
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.delete(del_url, headers=headers)
+                return resp.status_code in (200, 204)
+        except Exception as e:
+            logger.warning(f"Supabase delete_object failed: {sanitize_secrets(e)}")
+        return False
+
 
 storage_service = StorageService()
 

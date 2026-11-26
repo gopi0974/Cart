@@ -67,6 +67,11 @@ async def lifespan(app: FastAPI):
                         VectorStoreMatcher.sync_to_disk(db)
                     except Exception as ve:
                         logger.warning(f"Vector disk cache sync skipped: {ve}")
+                    try:
+                        from app.websocket.device_handler import reload_cart_references_on_startup
+                        reload_cart_references_on_startup(db)
+                    except Exception as re_err:
+                        logger.warning(f"Cart reference reload skipped: {re_err}")
                 finally:
                     db.close()
         except Exception as e:

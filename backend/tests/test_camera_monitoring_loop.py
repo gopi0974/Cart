@@ -453,3 +453,128 @@ async def test_changing_db_threshold_changes_live_placement_decision(db_session)
 
     # Restore default thresholds
     CartStateMachine.save_thresholds(db_session, confidence_high=0.85, confidence_low=0.65, min_margin=0.08)
+
+
+@pytest.mark.anyio
+async def test_no_auto_reference_sets_needs_reference_and_blocks_scan(db_session):
+    """Frames without an empty-cart reference must NOT auto-create one; cart enters NEEDS_REFERENCE and blocks scans."""
+    from app.websocket.device_handler import cart_trackers
+    from app.services.session_service import SessionService
+    from app.services.cart_state_machine import ScanBlockedError, ScanBlockReason
+
+    cart = db_session.query(Cart).filter(Cart.id == "cart-loop-01").first()
+    cart.reference_image_path = None
+    cart.status = "ACTIVE"
+    cart_sess = CartSession(
+        id=str(uuid.uuid4()),
+        cart_id=cart.id,
+        status="ACTIVE",
+        cart_empty_verified=False,
+    )
+    db_session.add(cart_sess)
+    db_session.commit()
+
+    cart_trackers.pop(cart.id, None)
+    tracker = get_tracker(cart.id)
+    tracker.ref_background = None
+    tracker.stable_start_time = time.time() - 2.0
+    tracker.stable_frame_count = 4
+
+    mock_ws = AsyncMock()
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+
+    with patch("app.websocket.device_handler.load_persisted_cart_reference", return_value=None):
+        await process_camera_frame(
+            db=db_session,
+            cart_id=cart.id,
+            cart_number=cart.cart_number,
+            image_data=frame,
+            websocket=mock_ws,
+            hand_present=False,
+            face_present=False,
+            motion=False,
+        )
+
+    assert tracker.ref_background is None
+    db_session.refresh(cart)
+    assert cart.status == "NEEDS_REFERENCE"
+
+    # Admin alert raised
+    ref_alert = db_session.query(Alert).filter(
+        Alert.cart_id == cart.id,
+        Alert.alert_type == "NEEDS_REFERENCE",
+        Alert.status == "OPEN",
+    ).first()
+    assert ref_alert is not None
+
+    # Device WS got "This cart is being prepared"
+    sent_msgs = [c.args[0] for c in mock_ws.send_json.call_args_list]
+    assert any(m.get("status") == "NEEDS_REFERENCE" and "prepared" in m.get("message", "") for m in sent_msgs)
+
+    # Shopper scanning is blocked
+    with pytest.raises(ScanBlockedError) as exc_info:
+        await SessionService.scan_item(db_session, cart_sess.id, "8901262010053")
+    assert exc_info.value.reason_code == ScanBlockReason.NO_REFERENCE
+    assert "prepared" in exc_info.value.message
+
+
+@pytest.mark.anyio
+async def test_explicit_staff_capture_reference_rejects_non_empty_and_reloads_on_restart(db_session):
+    """Staff capture-reference refuses hand/face/objects, persists to smartcart-evidence, and reloads on startup."""
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    from fastapi import HTTPException
+    from app.api.v1.admin import capture_cart_reference, CaptureReferenceRequest
+    from app.websocket.device_handler import cart_trackers, reload_cart_references_on_startup
+    from app.models.user import User
+
+    cart = db_session.query(Cart).filter(Cart.id == "cart-loop-01").first()
+    cart.status = "NEEDS_REFERENCE"
+    staff = User(id="staff-ref-1", email="staff.ref@smartcart.internal", password_hash="x", full_name="Staff", role="ADMIN", is_active=True)
+    db_session.add(staff)
+    db_session.commit()
+
+    img = Image.new("RGB", (160, 120), color=(200, 200, 200))
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    # 1. Refuse when hand, face, or objects are detected
+    for bad_req in [
+        CaptureReferenceRequest(image_data_url=data_url, hand_present=True),
+        CaptureReferenceRequest(image_data_url=data_url, face_present=True),
+        CaptureReferenceRequest(image_data_url=data_url, objects_present=True),
+    ]:
+        with pytest.raises(HTTPException) as exc:
+            await capture_cart_reference(cart_id=cart.id, req=bad_req, db=db_session, current_user=staff)
+        assert exc.value.status_code == 400
+
+    # 2. Succeed on clean empty frame and store in smartcart-evidence bucket
+    stored_bytes = {}
+
+    def fake_upload(object_path, data, content_type="image/jpeg", bucket=None):
+        uri = f"supabase://smartcart-evidence/{object_path}"
+        stored_bytes[uri] = data
+        return uri
+
+    def fake_download(object_ref):
+        return stored_bytes.get(object_ref)
+
+    with patch("app.services.storage_service.storage_service.upload_bytes", side_effect=fake_upload), \
+         patch("app.services.storage_service.storage_service.download_bytes", side_effect=fake_download):
+        res = await capture_cart_reference(
+            cart_id=cart.id,
+            req=CaptureReferenceRequest(image_data_url=data_url),
+            db=db_session,
+            current_user=staff,
+        )
+        assert res["status"] == "SUCCESS"
+        assert res["reference_image_path"] == f"supabase://smartcart-evidence/cart_references/{cart.id}/reference.jpg"
+        assert cart.status == "IDLE"
+
+        # Simulate server restart by clearing in-memory trackers and reloading from storage
+        cart_trackers.clear()
+        reloaded = reload_cart_references_on_startup(db_session)
+        assert reloaded == 1
+        assert get_tracker(cart.id).ref_background is not None
