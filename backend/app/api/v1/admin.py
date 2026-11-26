@@ -1444,6 +1444,7 @@ async def submit_review_decision(
 class ModelThresholdsUpdate(BaseModel):
     confidence_high: float
     confidence_low: float
+    min_margin: Optional[float] = None
 
 @router.get("/model-health")
 def get_model_health(db: Session = Depends(get_db)):
@@ -1451,6 +1452,7 @@ def get_model_health(db: Session = Depends(get_db)):
     import os
     from app.ai.feature_extractor import MODEL_NAME, MODEL_VERSION, VECTOR_DIM, LOCAL_MODEL_DIR, FALLBACK_MODEL_DIR
     from app.models.product import ProductEmbedding
+    from app.services.cart_state_machine import CartStateMachine
 
     total_vectors = db.query(ProductEmbedding).count()
     enrolled_products = db.query(func.count(func.distinct(ProductEmbedding.product_id))).scalar() or 0
@@ -1459,6 +1461,8 @@ def get_model_health(db: Session = Depends(get_db)):
 
     offline_cached = (os.path.exists(LOCAL_MODEL_DIR) and len(os.listdir(LOCAL_MODEL_DIR)) > 0) or \
                      (os.path.exists(FALLBACK_MODEL_DIR) and len(os.listdir(FALLBACK_MODEL_DIR)) > 0)
+
+    th_high, th_low, min_margin = CartStateMachine.get_active_thresholds(db)
 
     return {
         "status": "HEALTHY",
@@ -1469,8 +1473,10 @@ def get_model_health(db: Session = Depends(get_db)):
         "total_vectors_count": total_vectors,
         "last_enrollment_time": last_enrollment_time,
         "offline_cached": offline_cached,
-        "confidence_high": settings.CONFIDENCE_HIGH,
-        "confidence_low": settings.CONFIDENCE_LOW,
+        "confidence_high": th_high,
+        "confidence_low": th_low,
+        "min_margin": min_margin,
+        "thresholds_calibrated": False,
     }
 
 @router.post("/model-thresholds")
@@ -1479,13 +1485,21 @@ def update_model_thresholds(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
-    """Dynamically configure high and low verification thresholds."""
+    """Dynamically configure and persist high, low, and min_margin verification thresholds."""
+    from app.services.cart_state_machine import CartStateMachine
     if not (0.0 <= req.confidence_low < req.confidence_high <= 1.0):
         raise HTTPException(status_code=400, detail="Thresholds must satisfy 0.0 <= low < high <= 1.0")
-    old_high = settings.CONFIDENCE_HIGH
-    old_low = settings.CONFIDENCE_LOW
-    settings.CONFIDENCE_HIGH = round(req.confidence_high, 4)
-    settings.CONFIDENCE_LOW = round(req.confidence_low, 4)
+    old_high, old_low, old_margin = CartStateMachine.get_active_thresholds(db)
+    new_margin = req.min_margin if req.min_margin is not None else old_margin
+    if not (0.0 <= new_margin <= 0.5):
+        raise HTTPException(status_code=400, detail="min_margin must satisfy 0.0 <= min_margin <= 0.5")
+
+    saved_high, saved_low, saved_margin = CartStateMachine.save_thresholds(
+        db=db,
+        confidence_high=req.confidence_high,
+        confidence_low=req.confidence_low,
+        min_margin=new_margin,
+    )
 
     audit = AuditLog(
         user_id=current_user.id,
@@ -1495,8 +1509,10 @@ def update_model_thresholds(
         details_json=json.dumps({
             "old_confidence_high": old_high,
             "old_confidence_low": old_low,
-            "confidence_high": settings.CONFIDENCE_HIGH,
-            "confidence_low": settings.CONFIDENCE_LOW,
+            "old_min_margin": old_margin,
+            "confidence_high": saved_high,
+            "confidence_low": saved_low,
+            "min_margin": saved_margin,
             "updated_by_email": current_user.email,
             "updated_by_role": current_user.role,
             "timestamp": datetime.utcnow().isoformat()
@@ -1508,8 +1524,9 @@ def update_model_thresholds(
 
     return {
         "status": "SUCCESS",
-        "confidence_high": settings.CONFIDENCE_HIGH,
-        "confidence_low": settings.CONFIDENCE_LOW
+        "confidence_high": saved_high,
+        "confidence_low": saved_low,
+        "min_margin": saved_margin,
     }
 
 @router.get("/models")

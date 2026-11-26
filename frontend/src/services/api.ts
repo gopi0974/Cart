@@ -594,16 +594,19 @@ export const api = {
     offline_cached: boolean;
     confidence_high: number;
     confidence_low: number;
+    min_margin?: number;
+    thresholds_calibrated?: boolean;
   }> {
     return request('/admin/model-health');
   },
 
-  async updateModelThresholds(confidenceHigh: number, confidenceLow: number) {
+  async updateModelThresholds(confidenceHigh: number, confidenceLow: number, minMargin?: number) {
     return request('/admin/model-thresholds', {
       method: 'POST',
       body: JSON.stringify({
         confidence_high: confidenceHigh,
         confidence_low: confidenceLow,
+        ...(minMargin !== undefined ? { min_margin: minMargin } : {}),
       }),
     });
   },

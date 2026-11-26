@@ -387,3 +387,69 @@ async def test_camera_loop_unauthorized_remove_detected(db_session):
     ).first()
     assert alert is not None
     assert "Tata Tea Gold" in alert.message
+
+
+@pytest.mark.anyio
+async def test_changing_db_threshold_changes_live_placement_decision(db_session):
+    """Changing HIGH threshold in DB changes a live placement decision even if in-memory settings reset."""
+    from app.config import settings
+
+    cart = db_session.query(Cart).filter(Cart.id == "cart-loop-01").first()
+    cart_sess = CartSession(
+        id=str(uuid.uuid4()),
+        cart_id=cart.id,
+        status="ACTIVE",
+        cart_empty_verified=True,
+    )
+    db_session.add(cart_sess)
+
+    pending_item = CartItem(
+        id=str(uuid.uuid4()),
+        session_id=cart_sess.id,
+        product_id="prod-milk-uuid",
+        quantity=1,
+        unit_price=32.0,
+        status="PENDING",
+        scanned_at=datetime.utcnow(),
+    )
+    db_session.add(pending_item)
+    db_session.commit()
+
+    # Persist stricter HIGH threshold (0.95) to DB, then reset in-memory settings to simulate restart
+    CartStateMachine.save_thresholds(db_session, confidence_high=0.95, confidence_low=0.65, min_margin=0.08)
+    settings.CONFIDENCE_HIGH = 0.85
+
+    tracker = get_tracker(cart.id)
+    tracker.ref_background = np.zeros((240, 320, 3), dtype=np.uint8)
+    tracker.stable_start_time = time.time() - 2.0
+    tracker.stable_frame_count = 4
+
+    mock_ws = AsyncMock()
+    frame = np.full((240, 320, 3), 120, dtype=np.uint8)
+
+    # Score 0.90 would pass default 0.85, but must trigger REPOSITION under DB-persisted 0.95
+    with patch("app.ai.object_detector.object_detector.detect_all_objects", return_value=[(40, 40, 160, 160)]), \
+         patch("app.ai.feature_extractor.feature_extractor.get_embedding", return_value=[0.5] * 512), \
+         patch("app.ai.vector_store.VectorStoreMatcher.find_nearest_product", return_value=[
+             {"id": "prod-milk-uuid", "product_name": "Amul Milk 500ml", "barcode": "8901262010053", "similarity": 0.90},
+             {"id": "prod-tea-uuid", "product_name": "Tata Tea Gold 250g", "barcode": "8901262010020", "similarity": 0.35},
+         ]):
+        await process_camera_frame(
+            db=db_session,
+            cart_id=cart.id,
+            cart_number=cart.cart_number,
+            image_data=frame,
+            websocket=mock_ws,
+            hand_present=False,
+            face_present=False,
+            motion=False,
+        )
+
+    db_session.refresh(pending_item)
+    assert pending_item.status == "WARNING"
+    assert pending_item.warning_reason == "REPOSITION"
+    sent_msgs = [c.args[0] for c in mock_ws.send_json.call_args_list]
+    assert any(m.get("action") == "UNCERTAIN_REPOSITION" for m in sent_msgs)
+
+    # Restore default thresholds
+    CartStateMachine.save_thresholds(db_session, confidence_high=0.85, confidence_low=0.65, min_margin=0.08)

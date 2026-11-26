@@ -109,10 +109,10 @@ class Settings(BaseModel):
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
     SUPABASE_STORAGE_BUCKET: str = os.getenv("SUPABASE_STORAGE_BUCKET", "smartcart-360-scans")
     
-    # AI / Vision Thresholds
+    # AI / Vision Thresholds (uncalibrated defaults; overridden by DB system_settings when saved in Admin)
     CONFIDENCE_HIGH: float = float(os.getenv("CONFIDENCE_HIGH", "0.85"))
-    CONFIDENCE_MEDIUM: float = float(os.getenv("CONFIDENCE_MEDIUM", "0.65"))
     CONFIDENCE_LOW: float = float(os.getenv("CONFIDENCE_LOW", "0.65"))
+    MIN_MARGIN: float = float(os.getenv("MIN_MARGIN", "0.08"))
     UNSCANNED_GRACE_PERIOD_SECONDS: float = float(os.getenv("UNSCANNED_GRACE_PERIOD_SECONDS", "10.0"))
     EVIDENCE_RETENTION_DAYS: int = int(os.getenv("EVIDENCE_RETENTION_DAYS", "14"))
     CURRENT_PREPROCESSING_VERSION: str = os.getenv("CURRENT_PREPROCESSING_VERSION", "v2_bilinear_224")

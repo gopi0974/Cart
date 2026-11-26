@@ -18,9 +18,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.alert import Alert
 from app.models.product import Product
 from app.models.session import CartItem, CartSession
+from app.models.transaction import SystemSetting
 
 logger = logging.getLogger("smartcart.state_machine")
 
@@ -195,10 +197,7 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 class CartStateMachine:
     """Core state machine implementing supermarket rules R1 through R10."""
 
-    # Configurable thresholds
-    THRESHOLD_HIGH = 0.85
-    THRESHOLD_LOW = 0.65
-    MIN_MARGIN = 0.08
+    # Timing & spatial constants (thresholds are sourced from DB system_settings / settings)
     EMPTY_DIFF_THRESHOLD = 0.05
     EMPTY_STABLE_SECONDS = 2.0
     PLACEMENT_STABLE_SECONDS = 1.0
@@ -206,6 +205,60 @@ class CartStateMachine:
     MOTION_WARNING_SECONDS = 20.0
     MOTION_ESCALATE_SECONDS = 60.0
     VIOLATION_COOLDOWN_SECONDS = 60.0
+
+    @classmethod
+    def get_active_thresholds(cls, db: Session | None = None) -> tuple[float, float, float]:
+        """Return (confidence_high, confidence_low, min_margin) from DB system_settings or settings defaults."""
+        high = float(getattr(settings, "CONFIDENCE_HIGH", 0.85))
+        low = float(getattr(settings, "CONFIDENCE_LOW", 0.65))
+        margin = float(getattr(settings, "MIN_MARGIN", 0.08))
+        if db is None:
+            return high, low, margin
+        try:
+            rows = db.query(SystemSetting).filter(
+                SystemSetting.key.in_(["confidence_high", "confidence_low", "min_margin"])
+            ).all()
+            kv = {r.key: r.value for r in rows}
+            if "confidence_high" in kv:
+                high = float(kv["confidence_high"])
+            if "confidence_low" in kv:
+                low = float(kv["confidence_low"])
+            if "min_margin" in kv:
+                margin = float(kv["min_margin"])
+        except Exception:
+            pass
+        return high, low, margin
+
+    @classmethod
+    def save_thresholds(
+        cls,
+        db: Session,
+        confidence_high: float,
+        confidence_low: float,
+        min_margin: float | None = None,
+    ) -> tuple[float, float, float]:
+        """Persist AI thresholds in DB system_settings and update live settings."""
+        high = round(float(confidence_high), 4)
+        low = round(float(confidence_low), 4)
+        margin = round(float(min_margin if min_margin is not None else getattr(settings, "MIN_MARGIN", 0.08)), 4)
+        updates = {
+            "confidence_high": str(high),
+            "confidence_low": str(low),
+            "min_margin": str(margin),
+        }
+        now_dt = datetime.utcnow()
+        for k, v in updates.items():
+            row = db.query(SystemSetting).filter(SystemSetting.key == k).first()
+            if row:
+                row.value = v
+                row.updated_at = now_dt
+            else:
+                db.add(SystemSetting(key=k, value=v, updated_at=now_dt))
+        db.commit()
+        settings.CONFIDENCE_HIGH = high
+        settings.CONFIDENCE_LOW = low
+        settings.MIN_MARGIN = margin
+        return high, low, margin
 
     # --------------------------------------------------------------------------
     # R1: EMPTY START
@@ -386,9 +439,9 @@ class CartStateMachine:
 
         Returns: (DecisionOutcome, reason_text, margin)
         """
-        th_high = threshold_high if threshold_high is not None else cls.THRESHOLD_HIGH
-        th_low = threshold_low if threshold_low is not None else cls.THRESHOLD_LOW
-        margin_req = min_margin if min_margin is not None else cls.MIN_MARGIN
+        th_high = threshold_high if threshold_high is not None else float(getattr(settings, "CONFIDENCE_HIGH", 0.85))
+        th_low = threshold_low if threshold_low is not None else float(getattr(settings, "CONFIDENCE_LOW", 0.65))
+        margin_req = min_margin if min_margin is not None else float(getattr(settings, "MIN_MARGIN", 0.08))
 
         # Privacy rule: never judge with human face in crop
         if face_detected:
@@ -473,6 +526,7 @@ class CartStateMachine:
         has_pending_item: bool = False,
         hand_activity_occurred: bool = False,
         unstable_motion_seconds: float = 0.0,
+        threshold_low: float | None = None,
     ) -> FullMatchResult:
         """Executes full multi-object matching across cart frame (R4).
 
@@ -510,12 +564,13 @@ class CartStateMachine:
         assigned_items: set[str] = set()
         assigned_regions: set[str] = set()
 
+        th_low = threshold_low if threshold_low is not None else float(getattr(settings, "CONFIDENCE_LOW", 0.65))
         for score, itm, reg in scored_pairs:
             if itm.item_id in assigned_items or reg.region_id in assigned_regions:
                 continue
             # Must meet minimum threshold to consider matched
             sim_raw = cosine_similarity(itm.crop_embedding, reg.embedding)
-            if sim_raw >= cls.THRESHOLD_LOW:
+            if sim_raw >= th_low:
                 matched_pairs.append((itm, reg, sim_raw))
                 assigned_items.add(itm.item_id)
                 assigned_regions.add(reg.region_id)
@@ -548,7 +603,7 @@ class CartStateMachine:
                     for itm in stored_items
                 ]
                 sims.sort(key=lambda s: s[1], reverse=True)
-                if len(sims) >= 2 and sims[0][1] >= cls.THRESHOLD_LOW and sims[1][1] >= cls.THRESHOLD_LOW:
+                if len(sims) >= 2 and sims[0][1] >= th_low and sims[1][1] >= th_low:
                     if abs(sims[0][1] - sims[1][1]) < 0.03:
                         requires_staff = True
                         staff_reason = (
@@ -627,17 +682,19 @@ class CartStateMachine:
         item: CartItem,
         stored_items: list[StoredItemSnapshot],
         detected_regions: list[DetectedRegion],
+        threshold_low: float | None = None,
     ) -> bool:
         """Confirms that the REMOVING item is physically gone from the cart (R5).
 
         On confirmation, item status becomes REMOVED.
         """
+        th_low = threshold_low if threshold_low is not None else float(getattr(settings, "CONFIDENCE_LOW", 0.65))
         # Search if any remaining detected region matches the item's stored crop
         item_embedding = json.loads(item.crop_embedding) if item.crop_embedding else None
         if item_embedding:
             for reg in detected_regions:
                 sim = cosine_similarity(item_embedding, reg.embedding)
-                if sim >= cls.THRESHOLD_LOW:
+                if sim >= th_low:
                     # Item is still physically present in cart
                     return False
 
@@ -755,11 +812,13 @@ class CartStateMachine:
         cls,
         stored_items: list[StoredItemSnapshot],
         detected_regions: list[DetectedRegion],
+        threshold_low: float | None = None,
     ) -> tuple[StoredItemSnapshot | None, float, list[dict[str, Any]]]:
         """Identifies which item was removed on UNAUTHORIZED_REMOVE (R7).
 
         Returns: (missing_item, confidence, top_candidates)
         """
+        th_low = threshold_low if threshold_low is not None else float(getattr(settings, "CONFIDENCE_LOW", 0.65))
         candidates: list[dict[str, Any]] = []
 
         for itm in stored_items:
@@ -782,7 +841,7 @@ class CartStateMachine:
         # Sort descending by missing confidence
         candidates.sort(key=lambda c: c["missing_confidence"], reverse=True)
 
-        if not candidates or candidates[0]["missing_confidence"] < (1.0 - cls.THRESHOLD_LOW):
+        if not candidates or candidates[0]["missing_confidence"] < (1.0 - th_low):
             return None, 0.0, candidates
 
         top_cand = candidates[0]

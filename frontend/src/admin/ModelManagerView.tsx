@@ -18,11 +18,14 @@ export const ModelManagerView: React.FC = () => {
     offline_cached: boolean;
     confidence_high: number;
     confidence_low: number;
+    min_margin?: number;
+    thresholds_calibrated?: boolean;
   } | null>(null);
 
   const [totalProductsCount, setTotalProductsCount] = useState<number>(0);
   const [highThreshold, setHighThreshold] = useState(85);
-  const [medThreshold, setMedThreshold] = useState(65);
+  const [lowThreshold, setLowThreshold] = useState(65);
+  const [minMargin, setMinMargin] = useState(8);
   const [savingThresholds, setSavingThresholds] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -39,11 +42,14 @@ export const ModelManagerView: React.FC = () => {
 
       if (healthData) {
         setModelHealth(healthData);
-        if (healthData.confidence_high) {
+        if (healthData.confidence_high !== undefined) {
           setHighThreshold(Math.round(healthData.confidence_high * 100));
         }
-        if (healthData.confidence_low) {
-          setMedThreshold(Math.round(healthData.confidence_low * 100));
+        if (healthData.confidence_low !== undefined) {
+          setLowThreshold(Math.round(healthData.confidence_low * 100));
+        }
+        if (healthData.min_margin !== undefined) {
+          setMinMargin(Math.round(healthData.min_margin * 100));
         }
       }
     } catch (e) {
@@ -71,8 +77,8 @@ export const ModelManagerView: React.FC = () => {
   const handleSaveThresholds = async () => {
     setSavingThresholds(true);
     try {
-      await api.updateModelThresholds(highThreshold / 100, medThreshold / 100);
-      alert(`Confidence thresholds updated successfully!\nHigh: ${highThreshold}%\nLow: ${medThreshold}%`);
+      await api.updateModelThresholds(highThreshold / 100, lowThreshold / 100, minMargin / 100);
+      alert(`Confidence thresholds saved to database!\nHigh: ${highThreshold}%\nLow: ${lowThreshold}%\nMin Margin: ${minMargin}%`);
       loadData();
     } catch (e: any) {
       alert(`Failed to save thresholds: ${e.message}`);
@@ -215,6 +221,10 @@ export const ModelManagerView: React.FC = () => {
           </span>
         </div>
 
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl text-[11px] text-amber-900 dark:text-amber-200">
+          <strong>Uncalibrated Defaults:</strong> Default thresholds (85% High / 65% Low / 8% Min Margin) are uncalibrated starting values. Run Recognition Lab benchmarks on real store captures before relying on them in production.
+        </div>
+
         <div className="space-y-4 max-w-xl text-xs">
           <div>
             <div className="flex justify-between mb-1 font-semibold">
@@ -225,40 +235,60 @@ export const ModelManagerView: React.FC = () => {
             </div>
             <input
               type="range"
-              min="70"
-              max="95"
+              min="50"
+              max="98"
               value={highThreshold}
               onChange={(e) => setHighThreshold(parseInt(e.target.value))}
               className="w-full accent-emerald-600 cursor-pointer"
             />
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Items matching the scanned barcode with cosine similarity &ge; <strong>{highThreshold}%</strong> are marked <strong>VERIFIED</strong>.
+              Items matching the scanned barcode with cosine similarity &ge; <strong>{highThreshold}%</strong> and margin &ge; <strong>{minMargin}%</strong> are marked <strong>VERIFIED</strong>.
             </p>
           </div>
 
           <div>
             <div className="flex justify-between mb-1 font-semibold">
               <span className="text-slate-800 dark:text-slate-200">
-                Shopper Rescan Threshold (Medium Confidence): <strong className="text-amber-600 font-mono">{medThreshold}%</strong>
+                Reposition Cutoff (Low Confidence): <strong className="text-amber-600 font-mono">{lowThreshold}%</strong>
               </span>
-              <span className="text-slate-400 font-mono">Current: {medThreshold}%</span>
+              <span className="text-slate-400 font-mono">Current: {lowThreshold}%</span>
             </div>
             <input
               type="range"
-              min="40"
-              max="80"
-              value={medThreshold}
-              onChange={(e) => setMedThreshold(parseInt(e.target.value))}
+              min="30"
+              max="85"
+              value={lowThreshold}
+              onChange={(e) => setLowThreshold(parseInt(e.target.value))}
               className="w-full accent-amber-500 cursor-pointer"
             />
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Items scoring between {medThreshold}% and {highThreshold}% prompt the customer to reposition or rescan.
+              Items scoring in the reposition zone between <strong>{lowThreshold}%</strong> and <strong>{highThreshold}%</strong> prompt the customer to reposition or rescan.
+            </p>
+          </div>
+
+          <div>
+            <div className="flex justify-between mb-1 font-semibold">
+              <span className="text-slate-800 dark:text-slate-200">
+                Minimum Runner-Up Margin: <strong className="text-purple-600 font-mono">{minMargin}%</strong>
+              </span>
+              <span className="text-slate-400 font-mono">Current: {minMargin}%</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="30"
+              value={minMargin}
+              onChange={(e) => setMinMargin(parseInt(e.target.value))}
+              className="w-full accent-purple-600 cursor-pointer"
+            />
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              Scanned product must beat the best competing product by at least <strong>{minMargin}%</strong> to auto-verify.
             </p>
           </div>
 
           <div className="p-3 bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded-2xl flex items-center justify-between">
             <span className="text-purple-900 dark:text-purple-200 font-medium text-xs">
-              Items below {medThreshold}% are flagged and routed to the Admin Review Queue with evidence.
+              Items below {lowThreshold}% are flagged and routed to the Admin Review Queue with evidence.
             </span>
             <button
               onClick={handleSaveThresholds}

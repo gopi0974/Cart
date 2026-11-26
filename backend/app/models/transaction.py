@@ -53,3 +53,12 @@ class MaintenanceFlag(Base):
     flag_name = Column(String(100), primary_key=True)
     applied_at = Column(DateTime, default=datetime.utcnow)
     details = Column(Text, nullable=True)
+
+
+class SystemSetting(Base):
+    """Persistent key-value configuration stored in database (survives server restarts)."""
+    __tablename__ = "system_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -264,12 +264,14 @@ def _run_sync_judgement(
             ))
 
         # 3. State Machine Multi-Object Matching (R4)
+        th_high, th_low, min_margin = CartStateMachine.get_active_thresholds(db)
         full_match = CartStateMachine.run_full_match(
             stored_items=stored_items,
             detected_regions=detected_regions,
             has_pending_item=has_pending,
             hand_activity_occurred=hand_was_present,
-            unstable_motion_seconds=motion_sec
+            unstable_motion_seconds=motion_sec,
+            threshold_low=th_low
         )
 
         for stored_snap, det_reg, sim in full_match.matched_pairs:
@@ -305,7 +307,7 @@ def _run_sync_judgement(
         for missing_snap in full_match.unmatched_items:
             matched_itm = next((i for i in verified_items if i.id == missing_snap.item_id), None)
             if matched_itm and matched_itm.status == "REMOVING":
-                CartStateMachine.confirm_removal(db, matched_itm, stored_items, detected_regions)
+                CartStateMachine.confirm_removal(db, matched_itm, stored_items, detected_regions, threshold_low=th_low)
                 broadcasts.append({
                     "channel": "cart",
                     "event": "ITEM_REMOVED",
@@ -328,7 +330,8 @@ def _run_sync_judgement(
             elif matched_itm and matched_itm.status == "VERIFIED":
                 missing_item, missing_conf, top_cands = CartStateMachine.identify_missing_item(
                     stored_items=stored_items,
-                    detected_regions=detected_regions
+                    detected_regions=detected_regions,
+                    threshold_low=th_low
                 )
                 ev_url = object_detector.save_evidence_snapshot(img_bgr, status="UNAUTHORIZED_REMOVE")
                 alert_msg = f"This item appears to have been removed: {missing_snap.product_name}"
@@ -341,7 +344,7 @@ def _run_sync_judgement(
                     evidence_path=ev_url,
                     item_id=missing_snap.item_id
                 )
-                if v_alert and missing_conf < 0.65 and top_cands:
+                if v_alert and missing_conf < th_low and top_cands:
                     from app.models.alert import ReviewCase
                     existing_case = db.query(ReviewCase).filter(ReviewCase.alert_id == v_alert.id).first()
                     if not existing_case:
@@ -378,8 +381,8 @@ def _run_sync_judgement(
                             "confidence": missing_conf,
                             "last_known_image": missing_snap.last_known_crop_path,
                             "evidence_snapshot_url": ev_url,
-                            "requires_staff_review": missing_conf < 0.65,
-                            "top_candidates": top_cands if missing_conf < 0.65 else None,
+                            "requires_staff_review": missing_conf < th_low,
+                            "top_candidates": top_cands if missing_conf < th_low else None,
                             "created_at": v_alert.created_at.isoformat()
                         }
                     })
@@ -394,7 +397,7 @@ def _run_sync_judgement(
                         "confidence": missing_conf,
                         "last_known_image": missing_snap.last_known_crop_path,
                         "current_evidence": ev_url,
-                        "top_candidates": top_cands if missing_conf < 0.65 else None
+                        "top_candidates": top_cands if missing_conf < th_low else None
                     }
                 })
                 websocket_messages.append({
@@ -468,6 +471,9 @@ def _run_sync_judgement(
                     scanned_product_score=scanned_score,
                     runner_up_score=runner_up_score,
                     runner_up_product_name=runner_up_name,
+                    threshold_high=th_high,
+                    threshold_low=th_low,
+                    min_margin=min_margin,
                     face_detected=False
                 )
 

@@ -1074,20 +1074,33 @@ def reset_calibration_session(
 @router.post("/calibration/apply-thresholds")
 def apply_calibration_thresholds(
     req: ApplyThresholdsRequest,
+    db: Optional[Session] = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
-    """Applies empirical calibration thresholds to live system settings."""
+    """Applies empirical calibration thresholds to live system settings and persists in DB."""
+    from app.services.cart_state_machine import CartStateMachine
     if req.confidence_high <= req.confidence_low:
         raise HTTPException(status_code=400, detail="CONFIDENCE_HIGH must be greater than CONFIDENCE_LOW")
     if req.confidence_high > 1.0 or req.confidence_low < 0.0:
         raise HTTPException(status_code=400, detail="Thresholds must be between 0.0 and 1.0")
 
-    settings.CONFIDENCE_HIGH = float(req.confidence_high)
-    settings.CONFIDENCE_LOW = float(req.confidence_low)
+    if db is not None and hasattr(db, "query"):
+        saved_high, saved_low, saved_margin = CartStateMachine.save_thresholds(
+            db=db,
+            confidence_high=req.confidence_high,
+            confidence_low=req.confidence_low,
+        )
+    else:
+        settings.CONFIDENCE_HIGH = round(float(req.confidence_high), 4)
+        settings.CONFIDENCE_LOW = round(float(req.confidence_low), 4)
+        saved_high, saved_low = settings.CONFIDENCE_HIGH, settings.CONFIDENCE_LOW
+        saved_margin = getattr(settings, "MIN_MARGIN", 0.08)
+
     return {
-        "confidence_high": settings.CONFIDENCE_HIGH,
-        "confidence_low": settings.CONFIDENCE_LOW,
-        "message": f"Applied live thresholds: HIGH={settings.CONFIDENCE_HIGH:.2f}, LOW={settings.CONFIDENCE_LOW:.2f}"
+        "confidence_high": saved_high,
+        "confidence_low": saved_low,
+        "min_margin": saved_margin,
+        "message": f"Applied live thresholds: HIGH={saved_high:.2f}, LOW={saved_low:.2f}, MARGIN={saved_margin:.2f}"
     }
 
 
