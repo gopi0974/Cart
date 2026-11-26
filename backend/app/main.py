@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.config import settings, is_valid_base_url, get_base_url_host
+from app.config import settings, is_valid_base_url, get_base_url_host, validate_production_secrets
 from app.database import init_db, SessionLocal, check_db_health, get_db
 from app.utils.seed_data import seed_database
 from app.utils.perf import reset_query_count, get_query_count, db_query_counter
@@ -40,6 +40,7 @@ logger = logging.getLogger("smartcart")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing SmartCart AI backend...")
+    validate_production_secrets()
 
     # 1. Start ONNX INT8 CLIP model loading in background thread (port opens immediately)
     start_background_model_loader()
@@ -169,7 +170,7 @@ def get_git_commit_hash() -> str:
         out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
         return out.decode("utf-8").strip()
     except Exception:
-        return "7cd7c7a"
+        return "unknown"
 
 
 def _get_public_health_data():

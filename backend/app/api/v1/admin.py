@@ -215,7 +215,7 @@ def regenerate_cart_qr(
         entity_id=cart.id,
         details_json=json.dumps({
             "cart_number": cart.cart_number,
-            "new_qr_token": new_token,
+            "event": "QR_TOKEN_REGENERATED",
             "regenerated_by": current_user.email,
             "timestamp": datetime.utcnow().isoformat()
         }),

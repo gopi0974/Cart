@@ -120,12 +120,31 @@ class Settings(BaseModel):
     # Face on Packaging policy: "withhold" (default, privacy-first) or "mask_and_judge"
     FACE_ON_PACKAGING_MODE: str = os.getenv("FACE_ON_PACKAGING_MODE", "withhold").lower()
     
-    # Payment Gateway (Test mode only)
+    # Payment Gateway (Test mode only; no hardcoded secret defaults)
     PAYMENT_MODE: str = os.getenv("PAYMENT_MODE", "TEST")
-    PAYMENT_KEY_ID: str = os.getenv("PAYMENT_KEY_ID", "rzp_test_smartcart2026")
-    PAYMENT_KEY_SECRET: str = os.getenv("PAYMENT_KEY_SECRET", "test_secret_mock_sandbox")
+    PAYMENT_KEY_ID: Optional[str] = os.getenv("PAYMENT_KEY_ID")
+    PAYMENT_KEY_SECRET: Optional[str] = os.getenv("PAYMENT_KEY_SECRET")
+
+
+DEFAULT_SECRET_KEY = "smartcart-super-secret-key-change-in-production-2026"
+DEFAULT_QR_SIGNING_SECRET = "smartcart-qr-hmac-secret-key-production-2026"
 
 settings = Settings()
+
+
+def validate_production_secrets(cfg: Optional[Settings] = None) -> None:
+    """Raise a startup error if DEMO_MODE is false and SECRET_KEY or QR_SIGNING_SECRET is unset or default."""
+    s = cfg or settings
+    if s.DEMO_MODE:
+        return
+    if not s.SECRET_KEY or not str(s.SECRET_KEY).strip() or s.SECRET_KEY == DEFAULT_SECRET_KEY:
+        raise RuntimeError(
+            "Startup error: SECRET_KEY must be set to a non-default value when DEMO_MODE is false."
+        )
+    if not s.QR_SIGNING_SECRET or not str(s.QR_SIGNING_SECRET).strip() or s.QR_SIGNING_SECRET == DEFAULT_QR_SIGNING_SECRET:
+        raise RuntimeError(
+            "Startup error: QR_SIGNING_SECRET must be set to a non-default value when DEMO_MODE is false."
+        )
 
 CURRENT_PREPROCESSING_VERSION = settings.CURRENT_PREPROCESSING_VERSION
 FACE_ON_PACKAGING_MODE = settings.FACE_ON_PACKAGING_MODE

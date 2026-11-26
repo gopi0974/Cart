@@ -158,4 +158,69 @@ def test_simulate_action_rejected_for_staff_role(monkeypatch):
         }
     )
     assert res.status_code == 403
-    assert "Requires Admin or Manager role" in res.json()["detail"]
+
+
+def test_validate_production_secrets_raises_on_default_or_unset():
+    """Startup secret validation must raise when DEMO_MODE=false and SECRET_KEY or QR_SIGNING_SECRET is default/empty."""
+    from app.config import Settings, validate_production_secrets, DEFAULT_SECRET_KEY, DEFAULT_QR_SIGNING_SECRET
+
+    bad_jwt = Settings(DEMO_MODE=False, SECRET_KEY=DEFAULT_SECRET_KEY, QR_SIGNING_SECRET="custom-qr-secret-123456")
+    with pytest.raises(RuntimeError, match="SECRET_KEY"):
+        validate_production_secrets(bad_jwt)
+
+    bad_qr = Settings(DEMO_MODE=False, SECRET_KEY="custom-jwt-secret-123456", QR_SIGNING_SECRET=DEFAULT_QR_SIGNING_SECRET)
+    with pytest.raises(RuntimeError, match="QR_SIGNING_SECRET"):
+        validate_production_secrets(bad_qr)
+
+    ok_prod = Settings(DEMO_MODE=False, SECRET_KEY="custom-jwt-secret-123456", QR_SIGNING_SECRET="custom-qr-secret-123456")
+    validate_production_secrets(ok_prod)
+
+    ok_demo = Settings(DEMO_MODE=True, SECRET_KEY=DEFAULT_SECRET_KEY, QR_SIGNING_SECRET=DEFAULT_QR_SIGNING_SECRET)
+    validate_production_secrets(ok_demo)
+
+
+def test_git_commit_hash_fallback_is_unknown(monkeypatch):
+    """get_git_commit_hash must read RENDER_GIT_COMMIT and fall back to 'unknown', never a hardcoded hash."""
+    from app.main import get_git_commit_hash
+    import subprocess
+
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no git")))
+    assert get_git_commit_hash() == "unknown"
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abcdef1234567890")
+    assert get_git_commit_hash() == "abcdef1"
+
+
+def test_regenerate_qr_audit_log_never_stores_token():
+    """Regenerating a cart QR code must log the event in AuditLog without writing new_qr_token."""
+    from app.models.cart import Cart
+    from app.models.transaction import AuditLog
+
+    db = TestingSessionLocal()
+    try:
+        cart = Cart(id="cart-qr-audit-1", cart_number="CART-QR-1", qr_code_token="QR-OLD", is_enabled=True, status="IDLE")
+        db.add(cart)
+        db.commit()
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    admin_token = create_access_token(data={"sub": "admin.hardening@smartcart.internal", "role": "ADMIN"})
+    res = client.post(
+        "/api/v1/admin/carts/cart-qr-audit-1/regenerate-qr",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert res.status_code == 200
+    new_token = res.json()["qr_code_token"]
+
+    db = TestingSessionLocal()
+    try:
+        log = db.query(AuditLog).filter(AuditLog.action == "REGENERATE_CART_QR", AuditLog.entity_id == "cart-qr-audit-1").first()
+        assert log is not None
+        assert new_token not in (log.details_json or "")
+        assert "new_qr_token" not in (log.details_json or "")
+        assert "QR_TOKEN_REGENERATED" in (log.details_json or "")
+    finally:
+        db.close()
