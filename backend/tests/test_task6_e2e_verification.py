@@ -1,9 +1,6 @@
 import asyncio
 import uuid
 import pytest
-import psycopg2
-from app.config import settings
-from app.database import SessionLocal
 from app.models.user import User
 from app.models.product import Product
 from app.models.cart import Cart
@@ -11,14 +8,11 @@ from app.models.session import CartSession, CartItem
 from app.services.session_service import SessionService
 from app.api.v1.products import create_product, delete_product, list_products, restore_product
 from app.schemas.product import ProductCreate
+from tests.conftest import create_live_test_session
 
 def test_full_e2e():
-    try:
-        conn = psycopg2.connect(settings.DATABASE_URL, connect_timeout=1)
-        conn.close()
-    except Exception as e:
-        pytest.skip(f"Live database not reachable: {e}")
-    db = SessionLocal()
+    engine, LiveSessionLocal = create_live_test_session()
+    db = LiveSessionLocal()
     loop = asyncio.get_event_loop()
     print("=================================================================")
     print("   TASK 6: FINAL END-TO-END VERIFICATION & DEPLOYMENT CHECKLIST   ")
@@ -60,7 +54,7 @@ def test_full_e2e():
         db.close()
 
         # Reopen fresh database session simulating new login
-        db = SessionLocal()
+        db = LiveSessionLocal()
         admin_user = db.query(User).filter(User.role == "ADMIN").first() or db.query(User).first()
         print("Simulated admin logout, connection teardown, and fresh login...")
         reloaded_prod = db.query(Product).filter(Product.id == created_prod.id).first()
