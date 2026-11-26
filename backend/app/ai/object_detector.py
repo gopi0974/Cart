@@ -128,32 +128,32 @@ class ObjectDetector:
         face_present: bool = False
     ) -> Optional[str]:
         """
-        Save evidence snapshot to uploads/evidence/ and return URL.
+        Save evidence snapshot crop to private Supabase bucket smartcart-evidence and return object path.
+        Never falls back to local disk.
         Privacy Enforcement:
         - CROPS OF PRODUCT AREA ONLY (never full camera frames, never faces).
-        - If hand_present or face_present: NEVER save snapshot to disk, return None.
-        - If box is provided: strictly crops product bounding box.
-        - If box is omitted: crops centered product region (never entire frame).
-          Centered fallback is strictly forbidden when hand_present or face_present is True.
+        - If hand_present or face_present: NEVER save snapshot, return None.
         """
         if hand_present or face_present:
             return None
 
+        import io
+        from app.services.storage_service import storage_service
+
         filename = f"{status.lower()}_{uuid.uuid4().hex[:10]}.jpg"
-        filepath = os.path.join(settings.EVIDENCE_DIR, filename)
+        object_path = f"evidence/{filename}"
+        jpeg_bytes: Optional[bytes] = None
 
         if HAS_CV2 and isinstance(image_bgr, np.ndarray):
             h, w = image_bgr.shape[:2]
             if box:
                 x1, y1, x2, y2 = box
-                # Clamp coordinates to frame boundaries
                 x1 = max(0, min(w - 1, x1))
                 y1 = max(0, min(h - 1, y1))
                 x2 = max(x1 + 1, min(w, x2))
                 y2 = max(y1 + 1, min(h, y2))
                 cropped_product = image_bgr[y1:y2, x1:x2].copy()
             else:
-                # Privacy safeguard: crop central 60% of frame, never save full wide frame
                 cx1 = int(w * 0.20)
                 cy1 = int(h * 0.20)
                 cx2 = int(w * 0.80)
@@ -163,7 +163,9 @@ class ObjectDetector:
             if cropped_product.size == 0:
                 cropped_product = np.zeros((120, 120, 3), dtype=np.uint8)
 
-            cv2.imwrite(filepath, cropped_product, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok, buf = cv2.imencode(".jpg", cropped_product, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if ok:
+                jpeg_bytes = buf.tobytes()
         else:
             if isinstance(image_bgr, Image.Image):
                 pil_img = image_bgr
@@ -172,43 +174,94 @@ class ObjectDetector:
             else:
                 pil_img = Image.new("RGB", (224, 224), (30, 30, 30))
 
-            # Crop product area from PIL if box provided
             if box:
                 x1, y1, x2, y2 = box
                 pil_crop = pil_img.crop((x1, y1, x2, y2))
             else:
                 pw, ph = pil_img.size
                 pil_crop = pil_img.crop((int(pw * 0.2), int(ph * 0.2), int(pw * 0.8), int(ph * 0.8)))
-            pil_crop.save(filepath, "JPEG", quality=85)
+            buf_io = io.BytesIO()
+            pil_crop.save(buf_io, "JPEG", quality=85)
+            jpeg_bytes = buf_io.getvalue()
 
-        return f"/uploads/evidence/{filename}"
+        if not jpeg_bytes:
+            return None
+
+        uploaded_ref = storage_service.upload_bytes(
+            object_path=object_path,
+            data=jpeg_bytes,
+            content_type="image/jpeg",
+        )
+        if not uploaded_ref:
+            logger.warning("Evidence crop not saved: smartcart-evidence storage is not configured or upload failed.")
+        return uploaded_ref
 
 
-def cleanup_expired_evidence(retention_days: Optional[int] = None) -> int:
+def cleanup_expired_evidence(db=None, retention_days: Optional[int] = None) -> int:
     """
-    Automatic cleanup job: deletes evidence snapshot crops older than retention policy.
-    Default retention: 14 days (from settings.EVIDENCE_RETENTION_DAYS).
+    Automatic cleanup job: deletes expired evidence snapshot crops from smartcart-evidence bucket
+    AND clears database references (Alert.evidence_path / evidence_snapshot_url and
+    CartItem.last_known_crop_path / verification_evidence_url) together.
     """
+    from datetime import datetime, timedelta
+    from app.services.storage_service import storage_service
+    from app.database import SessionLocal
+
     days = retention_days if retention_days is not None else getattr(settings, "EVIDENCE_RETENTION_DAYS", 14)
-    cutoff_time = time.time() - (days * 86400)
+    cutoff_dt = datetime.utcnow() - timedelta(days=days)
     deleted_count = 0
 
-    evidence_dir = Path(settings.EVIDENCE_DIR)
-    if not evidence_dir.exists():
-        return 0
+    own_db = False
+    if db is None:
+        if not SessionLocal:
+            return 0
+        db = SessionLocal()
+        own_db = True
 
     try:
-        for file_path in evidence_dir.glob("*.jpg"):
-            try:
-                if file_path.stat().st_mtime < cutoff_time:
-                    file_path.unlink()
-                    deleted_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to delete expired evidence file {file_path.name}: {e}")
-        if deleted_count > 0:
-            logger.info(f"Cleaned up {deleted_count} expired evidence snapshot(s) older than {days} days.")
+        from app.models.alert import Alert
+        from app.models.session import CartItem, CartSession
+
+        expired_alerts = db.query(Alert).filter(
+            Alert.created_at < cutoff_dt,
+            (Alert.evidence_path.isnot(None)) | (Alert.evidence_snapshot_url.isnot(None)),
+        ).all()
+        for al in expired_alerts:
+            for ref in {al.evidence_path, al.evidence_snapshot_url}:
+                if ref and str(ref).startswith("supabase://"):
+                    if storage_service.delete_object(ref):
+                        deleted_count += 1
+            al.evidence_path = None
+            al.evidence_snapshot_url = None
+
+        expired_items = (
+            db.query(CartItem)
+            .join(CartSession, CartItem.session_id == CartSession.id)
+            .filter(
+                CartSession.status != "ACTIVE",
+                CartItem.scanned_at < cutoff_dt,
+                (CartItem.last_known_crop_path.isnot(None)) | (CartItem.verification_evidence_url.isnot(None)),
+            )
+            .all()
+        )
+        for itm in expired_items:
+            for ref in {itm.last_known_crop_path, itm.verification_evidence_url}:
+                if ref and str(ref).startswith("supabase://"):
+                    if storage_service.delete_object(ref):
+                        deleted_count += 1
+            itm.last_known_crop_path = None
+            itm.verification_evidence_url = None
+
+        db.commit()
     except Exception as e:
-        logger.error(f"Error during evidence cleanup: {e}")
+        logger.error(f"Error during evidence retention cleanup: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        if own_db and db is not None:
+            db.close()
 
     return deleted_count
 

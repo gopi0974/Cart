@@ -434,31 +434,28 @@ def test_evidence_snapshot_privacy_cropping():
     full_frame[140:340, 220:420] = 200
     bounding_box = (220, 140, 420, 340)  # width 200, height 200
 
-    evidence_url = object_detector.save_evidence_snapshot(
-        full_frame,
-        box=bounding_box,
-        label="VERIFIED",
-        status="TEST_PRIVACY"
-    )
+    captured = {}
 
-    assert evidence_url.startswith("/uploads/evidence/"), "Evidence URL must point to stored snapshot"
+    def fake_upload(object_path, data, content_type="image/jpeg", bucket=None):
+        captured["path"] = f"supabase://smartcart-evidence/{object_path}"
+        captured["data"] = data
+        return captured["path"]
 
-    # Read back the saved image
-    filename = os.path.basename(evidence_url)
-    snapshot_path = os.path.join(settings.EVIDENCE_DIR, filename)
-    assert os.path.exists(snapshot_path), "Snapshot must be saved on disk"
+    with patch("app.services.storage_service.storage_service.upload_bytes", side_effect=fake_upload):
+        evidence_url = object_detector.save_evidence_snapshot(
+            full_frame,
+            box=bounding_box,
+            label="VERIFIED",
+            status="TEST_PRIVACY"
+        )
 
-    saved_img = Image.open(snapshot_path)
+    assert evidence_url.startswith("supabase://smartcart-evidence/evidence/"), "Evidence URL must point to private bucket object"
+    import io
+    saved_img = Image.open(io.BytesIO(captured["data"]))
     # The saved crop dimensions must match the bounding box, NOT 640x480!
     assert saved_img.width <= 210, f"Saved image width {saved_img.width} must be cropped, not full 640"
     assert saved_img.height <= 210, f"Saved image height {saved_img.height} must be cropped, not full 480"
     assert (saved_img.width, saved_img.height) != (640, 480), "Full camera frame MUST NEVER be saved as evidence!"
-
-    # Clean up test artifact
-    try:
-        os.remove(snapshot_path)
-    except Exception:
-        pass
 
 
 # =========================================================================

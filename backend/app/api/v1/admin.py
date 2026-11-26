@@ -26,6 +26,25 @@ from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/admin", tags=["Admin Portal"], dependencies=[Depends(get_current_user)])
 
+@router.get("/evidence/signed-url")
+def get_admin_evidence_signed_url(
+    path: str = Query(..., description="Private bucket object path (e.g. supabase://smartcart-evidence/evidence/foo.jpg)"),
+    expires_in: int = Query(300, ge=30, le=3600),
+):
+    """Return a short-lived signed download URL for private evidence/lab/reference objects."""
+    from app.services.storage_service import storage_service
+    if not storage_service.is_supabase_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage unavailable: Supabase smartcart-evidence bucket is not configured."
+        )
+    obj_ref = path if path.startswith("supabase://") else f"supabase://{storage_service.evidence_bucket}/{path.lstrip('/')}"
+    signed_url = storage_service.create_signed_download_url(obj_ref, expires_in=expires_in)
+    if not signed_url:
+        raise HTTPException(status_code=404, detail="Could not generate signed URL for evidence object.")
+    return {"signed_url": signed_url, "expires_in": expires_in}
+
+
 @router.get("/overview")
 def get_overview(db: Session = Depends(get_db)):
     """Executive KPI metrics and live operational status."""

@@ -430,38 +430,61 @@ def test_r8_resolve_violation_marks_staff_approved_and_sets_cooldown(db_session)
 # EVIDENCE STORAGE & PRIVACY RETENTION TESTS
 # ==============================================================================
 
-def test_evidence_storage_privacy_gate_never_stores_faces(tmp_path):
+def test_evidence_storage_privacy_gate_never_stores_faces():
     detector = ObjectDetector()
     dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
 
-    # When face or hand is present, snapshot save is strictly withheld
-    with patch.object(settings, "EVIDENCE_DIR", tmp_path):
+    with patch("app.services.storage_service.storage_service.upload_bytes", side_effect=lambda object_path, data, content_type="image/jpeg", bucket=None: f"supabase://smartcart-evidence/{object_path}"):
+        # When face or hand is present, snapshot save is strictly withheld
         res_face = detector.save_evidence_snapshot(dummy_img, face_present=True)
         assert res_face is None
 
         res_hand = detector.save_evidence_snapshot(dummy_img, hand_present=True)
         assert res_hand is None
 
-        # Clean product crop succeeds
+        # Clean product crop succeeds via smartcart-evidence bucket
         res_clean = detector.save_evidence_snapshot(dummy_img, face_present=False, hand_present=False, box=(100, 100, 300, 300))
         assert res_clean is not None
-        assert res_clean.startswith("/uploads/evidence/")
+        assert res_clean.startswith("supabase://smartcart-evidence/evidence/")
 
 
-def test_evidence_retention_cleanup(tmp_path):
-    # Create old and fresh evidence files
-    old_file = tmp_path / "old_evidence.jpg"
-    old_file.write_text("old")
-    fresh_file = tmp_path / "fresh_evidence.jpg"
-    fresh_file.write_text("fresh")
+def test_evidence_retention_cleanup(db_session):
+    from datetime import timedelta
+    now_dt = datetime.utcnow()
+    old_ref = "supabase://smartcart-evidence/evidence/old_evidence.jpg"
+    fresh_ref = "supabase://smartcart-evidence/evidence/fresh_evidence.jpg"
 
-    # Set old_file modification time to 20 days ago
-    twenty_days_ago = time.time() - (20 * 86400)
-    import os
-    os.utime(old_file, (twenty_days_ago, twenty_days_ago))
+    cart = db_session.query(Cart).first()
+    old_alert = Alert(
+        cart_id=cart.id,
+        alert_type="UNSCANNED_ITEM",
+        message="old",
+        severity="HIGH",
+        status="RESOLVED",
+        evidence_path=old_ref,
+        evidence_snapshot_url=old_ref,
+        created_at=now_dt - timedelta(days=20),
+    )
+    fresh_alert = Alert(
+        cart_id=cart.id,
+        alert_type="UNSCANNED_ITEM",
+        message="fresh",
+        severity="HIGH",
+        status="OPEN",
+        evidence_path=fresh_ref,
+        evidence_snapshot_url=fresh_ref,
+        created_at=now_dt - timedelta(days=2),
+    )
+    db_session.add_all([old_alert, fresh_alert])
+    db_session.commit()
 
-    with patch.object(settings, "EVIDENCE_DIR", tmp_path):
-        cleaned = cleanup_expired_evidence(retention_days=14)
+    deleted = []
+    with patch("app.services.storage_service.storage_service.delete_object", side_effect=lambda ref: deleted.append(ref) or True):
+        cleaned = cleanup_expired_evidence(db=db_session, retention_days=14)
         assert cleaned == 1
-        assert not old_file.exists()
-        assert fresh_file.exists()
+        assert old_ref in deleted
+        assert fresh_ref not in deleted
+        db_session.refresh(old_alert)
+        db_session.refresh(fresh_alert)
+        assert old_alert.evidence_path is None
+        assert fresh_alert.evidence_path == fresh_ref

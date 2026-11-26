@@ -1139,21 +1139,33 @@ def save_debug_frame(
             detail=f"Image dimensions ({w}x{h}) exceed crop maximum (800x800). Debug frames must be product crops only."
         )
 
-    # Save to debug_frames directory
-    debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "debug_frames")
-    os.makedirs(debug_dir, exist_ok=True)
+    if not settings.DEMO_MODE and not storage_service.is_supabase_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage unavailable: Supabase smartcart-evidence bucket is not configured."
+        )
 
     bcode = req.barcode or "item"
     c_label = req.cart_number or req.cart_id or "cart"
     filename = f"crop_{bcode}_{c_label}_{int(time.time())}_{uuid.uuid4().hex[:6]}.png"
-    save_path = os.path.join(debug_dir, filename)
-    pil_img.save(save_path, format="PNG")
+    out_buf = io.BytesIO()
+    pil_img.save(out_buf, format="PNG")
+    obj_ref = storage_service.upload_bytes(
+        object_path=f"debug_frames/{filename}",
+        data=out_buf.getvalue(),
+        content_type="image/png",
+    )
+    if not obj_ref and not settings.DEMO_MODE:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage unavailable: failed to upload debug frame to smartcart-evidence bucket."
+        )
 
     logger.info(f"Staff saved debug frame '{filename}' for product barcode {bcode} by {current_user.email}.")
     return {
         "status": "SAVED",
         "filename": filename,
-        "file_path": save_path,
+        "file_path": obj_ref or f"debug_frames/{filename}",
         "width": w,
         "height": h,
         "barcode": req.barcode,
@@ -1184,7 +1196,7 @@ def record_recognition_lab_sample(
     Evaluates a single test photo crop for the Recognition Lab using the exact cart camera pipeline.
     Computes expected product score, top-1 and top-2 candidates, score_scanned, best_other, and margin.
     """
-    from app.services.recognition_lab_service import recognition_lab_service
+    from app.services.recognition_lab_service import recognition_lab_service, StorageNotConfiguredError
 
     if not req.image_data_url or len(req.image_data_url) < 50:
         raise HTTPException(status_code=400, detail="Invalid photo data provided.")
@@ -1199,14 +1211,17 @@ def record_recognition_lab_sample(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decode photo image: {e}")
 
-    sample = recognition_lab_service.evaluate_and_record_photo(
-        db=db,
-        image_pil=pil_img,
-        expected_barcode=req.expected_barcode,
-        filename=req.filename or "photo.jpg",
-        angle_label=req.angle_label or "OVERHEAD",
-        source=req.source or "upload"
-    )
+    try:
+        sample = recognition_lab_service.evaluate_and_record_photo(
+            db=db,
+            image_pil=pil_img,
+            expected_barcode=req.expected_barcode,
+            filename=req.filename or "photo.jpg",
+            angle_label=req.angle_label or "OVERHEAD",
+            source=req.source or "upload"
+        )
+    except StorageNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "status": "SUCCESS",
@@ -1226,7 +1241,7 @@ async def upload_recognition_lab_file(
     """
     Multipart upload for Recognition Lab test photos.
     """
-    from app.services.recognition_lab_service import recognition_lab_service
+    from app.services.recognition_lab_service import recognition_lab_service, StorageNotConfiguredError
 
     try:
         contents = await file.read()
@@ -1234,14 +1249,17 @@ async def upload_recognition_lab_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image file uploaded: {e}")
 
-    sample = recognition_lab_service.evaluate_and_record_photo(
-        db=db,
-        image_pil=pil_img,
-        expected_barcode=expected_barcode,
-        filename=file.filename or "uploaded_photo.jpg",
-        angle_label=angle_label or "OVERHEAD",
-        source="upload"
-    )
+    try:
+        sample = recognition_lab_service.evaluate_and_record_photo(
+            db=db,
+            image_pil=pil_img,
+            expected_barcode=expected_barcode,
+            filename=file.filename or "uploaded_photo.jpg",
+            angle_label=angle_label or "OVERHEAD",
+            source="upload"
+        )
+    except StorageNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "status": "SUCCESS",
@@ -1252,6 +1270,7 @@ async def upload_recognition_lab_file(
 
 @router.get("/recognition-lab/results")
 def get_recognition_lab_results(
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
     """
@@ -1262,18 +1281,19 @@ def get_recognition_lab_results(
     - Empirical confusion table
     """
     from app.services.recognition_lab_service import recognition_lab_service
-    return recognition_lab_service.get_analysis_report()
+    return recognition_lab_service.get_analysis_report(db=db)
 
 
 @router.post("/recognition-lab/reset")
 def reset_recognition_lab(
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
     """
     Clears all recorded Recognition Lab test photos and analysis data.
     """
     from app.services.recognition_lab_service import recognition_lab_service
-    count = recognition_lab_service.reset_all()
+    count = recognition_lab_service.reset_all(db=db)
     return {
         "status": "RESET",
         "cleared_count": count,
@@ -1284,13 +1304,14 @@ def reset_recognition_lab(
 @router.delete("/recognition-lab/sample/{sample_id}")
 def delete_recognition_lab_sample(
     sample_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_admin_or_manager)
 ):
     """
     Deletes a single test photo sample from the Recognition Lab.
     """
     from app.services.recognition_lab_service import recognition_lab_service
-    deleted = recognition_lab_service.delete_sample(sample_id)
+    deleted = recognition_lab_service.delete_sample(sample_id, db=db)
     if not deleted:
         raise HTTPException(status_code=404, detail="Sample ID not found in Recognition Lab.")
     return {

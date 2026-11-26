@@ -225,6 +225,41 @@ async def checkout(req: CheckoutRequest, session: CartSession = Depends(verify_s
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/{session_id}/evidence-url")
+def get_shopper_evidence_signed_url(
+    path: str,
+    session: CartSession = Depends(verify_shopper_session),
+    db: Session = Depends(get_db),
+):
+    """Return a short-lived signed URL for an evidence crop belonging to this shopper's session."""
+    from app.models.alert import Alert
+    from app.models.session import CartItem
+    from app.services.storage_service import storage_service
+
+    if not storage_service.is_supabase_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Storage unavailable: Supabase smartcart-evidence bucket is not configured."
+        )
+
+    obj_ref = path if path.startswith("supabase://") else f"supabase://{storage_service.evidence_bucket}/{path.lstrip('/')}"
+    item_match = db.query(CartItem).filter(
+        CartItem.session_id == session.id,
+        (CartItem.last_known_crop_path == obj_ref) | (CartItem.verification_evidence_url == obj_ref)
+    ).first()
+    alert_match = db.query(Alert).filter(
+        Alert.session_id == session.id,
+        (Alert.evidence_path == obj_ref) | (Alert.evidence_snapshot_url == obj_ref)
+    ).first()
+    if not item_match and not alert_match:
+        raise HTTPException(status_code=403, detail="Evidence object does not belong to this shopping session.")
+
+    signed_url = storage_service.create_signed_download_url(obj_ref, expires_in=300)
+    if not signed_url:
+        raise HTTPException(status_code=404, detail="Could not generate signed URL for evidence object.")
+    return {"signed_url": signed_url, "expires_in": 300}
+
+
 @router.get("/{session_id}/receipt", response_model=ReceiptResponse)
 def get_receipt(session: CartSession = Depends(verify_shopper_session), db: Session = Depends(get_db)):
     """Fetch digital receipt for completed session."""

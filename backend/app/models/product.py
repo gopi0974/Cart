@@ -70,3 +70,30 @@ class ProductEmbedding(Base):
 
     product = relationship("Product", back_populates="embeddings")
 
+
+class RecognitionLabSample(Base):
+    """Persisted Recognition Lab evaluation metadata (no base64 thumbnails; image stored in smartcart-evidence)."""
+    __tablename__ = "recognition_lab_samples"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    filename = Column(String(255), nullable=False, default="photo.jpg")
+    source = Column(String(50), nullable=False, default="upload")
+    expected_barcode = Column(String(50), index=True, nullable=False)
+    expected_product_name = Column(String(255), nullable=False)
+    expected_product_id = Column(String(36), nullable=True)
+    angle_label = Column(String(50), nullable=False, default="OVERHEAD")
+    image_path = Column(Text, nullable=True)
+    top1_product_name = Column(String(255), nullable=True)
+    top1_barcode = Column(String(50), nullable=True)
+    top1_score = Column(Float, nullable=False, default=0.0)
+    top2_product_name = Column(String(255), nullable=True)
+    top2_barcode = Column(String(50), nullable=True)
+    top2_score = Column(Float, nullable=False, default=0.0)
+    score_scanned = Column(Float, nullable=False, default=0.0)
+    best_other = Column(Float, nullable=False, default=0.0)
+    best_other_product_name = Column(String(255), nullable=True)
+    best_other_barcode = Column(String(50), nullable=True)
+    margin = Column(Float, nullable=False, default=0.0)
+    is_correct_top1 = Column(Boolean, default=False)
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+

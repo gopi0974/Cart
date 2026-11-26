@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings, is_valid_base_url, get_base_url_host, validate_production_secrets
 from app.database import init_db, SessionLocal, check_db_health, get_db
+import app.database as app_db
 from app.utils.seed_data import seed_database
 from app.utils.perf import reset_query_count, get_query_count, db_query_counter
 from app.websocket.manager import ws_manager
@@ -57,11 +58,11 @@ async def lifespan(app: FastAPI):
             cleanup_orphaned_jobs_on_startup()
 
             from app.ai.object_detector import cleanup_expired_evidence
-            cleanup_expired_evidence()
-
-            if SessionLocal:
-                db = SessionLocal()
+            session_factory = app_db.SessionLocal or SessionLocal
+            if session_factory:
+                db = session_factory()
                 try:
+                    cleanup_expired_evidence(db=db)
                     seed_database(db)
                     try:
                         from app.ai.vector_store import VectorStoreMatcher
@@ -263,15 +264,8 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
         mismatched_vectors = _detailed_health_cache["mismatched_vectors"]
         last_job_data = _detailed_health_cache["last_job_data"]
     else:
-        storage_ok = False
-        try:
-            test_file = settings.EVIDENCE_DIR / f".probe_{uuid.uuid4().hex[:6]}"
-            with open(test_file, "w") as f:
-                f.write("ok")
-            os.remove(test_file)
-            storage_ok = True
-        except Exception:
-            storage_ok = False
+        from app.services.storage_service import storage_service
+        storage_ok = storage_service.is_supabase_configured
 
         total_products = 0
         vectors_count = 0
@@ -359,14 +353,12 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
         if worker_metrics.get("total_duration_ms", 0.0) == 0.0 and last_job_data.get("duration_ms"):
             worker_metrics["total_duration_ms"] = last_job_data["duration_ms"]
 
-    storage_type = "Local Disk"
-    try:
-        from app.services.storage_service import StorageService
-        storage_svc = StorageService()
-        if storage_svc.is_supabase_configured:
-            storage_type = "Supabase Storage (Cloud)"
-    except Exception:
-        pass
+    from app.services.storage_service import storage_service
+    storage_type = (
+        f"Supabase Storage ({storage_service.evidence_bucket})"
+        if storage_ok
+        else "NOT CONFIGURED (Supabase Storage required)"
+    )
 
     base_url_host = get_base_url_host(settings.BASE_URL)
     base_url_valid = is_valid_base_url(settings.BASE_URL, demo_mode=settings.DEMO_MODE)

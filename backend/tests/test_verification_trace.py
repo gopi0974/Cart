@@ -408,35 +408,41 @@ def test_pending_item_exceeding_15_seconds_shows_reason(db, setup_data):
 # 5. Test Save Debug Frame Endpoint (Product Crop Only, Size Gated)
 # =========================================================================
 def test_save_debug_frame_endpoint(db, setup_data, auth_headers):
+    from unittest.mock import patch
     # Valid crop (300x300 px)
     crop_img = Image.new("RGB", (300, 300), color=(100, 150, 200))
     buf = io.BytesIO()
     crop_img.save(buf, format="PNG")
     crop_b64 = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    resp = client.post(
-        "/api/v1/vision/debug-frames",
-        json={
-            "image_data": crop_b64,
-            "cart_number": "CART-001",
-            "barcode": "890123456001",
-            "product_name": "Coca Cola 500ml",
-            "notes": "Test debug product crop"
-        },
-        headers=auth_headers
-    )
+    with patch("app.services.storage_service.StorageService.is_supabase_configured", new_callable=lambda: property(lambda self: True)), \
+         patch("app.services.storage_service.storage_service.upload_bytes", side_effect=lambda object_path, data, content_type="image/png", bucket=None: f"supabase://smartcart-evidence/{object_path}"):
+        resp = client.post(
+            "/api/v1/vision/debug-frames",
+            json={
+                "image_data": crop_b64,
+                "cart_number": "CART-001",
+                "barcode": "890123456001",
+                "product_name": "Coca Cola 500ml",
+                "notes": "Test debug product crop"
+            },
+            headers=auth_headers
+        )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "SAVED"
     assert data["width"] == 300
     assert data["height"] == 300
-    assert os.path.exists(data["file_path"])
+    assert data["file_path"].startswith("supabase://smartcart-evidence/debug_frames/")
 
-    # Clean up test file
-    try:
-        os.remove(data["file_path"])
-    except Exception:
-        pass
+    # When storage is unconfigured in production, must return 503
+    with patch("app.services.storage_service.StorageService.is_supabase_configured", new_callable=lambda: property(lambda self: False)):
+        resp_503 = client.post(
+            "/api/v1/vision/debug-frames",
+            json={"image_data": crop_b64},
+            headers=auth_headers
+        )
+        assert resp_503.status_code == 503
 
     # Invalid oversized frame (900x900 px) -> Rejected
     oversized = Image.new("RGB", (900, 900), color=(50, 50, 50))
