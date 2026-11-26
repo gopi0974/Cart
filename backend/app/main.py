@@ -24,6 +24,7 @@ from app.ai.feature_extractor import (
     start_background_model_loader,
     is_model_ready,
     get_embedding_metrics,
+    get_model_load_status,
     MODEL_NAME,
     VECTOR_DIM
 )
@@ -420,6 +421,7 @@ def _get_detailed_health_data(fresh: bool = False, db: Optional[Session] = None)
         "migration_error": migration_error,
         "model_name": MODEL_NAME,
         "vector_dimension": VECTOR_DIM,
+        "onnx_session_settings": get_model_load_status().get("onnx_session_settings", {}),
         "storage_ok": storage_ok,
         "storage_type": storage_type,
         "total_products": total_products,

@@ -50,6 +50,16 @@ def get_embedding_metrics() -> dict:
 CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
+ONNX_SESSION_SETTINGS = {
+    "max_sessions": 1,
+    "intra_op_num_threads": 1,
+    "inter_op_num_threads": 1,
+    "execution_mode": "ORT_SEQUENTIAL",
+    "enable_cpu_mem_arena": False,
+    "enable_mem_pattern": False,
+}
+
+
 def is_model_ready() -> bool:
     """Return True if ONNX INT8 CLIP model is loaded and ready for inference."""
     return _model_loaded and _onnx_session is not None
@@ -63,6 +73,7 @@ def get_model_load_status() -> dict:
         "vector_dimension": VECTOR_DIM,
         "model_path": ONNX_MODEL_PATH,
         "model_file_exists": os.path.exists(ONNX_MODEL_PATH),
+        "onnx_session_settings": dict(ONNX_SESSION_SETTINGS),
         "error": _model_error
     }
 
@@ -96,6 +107,8 @@ def load_onnx_model():
             opts.inter_op_num_threads = 1
             opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            opts.enable_cpu_mem_arena = False
+            opts.enable_mem_pattern = False
 
             logger.info(f"Loading INT8 CLIP ViT-B/32 ONNX session from {ONNX_MODEL_PATH}...")
             session = ort.InferenceSession(
