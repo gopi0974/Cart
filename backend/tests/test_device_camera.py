@@ -416,3 +416,39 @@ def test_device_frame_with_face_and_hand_boxes():
         assert ack["type"] == "frame_ack"
         assert ack["status"] == "FACE_REDACTED"
 
+
+def test_device_concurrent_heartbeat_and_frame_session_isolation():
+    """Background frame task must open its own short-lived DB session (db=None passed) and never block heartbeats."""
+    from unittest.mock import patch
+    from app.websocket import device_handler
+
+    orig_process = device_handler.process_camera_frame
+    observed_db_args = []
+
+    async def spy_process(db, *args, **kwargs):
+        observed_db_args.append(db)
+        return await orig_process(db, *args, **kwargs)
+
+    client = TestClient(app)
+    with patch("app.websocket.device_handler.process_camera_frame", side_effect=spy_process):
+        with client.websocket_connect("/ws/device") as ws:
+            ws.send_text(json.dumps({"type": "auth", "token": RAW_DEVICE_TOKEN}))
+            auth_ack = json.loads(ws.receive_text())
+            assert auth_ack["type"] == "auth_ok"
+
+            # Send a frame (spawns background task) and immediately send heartbeat concurrently
+            ws.send_text(json.dumps({
+                "type": "frame",
+                "data": "data:image/jpeg;base64," + "A" * 200,
+                "face_present": True,
+                "hand_present": False,
+            }))
+            ws.send_text(json.dumps({"type": "heartbeat", "battery": 88}))
+
+            msgs = [json.loads(ws.receive_text()), json.loads(ws.receive_text())]
+            types = {m.get("type") for m in msgs}
+            assert "heartbeat_ack" in types
+            assert "frame_ack" in types
+            assert len(observed_db_args) == 1
+            assert observed_db_args[0] is None
+

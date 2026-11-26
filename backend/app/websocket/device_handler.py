@@ -831,7 +831,8 @@ async def process_camera_frame(
     face_present: bool = False,
     motion: bool = False,
     face_boxes: Optional[list] = None,
-    detector_profile: str = "privacy"
+    detector_profile: str = "privacy",
+    db_bind: Any = None,
 ):
     """
     Process incoming camera frame from cart device using CartStateMachine (Phase 2).
@@ -847,7 +848,7 @@ async def process_camera_frame(
     """
     close_db_when_done = False
     if db is None:
-        db = SessionLocal()
+        db = Session(bind=db_bind) if db_bind is not None else SessionLocal()
         close_db_when_done = True
 
     try:
@@ -1422,7 +1423,14 @@ async def handle_device_websocket(
                     record_device_frame(cart_id)
                     current_stage = "binary_frame_processing"
                     active_frame_task = asyncio.create_task(
-                        process_camera_frame(db, cart_id, cart_number, jpeg_bytes, websocket)
+                        process_camera_frame(
+                            None,
+                            cart_id,
+                            cart_number,
+                            jpeg_bytes,
+                            websocket,
+                            db_bind=db.get_bind() if db else None,
+                        )
                     )
 
                 # Text payload (JSON or ping)
@@ -1522,7 +1530,7 @@ async def handle_device_websocket(
                         if face_present:
                             # Privacy: frame image is withheld (None) in withhold mode, metadata sent to processor
                             active_frame_task = asyncio.create_task(process_camera_frame(
-                                db,
+                                None,
                                 cart_id,
                                 cart_number,
                                 frame_data if face_mode == "mask_and_judge" else None,
@@ -1531,12 +1539,13 @@ async def handle_device_websocket(
                                 face_present=True,
                                 motion=bool(payload.get("motion", False)),
                                 face_boxes=face_boxes,
-                                detector_profile=detector_profile
+                                detector_profile=detector_profile,
+                                db_bind=db.get_bind() if db else None,
                             ))
                         elif frame_data:
                             # Process frame if not a face and under limit
                             active_frame_task = asyncio.create_task(process_camera_frame(
-                                db,
+                                None,
                                 cart_id,
                                 cart_number,
                                 frame_data,
@@ -1545,7 +1554,8 @@ async def handle_device_websocket(
                                 face_present=False,
                                 motion=bool(payload.get("motion", False)),
                                 face_boxes=face_boxes,
-                                detector_profile=detector_profile
+                                detector_profile=detector_profile,
+                                db_bind=db.get_bind() if db else None,
                             ))
                         else:
                             await websocket.send_json({
