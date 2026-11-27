@@ -924,17 +924,17 @@ class CartStateMachine:
 
         no open violations, and an exact count match with physical cart (R9).
         """
-        # 1. No PENDING items
+        # 1. No PENDING / WARNING / NEEDS_STAFF_CHECK items
         pending_count = (
             db.query(CartItem)
             .filter(
                 CartItem.session_id == session.id,
-                CartItem.status == "PENDING",
+                CartItem.status.in_(["PENDING", "WARNING", "WARNING_MISMATCH", "WARNING_UNSCANNED", "NEEDS_STAFF_CHECK"]),
             )
             .count()
         )
         if pending_count > 0:
-            return False, "Cannot checkout: scanned item is still pending placement in cart.", ScanBlockReason.ITEM_PENDING
+            return False, "Cannot checkout: scanned item is still pending placement or has an active warning.", ScanBlockReason.ITEM_PENDING
 
         # 2. No REMOVING items
         removing_count = (

@@ -187,3 +187,80 @@ async def test_reposition_warning_item_continues_to_verify_on_next_frame(db_sess
     assert item.status == "VERIFIED"
     unscanned = db_session.query(Alert).filter(Alert.session_id == sess.id, Alert.violation_type == ViolationType.UNSCANNED_ADD.value).first()
     assert unscanned is None
+
+
+@pytest.mark.anyio
+async def test_removing_item_confirms_removal_only_when_physically_gone(db_session):
+    """A REMOVING item must transition to REMOVED and emit ITEM_REMOVED when gone from cart."""
+    sess = CartSession(id=str(uuid.uuid4()), cart_id="cart-rules-1", status="ACTIVE", cart_empty_verified=True)
+    db_session.add(sess)
+    removing = CartItem(
+        id="itm-rem-1",
+        session_id=sess.id,
+        product_id="prod-1",
+        quantity=1,
+        unit_price=20.0,
+        status="REMOVING",
+        crop_embedding=json.dumps([0.6] * 512),
+        bounding_box=json.dumps({"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}),
+    )
+    db_session.add(removing)
+    db_session.commit()
+
+    tracker = get_tracker("cart-rules-1")
+    tracker.ref_background = np.zeros((240, 320, 3), dtype=np.uint8)
+    tracker.stable_start_time = time.time() - 2.0
+    tracker.stable_frame_count = 4
+
+    mock_ws = AsyncMock()
+    empty_frame = np.zeros((240, 320, 3), dtype=np.uint8)
+
+    with patch("app.ai.object_detector.object_detector.detect_all_objects", return_value=[]):
+        await process_camera_frame(
+            db=db_session,
+            cart_id="cart-rules-1",
+            cart_number="CART-R1",
+            image_data=empty_frame,
+            websocket=mock_ws,
+            hand_present=False,
+            face_present=False,
+            motion=False,
+        )
+
+    db_session.refresh(removing)
+    assert removing.status == "REMOVED"
+    sent_actions = [c.args[0].get("action") for c in mock_ws.send_json.call_args_list if c.args]
+    assert "ITEM_REMOVED" in sent_actions
+
+
+@pytest.mark.anyio
+async def test_verify_item_removal_without_image_does_not_raise_false_uncertain_alert(db_session):
+    """verify_item_removal with image_data=None must wait for camera frame instead of creating UNCERTAIN_REMOVAL."""
+    from app.services.session_service import SessionService
+
+    sess = CartSession(id=str(uuid.uuid4()), cart_id="cart-rules-1", status="ACTIVE", cart_empty_verified=True)
+    db_session.add(sess)
+    removing = CartItem(id="itm-rem-2", session_id=sess.id, product_id="prod-1", quantity=1, unit_price=20.0, status="REMOVING")
+    db_session.add(removing)
+    db_session.commit()
+
+    res = await SessionService.verify_item_removal(db_session, sess.id, removing.id, image_data=None)
+    assert res["removed"] is False
+    assert res["status"] == "REMOVING"
+    alert = db_session.query(Alert).filter(Alert.session_id == sess.id, Alert.alert_type == "UNCERTAIN_REMOVAL").first()
+    assert alert is None
+
+
+def test_validate_can_checkout_blocks_warning_items(db_session):
+    """R9: WARNING / NEEDS_STAFF_CHECK items must block validate_can_checkout."""
+    from app.services.cart_state_machine import CartStateMachine
+
+    sess = CartSession(id=str(uuid.uuid4()), cart_id="cart-rules-1", status="ACTIVE", cart_empty_verified=True)
+    db_session.add(sess)
+    item = CartItem(id="itm-warn-chk", session_id=sess.id, product_id="prod-1", quantity=1, unit_price=20.0, status="WARNING", warning_reason="REPOSITION")
+    db_session.add(item)
+    db_session.commit()
+
+    ok, msg, reason = CartStateMachine.validate_can_checkout(sess, db_session, detected_objects_count=0)
+    assert ok is False
+    assert reason is not None

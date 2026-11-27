@@ -793,10 +793,30 @@ class SessionService:
             }
 
         target_bcode = item.product.barcode if item.product else ""
+        ref_bg = None
+        hand_in_frame = False
+        if image_data is None:
+            from app.websocket.device_handler import get_tracker
+            tracker = get_tracker(session.cart_id)
+            image_data = tracker.last_stable_frame
+            ref_bg = tracker.ref_background
+            hand_in_frame = tracker.hand_in_frame
+            if image_data is None:
+                return {
+                    "removed": False,
+                    "status": "REMOVING",
+                    "message": "Waiting for a steady cart camera frame to verify removal..."
+                }
+
         eval_res = verification_engine.evaluate_item_removal(
             db=db,
             target_barcode=target_bcode,
-            image_data=image_data
+            image_data=image_data,
+            ref_background=ref_bg,
+            hand_present=hand_in_frame,
+            cart_id=session.cart_id,
+            session_id=session.id,
+            item_id=item.id,
         )
 
         decision = eval_res.get("decision")
@@ -924,7 +944,7 @@ class SessionService:
             # Resolve removal alerts for this session
             open_alerts = db.query(Alert).filter(
                 Alert.session_id == session.id,
-                Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "ITEM_REMOVAL", "UNCERTAIN_REMOVAL"]),
+                Alert.alert_type.in_(["REMOVAL_WITHOUT_RESCAN", "ITEM_REMOVAL", "UNCERTAIN_REMOVAL", "UNAUTHORIZED_REMOVE"]),
                 Alert.status == "OPEN"
             ).all()
             for al in open_alerts:

@@ -330,29 +330,42 @@ def _run_sync_judgement(
             }
 
         # 4. Handle Unmatched Items (Removal Events - R4.b, R5, R7)
+        confirmed_removing_ids: set[str] = set()
         for missing_snap in full_match.unmatched_items:
             matched_itm = next((i for i in verified_items if i.id == missing_snap.item_id), None)
             if matched_itm and matched_itm.status == "REMOVING":
-                CartStateMachine.confirm_removal(db, matched_itm, stored_items, detected_regions, threshold_low=th_low)
-                broadcasts.append({
-                    "channel": "cart",
-                    "event": "ITEM_REMOVED",
-                    "data": {
-                        "item_id": matched_itm.id,
+                confirmed = CartStateMachine.confirm_removal(
+                    db, matched_itm, stored_items, detected_regions, threshold_low=th_low
+                )
+                if confirmed:
+                    confirmed_removing_ids.add(matched_itm.id)
+                    broadcasts.append({
+                        "channel": "cart",
+                        "event": "ITEM_REMOVED",
+                        "data": {
+                            "item_id": matched_itm.id,
+                            "product_name": matched_itm.product.name,
+                            "barcode": matched_itm.product.barcode,
+                            "status": "REMOVED",
+                            "subtotal": active_session.subtotal_amount,
+                            "total": active_session.total_amount,
+                            "message": f"'{matched_itm.product.name}' removed from cart."
+                        }
+                    })
+                    websocket_messages.append({
+                        "type": "verification_result",
+                        "action": "ITEM_REMOVED",
                         "product_name": matched_itm.product.name,
-                        "barcode": matched_itm.product.barcode,
-                        "status": "REMOVED",
-                        "subtotal": active_session.subtotal_amount,
-                        "total": active_session.total_amount,
-                        "message": f"'{matched_itm.product.name}' removed from cart."
-                    }
-                })
-                websocket_messages.append({
-                    "type": "verification_result",
-                    "action": "ITEM_REMOVED",
-                    "product_name": matched_itm.product.name,
-                    "status": "REMOVED"
-                })
+                        "status": "REMOVED"
+                    })
+                else:
+                    websocket_messages.append({
+                        "type": "verification_result",
+                        "action": "REMOVAL_STILL_IN_CART",
+                        "product_name": matched_itm.product.name,
+                        "status": "REMOVING",
+                        "message": f"We still see '{matched_itm.product.name}' in the cart. Please take it out."
+                    })
             elif matched_itm and matched_itm.status == "VERIFIED" and not has_pending:
                 missing_item, missing_conf, top_cands = CartStateMachine.identify_missing_item(
                     stored_items=stored_items,
@@ -432,6 +445,36 @@ def _run_sync_judgement(
                     "product_name": missing_snap.product_name,
                     "confidence": missing_conf
                 })
+
+        # Handle REMOVING items that lacked a stored crop_embedding (e.g. staff-approved items)
+        for itm in verified_items:
+            if (
+                itm.status == "REMOVING"
+                and itm.id not in confirmed_removing_ids
+                and not itm.crop_embedding
+                and len(detected_regions) < len(verified_items)
+            ):
+                if CartStateMachine.confirm_removal(db, itm, stored_items, detected_regions, threshold_low=th_low):
+                    confirmed_removing_ids.add(itm.id)
+                    broadcasts.append({
+                        "channel": "cart",
+                        "event": "ITEM_REMOVED",
+                        "data": {
+                            "item_id": itm.id,
+                            "product_name": itm.product.name,
+                            "barcode": itm.product.barcode,
+                            "status": "REMOVED",
+                            "subtotal": active_session.subtotal_amount,
+                            "total": active_session.total_amount,
+                            "message": f"'{itm.product.name}' removed from cart."
+                        }
+                    })
+                    websocket_messages.append({
+                        "type": "verification_result",
+                        "action": "ITEM_REMOVED",
+                        "product_name": itm.product.name,
+                        "status": "REMOVED"
+                    })
 
         # 5. R8: Automatic clearance when cart view matches scanned list
         if not full_match.unmatched_items and not full_match.unmatched_objects and not has_pending:
