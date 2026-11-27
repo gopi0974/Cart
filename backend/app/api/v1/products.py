@@ -115,13 +115,22 @@ def create_product(
     """Add a new product to supermarket inventory."""
     existing = db.query(Product).filter(Product.barcode == prod_in.barcode).first()
     if existing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Product with barcode '{prod_in.barcode}' already exists ('{existing.name}'). Please provide a unique barcode."
-        )
-
-    product = Product(**prod_in.model_dump())
-    db.add(product)
+        if not existing.is_deleted and existing.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Product with barcode '{prod_in.barcode}' already exists ('{existing.name}'). Please provide a unique barcode."
+            )
+        # Reactivate and update previously soft-deleted product so its barcode can be reused cleanly
+        for field, value in prod_in.model_dump().items():
+            setattr(existing, field, value)
+        existing.is_deleted = False
+        existing.is_active = True
+        existing.quality_score = None
+        existing.images.clear()
+        product = existing
+    else:
+        product = Product(**prod_in.model_dump())
+        db.add(product)
     db.commit()
     db.refresh(product)
     catalog_cache.invalidate()
@@ -427,6 +436,8 @@ async def bulk_upload_csv(
                 existing.stock_quantity = stock
                 if image_url:
                     existing.primary_image_url = image_url
+                existing.is_deleted = False
+                existing.is_active = True
             else:
                 new_p = Product(
                     barcode=barcode,
