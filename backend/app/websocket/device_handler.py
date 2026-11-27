@@ -7,6 +7,7 @@ from datetime import datetime
 import numpy as np
 from typing import Optional, Any, Dict
 from fastapi import WebSocket, WebSocketDisconnect
+from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.cart import Cart
@@ -250,7 +251,10 @@ def _run_sync_judgement(
 
         pending_item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
-            CartItem.status == "PENDING",
+            or_(
+                CartItem.status == "PENDING",
+                and_(CartItem.status == "WARNING", CartItem.warning_reason == "REPOSITION"),
+            ),
             CartItem.staff_approved.is_(False)
         ).order_by(CartItem.scanned_at.desc()).first()
 
@@ -349,7 +353,7 @@ def _run_sync_judgement(
                     "product_name": matched_itm.product.name,
                     "status": "REMOVED"
                 })
-            elif matched_itm and matched_itm.status == "VERIFIED":
+            elif matched_itm and matched_itm.status == "VERIFIED" and not has_pending:
                 missing_item, missing_conf, top_cands = CartStateMachine.identify_missing_item(
                     stored_items=stored_items,
                     detected_regions=detected_regions,
@@ -439,6 +443,7 @@ def _run_sync_judgement(
                     Alert.violation_type.in_([
                         ViolationType.UNSCANNED_ADD.value,
                         ViolationType.UNAUTHORIZED_REMOVE.value,
+                        ViolationType.WRONG_ITEM_PLACED.value,
                         ViolationType.CART_NOT_EMPTY_AT_START.value,
                     ]),
                 )
@@ -531,7 +536,7 @@ def _run_sync_judgement(
                     open_alerts = db.query(Alert).filter(
                         Alert.session_id == active_session.id,
                         (Alert.alert_type.in_(["UNSCANNED_ITEM", "NEEDS_STAFF_CHECK", "FACE_IN_PACKAGING_WITHHELD", "MISMATCH_ITEM"])) |
-                        (Alert.violation_type.in_([ViolationType.UNSCANNED_ADD.value, ViolationType.WRONG_ITEM_REMOVED.value])),
+                        (Alert.violation_type.in_([ViolationType.UNSCANNED_ADD.value, ViolationType.WRONG_ITEM_REMOVED.value, ViolationType.WRONG_ITEM_PLACED.value])),
                         Alert.status == "OPEN"
                     ).all()
                     for al in open_alerts:
@@ -608,7 +613,7 @@ def _run_sync_judgement(
                         db=db,
                         session_id=active_session.id,
                         cart_id=cart_id,
-                        violation_type=ViolationType.WRONG_ITEM_REMOVED,
+                        violation_type=ViolationType.WRONG_ITEM_PLACED,
                         message=reason_text,
                         evidence_path=evidence_url,
                         item_id=pending_item.id
@@ -622,8 +627,8 @@ def _run_sync_judgement(
                                 "cart_id": cart_id,
                                 "cart_number": cart_number,
                                 "session_id": active_session.id,
-                                "alert_type": "WRONG_ITEM_REMOVED",
-                                "violation_type": "WRONG_ITEM_REMOVED",
+                                "alert_type": "WRONG_ITEM_PLACED",
+                                "violation_type": "WRONG_ITEM_PLACED",
                                 "severity": "HIGH",
                                 "message": reason_text,
                                 "evidence_snapshot_url": evidence_url,
@@ -1186,7 +1191,10 @@ async def process_camera_frame(
         # Check for pending item scanned on mobile
         pending_item = db.query(CartItem).join(CartItem.product).filter(
             CartItem.session_id == active_session.id,
-            CartItem.status == "PENDING",
+            or_(
+                CartItem.status == "PENDING",
+                and_(CartItem.status == "WARNING", CartItem.warning_reason == "REPOSITION"),
+            ),
             CartItem.staff_approved.is_(False)
         ).order_by(CartItem.scanned_at.desc()).first()
 

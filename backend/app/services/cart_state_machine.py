@@ -64,6 +64,7 @@ class ViolationType(str, Enum):
     UNSCANNED_ADD = "UNSCANNED_ADD"
     UNAUTHORIZED_REMOVE = "UNAUTHORIZED_REMOVE"
     WRONG_ITEM_REMOVED = "WRONG_ITEM_REMOVED"
+    WRONG_ITEM_PLACED = "WRONG_ITEM_PLACED"
     CART_NOT_EMPTY_AT_START = "CART_NOT_EMPTY_AT_START"
 
 
@@ -376,6 +377,7 @@ class CartStateMachine:
                         ViolationType.UNSCANNED_ADD.value,
                         ViolationType.UNAUTHORIZED_REMOVE.value,
                         ViolationType.WRONG_ITEM_REMOVED.value,
+                        ViolationType.WRONG_ITEM_PLACED.value,
                         ViolationType.CART_NOT_EMPTY_AT_START.value,
                         "REMOVAL_WITHOUT_RESCAN",
                         "MISMATCH_ITEM",
