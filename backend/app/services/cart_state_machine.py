@@ -605,7 +605,12 @@ class CartStateMachine:
                     for itm in stored_items
                 ]
                 sims.sort(key=lambda s: s[1], reverse=True)
-                if len(sims) >= 2 and sims[0][1] >= th_low and sims[1][1] >= th_low:
+                if (
+                    len(sims) >= 2
+                    and sims[0][0].product_id != sims[1][0].product_id
+                    and sims[0][1] >= th_low
+                    and sims[1][1] >= th_low
+                ):
                     if abs(sims[0][1] - sims[1][1]) < 0.03:
                         requires_staff = True
                         staff_reason = (

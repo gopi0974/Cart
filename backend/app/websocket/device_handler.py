@@ -483,12 +483,19 @@ def _run_sync_judgement(
                 .filter(
                     Alert.session_id == active_session.id,
                     Alert.status == "OPEN",
-                    Alert.violation_type.in_([
-                        ViolationType.UNSCANNED_ADD.value,
-                        ViolationType.UNAUTHORIZED_REMOVE.value,
-                        ViolationType.WRONG_ITEM_PLACED.value,
-                        ViolationType.CART_NOT_EMPTY_AT_START.value,
-                    ]),
+                    (
+                        Alert.violation_type.in_([
+                            ViolationType.UNSCANNED_ADD.value,
+                            ViolationType.UNAUTHORIZED_REMOVE.value,
+                            ViolationType.WRONG_ITEM_PLACED.value,
+                            ViolationType.CART_NOT_EMPTY_AT_START.value,
+                        ])
+                        | Alert.alert_type.in_([
+                            "NEEDS_STAFF_CHECK",
+                            "UNAUTHORIZED_REMOVE",
+                            "UNSCANNED_ITEM",
+                        ])
+                    ),
                 )
                 .all()
             )

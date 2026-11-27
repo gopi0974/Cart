@@ -264,3 +264,73 @@ def test_validate_can_checkout_blocks_warning_items(db_session):
     ok, msg, reason = CartStateMachine.validate_can_checkout(sess, db_session, detected_objects_count=0)
     assert ok is False
     assert reason is not None
+
+
+@pytest.mark.anyio
+async def test_two_identical_verified_items_auto_clear_remove_alert_and_allow_checkout(db_session):
+    """R10+R8: Two verified items of the same product must not trigger ambiguous-match STAFF_CHECK and must auto-clear open UNAUTHORIZED_REMOVE alerts."""
+    from app.services.cart_state_machine import CartStateMachine
+
+    sess = CartSession(id=str(uuid.uuid4()), cart_id="cart-rules-1", status="ACTIVE", cart_empty_verified=True)
+    db_session.add(sess)
+    emb = [0.7] * 512
+    i1 = CartItem(
+        id="itm-pen-1",
+        session_id=sess.id,
+        product_id="prod-1",
+        quantity=1,
+        unit_price=20.0,
+        status="VERIFIED",
+        crop_embedding=json.dumps(emb),
+        bounding_box=json.dumps({"x": 0.1, "y": 0.1, "width": 0.2, "height": 0.2}),
+    )
+    i2 = CartItem(
+        id="itm-pen-2",
+        session_id=sess.id,
+        product_id="prod-1",
+        quantity=1,
+        unit_price=20.0,
+        status="VERIFIED",
+        crop_embedding=json.dumps(emb),
+        bounding_box=json.dumps({"x": 0.5, "y": 0.1, "width": 0.2, "height": 0.2}),
+    )
+    open_rem_alert = Alert(
+        cart_id="cart-rules-1",
+        session_id=sess.id,
+        item_id="itm-pen-1",
+        alert_type="UNAUTHORIZED_REMOVE",
+        violation_type=ViolationType.UNAUTHORIZED_REMOVE.value,
+        severity="HIGH",
+        message="This item appears to have been removed: Product One",
+        status="OPEN",
+    )
+    db_session.add_all([i1, i2, open_rem_alert])
+    db_session.commit()
+
+    tracker = get_tracker("cart-rules-1")
+    tracker.ref_background = np.zeros((240, 320, 3), dtype=np.uint8)
+    tracker.stable_start_time = time.time() - 2.0
+    tracker.stable_frame_count = 4
+
+    mock_ws = AsyncMock()
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+
+    with (
+        patch("app.ai.object_detector.object_detector.detect_all_objects", return_value=[(20, 20, 80, 80), (150, 20, 210, 80)]),
+        patch("app.ai.feature_extractor.feature_extractor.get_embedding", return_value=emb),
+    ):
+        await process_camera_frame(
+            db=db_session,
+            cart_id="cart-rules-1",
+            cart_number="CART-R1",
+            image_data=frame,
+            websocket=mock_ws,
+            hand_present=False,
+            face_present=False,
+            motion=False,
+        )
+
+    db_session.refresh(open_rem_alert)
+    assert open_rem_alert.status == "RESOLVED"
+    ok, msg, reason = CartStateMachine.validate_can_checkout(sess, db_session, detected_objects_count=2)
+    assert ok is True, msg
